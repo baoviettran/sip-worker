@@ -32,6 +32,8 @@ boundary is forced by the platform, not by preference.
 - First milestone: working registration + one call over a real transport.
 - Clean API surface exposing typed events, not internals.
 - Heavily tested, especially the message parser and transaction state machines.
+- Digest authentication (RFC 2617 per the SIP adaptation in RFC 3290/5090)
+  so `REGISTER`/`INVITE` can answer real 401/407 challenges.
 
 ## Non-Goals (v1)
 
@@ -54,6 +56,7 @@ type definitions). No layer reaches across:
 
 ```
 Layer 1  messages/      Typed message model + parser + serializer
+Layer 1.5 auth/         Digest authentication (401/407 challenge handling)
 Layer 2  transactions/  RFC 3261 §17 state machines + timers
 Layer 3  transport/     Injectable Transport interface + per-env impls
 Layer 4  ua/            UserAgent + call sessions (registration + call flows)
@@ -79,6 +82,7 @@ exports so consumers can import a slice directly:
 ```
 src/
   messages/      Layer 1 — parse/serialize, typed headers
+  auth/          Layer 1.5 — digest authentication
   transactions/  Layer 2 — RFC 3261 state machines + timers
   transport/     Layer 3 — Transport interface + per-env impls
     node/        UDP, TCP, WS (over injected dgram/net/ws)
@@ -183,9 +187,15 @@ Each instance is a state machine with an explicit `state` field and a
 transition table. An injectable clock/timer lets tests drive time
 deterministically.
 
-**Excluded in v1:** response forking (single branch only), and CANCEL/ACK
-complexity beyond the minimal INVITE/ACK pair needed to make a registration +
-one call correct.
+**Excluded in v1:** full response forking, and CANCEL/ACK complexity beyond the
+minimal INVITE/ACK pair needed to make a registration + one call correct.
+
+**Known gap — response forking.** Proxies that fork (parallel ringing across a
+user's registered devices) produce multiple responses to one request. v1's
+client transactions are single-branch: they terminate on the first successful
+response and **drop-and-log any subsequent ones** so a fork degrades to
+"forks are not supported," not "crashes." The Layer 4 integration test server
+must be configured not to fork.
 
 ---
 
@@ -228,6 +238,15 @@ that is the transaction layer's job. Transport is strictly: connect, send a
 string, receive a string, disconnect. This keeps the layers clean and avoids
 the classic bug where retransmission logic leaks into transport.
 
+**One explicit exception to "transport only deals in strings":** SIP-over-TCP has
+no message delimiter of its own, so the TCP transport must locate
+`Content-Length` and count bytes to frame messages on a stream. This means the
+TCP transport depends on **Layer 1's header parser — and only the header
+parser — purely for framing**. This is an intentional, named exception: `node/tcp.ts`
+reuses the pure header parse (`headers/tcp-framing.ts`) to find message
+boundaries, but never *constructs* SIP or cares about transaction semantics. It
+is the single permitted case of a layer reaching above itself.
+
 **Excluded in v1:** TLS/DTLS, `sips:` URIs, connection pooling, STUN/TURN. The
 first milestone only needs WebSocket (the realistic browser + Node transport
 for a client).
@@ -252,6 +271,17 @@ One per account. Owns:
 
 `REGISTER` → `200` loop, with refresh on expiry. Public ops: `register()`,
 `unregister()`. Exposes `registerState` events.
+
+### Digest authentication
+
+A new `auth/` module (Layer 1.5) computes digest responses to real 401/407
+challenges (RFC 2617, MD5, with the SIP-specific `cnonce`/`nc`/`qop`
+requirements). Flow: send `REGISTER`/`INVITE` unauthenticated → receive the
+challenge → compute the digest from the `WWW-Authenticate`/`Proxy-Authenticate`
+header → retry with `Authorization`/`Proxy-Authorization`. The UA holds the
+credentials and performs the retry transparently; the app never sees the
+challenge dance. This is what makes the "register against a real server"
+milestone real — most registrars (including Asterisk) require it.
 
 ### Call sessions
 
@@ -325,6 +355,10 @@ The stack is heavily layered, so testing is layered too:
 
 - **Layer 1 (messages):** pure unit tests — parse round-trips, malformed-input
   handling, header edge cases. No I/O.
+- **Layer 1.5 (auth):** unit tests for the digest computation — known RFC test
+  vectors (realm, nonce, cnonce, qop, nc) and the challenge→retry flow, with a
+  mock registrar that issues a 401/407 and asserts the retried request carries
+  the correct `Authorization`/`Proxy-Authorization`.
 - **Layer 2 (transactions):** deterministic timer-driven tests. The injectable
   clock runs at 1/1000× speed, so the full retransmission/timeout behavior is
   testable in milliseconds. Property tests against the RFC state transitions.
@@ -332,7 +366,10 @@ The stack is heavily layered, so testing is layered too:
   SIP server or a mock socket) for each transport.
 - **Layer 4 (UA):** end-to-end tests using a real transport against a mock SIP
   server (or a real one like Asterisk) — the "register + one call" flow as the
-  smoke test.
+  smoke test. The test server must be configured **not to fork** responses
+  (see the response-forking gap in Layer 2), and — with digest auth now in v1 —
+  will require real credentials, so the initial integration target should be a
+  local config that the test can stand up.
 - **Layer 5 (media):** the bridge protocol is tested with an in-memory
   main-thread mock; the real WebRTC handler is tested in a later spec.
 
@@ -345,9 +382,9 @@ them without string matching:
 
 - **Parse errors** (`ParseError`) — malformed input at Layer 1. Structured, with
   a position; never thrown (returned as a value).
-- **Protocol errors** (`SipError`) — SIP responses you cannot handle (401/403
-  auth, 404, 480, 486, 5xx). Carries the status code; surfaced to the app as
-  events.
+- **Protocol errors** (`SipError`) — SIP responses the UA cannot turn into a
+  valid outcome (404, 480, 486, 5xx, and 401/407 after the auth retry is
+  exhausted). Carries the status code; surfaced to the app as events.
 - **Transport errors** (`TransportError`) — connection failures, timeouts,
   disconnects. Surfaced as `TransportError` events.
 
@@ -358,7 +395,8 @@ error surface without reaching into internals.
 
 ## Success criteria (v1)
 
-1. A `UserAgent` can register and unregister against a real SIP server.
+1. A `UserAgent` can register and unregister against a real SIP server that
+   requires digest auth (proving the 401→retry flow works end-to-end).
 2. A `UserAgent` can place and receive one call, negotiating a stub SDP through
    the media bridge, and hang up cleanly.
 3. The core runs unmodified in a web worker and in Node.
