@@ -35,6 +35,8 @@ boundary is forced by the platform, not by preference.
 - Digest authentication (RFC 7616/8760: MD5 for legacy interoperability,
   SHA-256 preferred) so `REGISTER`/`INVITE` can answer real 401/407
   challenges.
+- Reliability as a first-class goal: liveness detection, worker crash
+  recovery, and tolerance for real-world (non-compliant) servers.
 
 ## Non-Goals (v1)
 
@@ -42,6 +44,7 @@ boundary is forced by the platform, not by preference.
 - IM (`MESSAGE`), presence (`SUBSCRIBE`/`NOTIFY`), transfer (`REFER`).
 - Hold/unhold, DTMF, renegotiation, multi-party.
 - TLS/DTLS, `sips:` URIs, connection pooling, STUN/TURN.
+- SIP CRLF keepalive (UDP/TCP) — WebSocket ping/pong liveness *is* in v1.
 - SIP body parsing (SDP is an opaque string), multipart, compression.
 - Anything beyond the four core methods (`REGISTER`, `INVITE`, `ACK`, `BYE`),
   plus `CANCEL`/`OPTIONS` support where the transaction layer needs it.
@@ -368,6 +371,13 @@ WebSocket message may internally consist of multiple WebSocket **frames**
 SIP layer). The adapter enforces one-message-per-WebSocket-message on send and
 maps each received WebSocket message to exactly one SIP message.
 
+**Liveness detection.** The WebSocket adapters send periodic **ping/pong**
+frames and treat a missing pong within a timeout as a dead connection, surfacing
+a `TransportError`. This catches silently-dropped NAT mappings and half-dead
+proxy connections that a logged-in UA would otherwise not notice until the next
+REGISTER refresh or a call fails. (SIP-level CRLF keepalive is a follow-up for
+UDP/TCP transports.)
+
 ### Key design point
 
 The transport does **not** implement transaction timers or retransmission —
@@ -525,6 +535,52 @@ it deals in call state transitions and SDP as opaque strings.
 
 ---
 
+## Reliability
+
+Reliability is a first-class goal, not an afterthought. The design already
+provides several strong foundations; this section makes the remaining guarantees
+explicit and adds the gaps that would otherwise surface only in production.
+
+### Built-in guarantees
+
+- **Never-throwing parser.** Malformed or hostile input yields a structured
+  `ParseError` (with a position), never an exception. Quirky servers produce
+  data, not crashes.
+- **Typed error surface.** `ParseError` / `SipError` / `TransportError` are
+  distinct and branchable, so the app can recover from each class of failure
+  without string matching.
+- **Worker isolation.** Signaling runs in a worker, so a UI crash cannot take
+  down the stack and vice versa. This is a reliability property, not just an
+  architecture choice.
+- **Virtual-clock transaction tests.** The hardest protocol is verified against
+  exact RFC state transitions rather than flaky, real-time, sleep-based tests.
+
+### v1 additions
+
+- **Liveness detection.** WebSocket ping/pong with a pong timeout (see the
+  Transport section) surfaces dead connections as `TransportError` instead of
+  failing silently.
+- **Worker crash recovery.** The app must have a defined path when the worker
+  thread dies: detect the death (a heartbeat/nack over the bridge), respawn the
+  worker, and re-register. Registration state is re-established from the
+  existing `UserAgentOptions`; the app is notified of the reset. The bridge
+  protocol defines a `workerDied`/`workerRestarted` event so the app can
+  re-issue pending calls and subscriptions.
+- **Tolerance engineering.** The parser is deliberately lenient where the RFC
+  allows it, and is loosened further based on real-servers-in-the-wild
+  integration results (see Testing). This is the primary mitigation for
+  from-scratch interop risk — matching RFC intent is not the same as matching
+  every imperfect server.
+
+### Known trade-offs
+
+- **NAT/keepalive is WebSocket-only in v1.** SIP-level CRLF keepalive for
+  UDP/TCP is a follow-up; WebSocket liveness covers the realistic v1 transport.
+- **No re-INVITE/transfer/DTMF in v1** means those failure modes are deferred by
+  design (they are in the broader feature roadmap, not discarded).
+
+---
+
 ## Testing
 
 The stack is heavily layered, so testing is layered too:
@@ -546,12 +602,19 @@ The stack is heavily layered, so testing is layered too:
 - **Transport:** integration tests against a loopback server (a local SIP server
   or a mock socket) for each transport, plus `SipStreamDecoder` framing tests
   (multibyte UTF-8 bodies, chunked arrival, `Content-Length` byte counting).
+  Liveness tests: a WebSocket whose pong is withheld surfaces `TransportError`
+  within the timeout; a NAT-dropped connection is detected rather than hanging.
 - **UA:** end-to-end tests using a real transport against a mock SIP server (or
   a real one like Asterisk) — the "register + one call" flow as the smoke test.
   The test server must be configured **not to fork** responses (see the
   response-forking note in transactions), and — with digest auth in v1 — will
   require real credentials, so the initial integration target should be a local
   config the test can stand up.
+- **Reliability:** a worker-death test — kill the worker, assert the app
+  receives `workerDied`/`workerRestarted`, and that re-registration succeeds
+  with correct `Call-ID`/`CSeq` continuity. A tolerance test feeds a corpus of
+  non-compliant but real-world server messages and asserts none of them crash
+  the parser or take the stack down.
 - **Media:** the bridge protocol is tested with an in-memory main-thread mock;
   the real WebRTC handler is tested in a later spec.
 
@@ -589,3 +652,8 @@ clean, typed error surface without reaching into internals.
 5. The public API exposes typed events and typed errors — no internals leak.
 6. The transport carries bytes (not strings) and the WebSocket adapter
    negotiates the `sip` subprotocol per RFC 7118.
+7. Liveness detection surfaces a dead WebSocket connection as a `TransportError`
+   within a bounded timeout, and the worker-recovery path (death → respawn →
+   re-register) succeeds with correct `Call-ID`/`CSeq` continuity.
+8. A corpus of non-compliant but real-world server messages never crashes the
+   parser or takes the stack down.
