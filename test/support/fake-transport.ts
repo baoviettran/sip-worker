@@ -8,6 +8,8 @@ import { TransportError } from '../../src/errors.js';
 export class FakeTransport implements Transport {
   readonly capabilities: TransportCapabilities;
   readonly sent: Uint8Array[] = [];
+  /** Optional hook invoked synchronously on every send (before the bytes are pushed). */
+  onSend?: (bytes: Uint8Array) => void;
   private connected = false;
   private closed = false;
   private disconnectedEmitted = false;
@@ -38,6 +40,7 @@ export class FakeTransport implements Transport {
       throw new TransportError('FakeTransport is not connected');
     }
     this.sent.push(data.slice());
+    if (this.onSend !== undefined) this.onSend(data);
   }
 
   subscribe(listener: (event: TransportEvent) => void): () => void {
