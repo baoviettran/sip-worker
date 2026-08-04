@@ -11,6 +11,7 @@ const COMPACT: Record<string, string> = {
   v: 'Via', f: 'From', t: 'To', i: 'Call-ID', m: 'Contact', l: 'Content-Length', c: 'Content-Type',
 };
 
+const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8');
 const HEADER_NAME_CHAR_RE = /[!#$%&'*+.^_`|~0-9A-Za-z-]/;
 
@@ -40,18 +41,30 @@ export function parseMessage(input: Uint8Array): ParseResult<SipMessage> {
   const startField = startLineType(startLine.text);
   if (startField === 'bad') return fail(startLine.offset, 'malformed start line');
 
-  const rows: Array<{ name: string; value: string; offset: number; valueOffset: number }> = [];
+  const rows: Array<{ name: string; value: string; valueOffset: number; valueOffsets: number[] }> = [];
 
   for (let i = 1; i < lines.length; i += 1) {
     const line = lines[i]!;
     if (line.type === 'blank') continue;
     if (line.type === 'continuation') {
       if (rows.length === 0) return fail(line.offset, 'continuation without a header');
-      const unfurled = line.text.replace(/^[ \t]+/, '');
-      const prev = rows[rows.length - 1]!.value;
-      const trimmed = prev.trimEnd();
-      const rest = unfurled.trimStart();
-      rows[rows.length - 1]!.value = rest.length === 0 ? trimmed : trimmed + (trimmed === '' ? '' : ' ') + rest;
+      const row = rows[rows.length - 1]!;
+      const trimmed = row.value.trimEnd();
+      const trimmedOffsets = row.valueOffsets.slice(0, trimmed.length);
+      const rest = line.text.trimStart();
+      const restStart = line.text.length - rest.length;
+      const restOffset = line.offset + encoder.encode(line.text.slice(0, restStart)).byteLength;
+      const restOffsets = byteOffsetsForText(rest, restOffset);
+      if (rest.length === 0) {
+        row.value = trimmed;
+        row.valueOffsets = trimmedOffsets;
+      } else if (trimmed === '') {
+        row.value = rest;
+        row.valueOffsets = restOffsets;
+      } else {
+        row.value = trimmed + ' ' + rest;
+        row.valueOffsets = [...trimmedOffsets, line.offset, ...restOffsets];
+      }
       continue;
     }
     if (line.type === 'invalid') return fail(line.offset, 'malformed header line');
@@ -71,8 +84,9 @@ export function parseMessage(input: Uint8Array): ParseResult<SipMessage> {
     const afterColon = line.text.slice(colon + 1);
     const leadingSpaces = afterColon.length - afterColon.trimStart().length;
     const value = afterColon.trim();
-    const valueOffset = line.offset + colon + 1 + leadingSpaces;
-    rows.push({ name: canonical, value, offset: line.offset, valueOffset });
+    const valueOffset = line.offset + encoder.encode(line.text.slice(0, colon + 1 + leadingSpaces)).byteLength;
+    const valueOffsets = byteOffsetsForText(value, valueOffset);
+    rows.push({ name: canonical, value, valueOffset, valueOffsets });
   }
 
   let contentLength: number | undefined;
@@ -80,7 +94,11 @@ export function parseMessage(input: Uint8Array): ParseResult<SipMessage> {
 
   for (const row of rows) {
     if (row.name === 'Content-Length') {
-      if (!/^\d+$/.test(row.value)) return fail(row.valueOffset, 'non-decimal Content-Length');
+      const invalidIndex = row.value.search(/[^0-9]/);
+      if (row.value === '' || invalidIndex >= 0) {
+        const invalidOffset = invalidIndex >= 0 ? row.valueOffsets[invalidIndex] : undefined;
+        return fail(invalidOffset ?? row.valueOffset, 'non-decimal Content-Length');
+      }
       const n = Number(row.value);
       if (contentLength !== undefined && contentLength !== n) {
         return fail(row.valueOffset, 'conflicting Content-Length');
@@ -185,4 +203,16 @@ function classify(text: string, byteStart: number): Line {
   if (text.startsWith(' ') || text.startsWith('\t')) return { type: 'continuation', text, offset: byteStart };
   if (text.includes(':') || text.includes(' ')) return { type: 'header', text, offset: byteStart };
   return { type: 'invalid', text, offset: byteStart };
+}
+
+function byteOffsetsForText(text: string, byteStart: number): number[] {
+  const offsets: number[] = [];
+  let byteOffset = byteStart;
+  for (const codePoint of text) {
+    for (let i = 0; i < codePoint.length; i += 1) {
+      offsets.push(byteOffset);
+    }
+    byteOffset += encoder.encode(codePoint).byteLength;
+  }
+  return offsets;
 }

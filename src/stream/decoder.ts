@@ -2,7 +2,7 @@ import { ParseError } from '../errors.js';
 import type { ParseResult } from '../messages/message.js';
 import { MAX_BODY, MAX_HEADER_BLOCK } from '../messages/parser.js';
 
-const DIGITS_RE = /^\d+$/;
+const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8');
 
 function failAt<T>(offset: number, message: string): ParseResult<T> {
@@ -116,19 +116,19 @@ function contentLength(header: Uint8Array): ParseResult<{ len: number; offset: n
     const lower = name.toLowerCase();
     if (lower !== 'content-length' && lower !== 'l') continue;
 
-    const value = line.value.slice(colon + 1).trim();
-    const afterColon = line.value.slice(colon + 1);
-    const leadingSpaces = afterColon.length - afterColon.trimStart().length;
-    const valueOffset = line.byteOffset + colon + 1 + leadingSpaces;
-    if (!DIGITS_RE.test(value)) return failAt(valueOffset, 'non-decimal Content-Length');
-    const len = Number(value);
-    if (first !== undefined && first.len !== len) return failAt(valueOffset, 'conflicting Content-Length');
-    if (first === undefined) first = { len, offset: valueOffset };
+    const value = trimMappedLine(sliceMappedLine(line, colon + 1));
+    const invalidIndex = value.value.search(/[^0-9]/);
+    if (value.value === '' || invalidIndex >= 0) {
+      return failAt(value.valueOffsets[invalidIndex] ?? value.byteOffset, 'non-decimal Content-Length');
+    }
+    const len = Number(value.value);
+    if (first !== undefined && first.len !== len) return failAt(value.byteOffset, 'conflicting Content-Length');
+    if (first === undefined) first = { len, offset: value.byteOffset };
   }
   return { ok: true, value: first ?? { len: 0, offset: 0 } };
 }
 
-interface HeaderLine { value: string; byteOffset: number }
+interface HeaderLine { value: string; byteOffset: number; valueOffsets: number[] }
 
 function splitHeaderLines(bytes: Uint8Array): HeaderLine[] {
   const out: HeaderLine[] = [];
@@ -137,7 +137,7 @@ function splitHeaderLines(bytes: Uint8Array): HeaderLine[] {
   while (pos < bytes.length) {
     const at = bytes[pos]!;
     if (at === 13 || at === 10) {
-      out.push({ value: decoder.decode(bytes.slice(start, pos)), byteOffset: start });
+      out.push(mappedHeaderLine(decoder.decode(bytes.slice(start, pos)), start));
       if (at === 13 && pos + 1 < bytes.length && bytes[pos + 1] === 10) pos += 1;
       pos += 1;
       start = pos;
@@ -145,7 +145,7 @@ function splitHeaderLines(bytes: Uint8Array): HeaderLine[] {
       pos += 1;
     }
   }
-  if (start < pos) out.push({ value: decoder.decode(bytes.slice(start, pos)), byteOffset: start });
+  if (start < pos) out.push(mappedHeaderLine(decoder.decode(bytes.slice(start, pos)), start));
   return out;
 }
 
@@ -156,13 +156,59 @@ function unfoldHeaderLines(lines: HeaderLine[]): ParseResult<HeaderLine[]> {
       if (out.length === 0) {
         return failAt(line.byteOffset, 'continuation without a header');
       }
-      const prev = out[out.length - 1]!.value;
-      const trimmed = prev.trimEnd();
-      const rest = line.value.trimStart();
-      out[out.length - 1]!.value = rest.length === 0 ? trimmed : trimmed + (trimmed === '' ? '' : ' ') + rest;
+      const previous = trimEndMappedLine(out[out.length - 1]!);
+      const rest = trimStartMappedLine(line);
+      if (rest.value === '') {
+        out[out.length - 1] = previous;
+      } else if (previous.value === '') {
+        out[out.length - 1] = rest;
+      } else {
+        out[out.length - 1] = {
+          value: previous.value + ' ' + rest.value,
+          byteOffset: previous.byteOffset,
+          valueOffsets: [...previous.valueOffsets, line.byteOffset, ...rest.valueOffsets],
+        };
+      }
     } else {
       out.push(line);
     }
   }
   return { ok: true, value: out };
+}
+
+function mappedHeaderLine(value: string, byteOffset: number): HeaderLine {
+  return { value, byteOffset, valueOffsets: byteOffsetsForText(value, byteOffset) };
+}
+
+function sliceMappedLine(line: HeaderLine, start: number, end: number = line.value.length): HeaderLine {
+  const valueOffsets = line.valueOffsets.slice(start, end);
+  const byteOffset =
+    valueOffsets[0] ??
+    line.byteOffset + encoder.encode(line.value.slice(0, start)).byteLength;
+  return { value: line.value.slice(start, end), byteOffset, valueOffsets };
+}
+
+function trimStartMappedLine(line: HeaderLine): HeaderLine {
+  const trimmed = line.value.trimStart();
+  return sliceMappedLine(line, line.value.length - trimmed.length);
+}
+
+function trimEndMappedLine(line: HeaderLine): HeaderLine {
+  return sliceMappedLine(line, 0, line.value.trimEnd().length);
+}
+
+function trimMappedLine(line: HeaderLine): HeaderLine {
+  return trimEndMappedLine(trimStartMappedLine(line));
+}
+
+function byteOffsetsForText(text: string, byteStart: number): number[] {
+  const offsets: number[] = [];
+  let byteOffset = byteStart;
+  for (const codePoint of text) {
+    for (let i = 0; i < codePoint.length; i += 1) {
+      offsets.push(byteOffset);
+    }
+    byteOffset += encoder.encode(codePoint).byteLength;
+  }
+  return offsets;
 }

@@ -218,4 +218,18 @@ describe('parseMessage', () => {
     if (!r.ok) throw new Error(r.error.message);
     expect(r.value.headers.get('X')).toBe('a');
   });
+
+  it('reports the exact invalid Content-Length byte for ordinary and folded values', () => {
+    const inputs = [
+      'MESSAGE sip:b SIP/2.0\r\nContent-Length: 12x\r\n\r\n',
+      'MESSAGE sip:b SIP/2.0\r\nContent-Length:\r\n x\r\n\r\n',
+    ];
+
+    for (const input of inputs) {
+      const result = parseMessage(encoder.encode(input));
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error('expected invalid Content-Length');
+      expect(result.error.offset).toBe(input.indexOf('x'));
+    }
+  });
 });

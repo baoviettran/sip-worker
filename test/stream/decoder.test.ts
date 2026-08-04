@@ -373,4 +373,18 @@ describe('SipStreamDecoder', () => {
     if (!result.ok) throw new Error(result.error.message);
     expect(result.value).toHaveLength(3);
   });
+
+  it('reports the exact invalid Content-Length byte for ordinary and folded values', () => {
+    const inputs = [
+      'MESSAGE sip:b SIP/2.0\r\nContent-Length: 12x\r\n\r\n',
+      'MESSAGE sip:b SIP/2.0\r\nContent-Length:\r\n x\r\n\r\n',
+    ];
+
+    for (const input of inputs) {
+      const result = new SipStreamDecoder().push(encoder.encode(input));
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error('expected invalid Content-Length');
+      expect(result.error.offset).toBe(input.indexOf('x'));
+    }
+  });
 });
