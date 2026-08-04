@@ -360,4 +360,17 @@ describe('SipStreamDecoder', () => {
     if (!fresh.ok) throw new Error(fresh.error.message);
     expect(fresh.value).toHaveLength(1);
   });
+
+  it('accepts three large valid messages in one push', () => {
+    const body = new Uint8Array(600000).fill(0x61);
+    const message = concat(
+      encoder.encode('MESSAGE sip:b SIP/2.0\r\nContent-Length: 600000\r\n\r\n'),
+      body,
+    );
+
+    const result = new SipStreamDecoder().push(concat(message, message, message));
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.message);
+    expect(result.value).toHaveLength(3);
+  });
 });

@@ -55,10 +55,6 @@ export class SipStreamDecoder {
         out.push(this.rx.slice(0, this.frameLen));
         this.rx = this.rx.subarray(this.frameLen);
         this.frameLen = undefined;
-        // Check pending buffer size after consuming a complete frame
-        if (this.rx.length > MAX_HEADER_BLOCK + MAX_BODY + 4) {
-          return this.failAndReset(0, 'stream buffer too large');
-        }
       } else {
         break; // wait for the remaining body octets
       }
