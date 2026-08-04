@@ -280,4 +280,68 @@ describe('SipStreamDecoder', () => {
     if (!r.ok) throw new Error(r.error.message);
     expect(r.value).toHaveLength(2);
   });
+
+  // C1: folded Content-Length where continuation forms valid decimal
+  it('accepts folded Content-Length that forms a valid decimal when first value is empty', () => {
+    const msg = encoder.encode('MESSAGE sip:b SIP/2.0\r\nContent-Length:\r\n 5\r\n\r\nhello');
+    const d = new SipStreamDecoder();
+    const r = d.push(msg);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value).toHaveLength(1);
+    expect(bodyText(r.value[0]!)).toBe('hello');
+  });
+
+  // I1: decoder reports value byte offset for bad Content-Length
+  it('reports offset of the first value byte for non-decimal Content-Length', () => {
+    const msg = encoder.encode('MESSAGE sip:b SIP/2.0\r\nContent-Length: abc\r\n\r\n');
+    // Parser reports offset 39 (same input — byte offset of 'a' in 'abc')
+    const d = new SipStreamDecoder();
+    const r = d.push(msg);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected error');
+    expect(r.error.message).toMatch(/Content-Length/i);
+    expect(r.error.offset).toBe(39);
+  });
+
+  // I2: round-trip decoder → parser for folded Content-Length
+  it('round-trips folded Content-Length through decoder then parser', () => {
+    const msg = encoder.encode('MESSAGE sip:b SIP/2.0\r\nContent-Length:\r\n 5\r\n\r\nhello');
+    const d = new SipStreamDecoder();
+    const r = d.push(msg);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value).toHaveLength(1);
+    const parsed = parseMessage(r.value[0]!);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    expect(decoder.decode(parsed.value.body)).toBe('hello');
+  });
+
+  it('round-trips a normal (non-folded) message through decoder then parser', () => {
+    const d = new SipStreamDecoder();
+    const r = d.push(MSG);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value).toHaveLength(1);
+    const parsed = parseMessage(r.value[0]!);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    expect(decoder.decode(parsed.value.body)).toBe('café');
+  });
+
+  // I4: whitespace-only continuation
+  it('does not append trailing space for whitespace-only continuation', () => {
+    const msg = encoder.encode('MESSAGE sip:b SIP/2.0\r\nX: a\r\n\t\r\nContent-Length: 0\r\n\r\n');
+    const d = new SipStreamDecoder();
+    const r = d.push(msg);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value).toHaveLength(1);
+    // Re-parse to inspect headers
+    const parsed = parseMessage(r.value[0]!);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    expect(parsed.value.headers.get('X')).toBe('a');
+  });
 });

@@ -48,7 +48,10 @@ export function parseMessage(input: Uint8Array): ParseResult<SipMessage> {
     if (line.type === 'continuation') {
       if (rows.length === 0) return fail(line.offset, 'continuation without a header');
       const unfurled = line.text.replace(/^[ \t]+/, '');
-      rows[rows.length - 1]!.value = rows[rows.length - 1]!.value.trimEnd() + ' ' + unfurled.trimStart();
+      const prev = rows[rows.length - 1]!.value;
+      const trimmed = prev.trimEnd();
+      const rest = unfurled.trimStart();
+      rows[rows.length - 1]!.value = rest.length === 0 ? trimmed : trimmed + (trimmed === '' ? '' : ' ') + rest;
       continue;
     }
     if (line.type === 'invalid') return fail(line.offset, 'malformed header line');

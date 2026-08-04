@@ -120,10 +120,13 @@ function contentLength(header: Uint8Array): ParseResult<{ len: number; offset: n
     if (lower !== 'content-length' && lower !== 'l') continue;
 
     const value = line.value.slice(colon + 1).trim();
-    if (!DIGITS_RE.test(value)) return failAt(line.byteOffset, 'non-decimal Content-Length');
+    const afterColon = line.value.slice(colon + 1);
+    const leadingSpaces = afterColon.length - afterColon.trimStart().length;
+    const valueOffset = line.byteOffset + colon + 1 + leadingSpaces;
+    if (!DIGITS_RE.test(value)) return failAt(valueOffset, 'non-decimal Content-Length');
     const len = Number(value);
-    if (first !== undefined && first.len !== len) return failAt(line.byteOffset, 'conflicting Content-Length');
-    if (first === undefined) first = { len, offset: line.byteOffset };
+    if (first !== undefined && first.len !== len) return failAt(valueOffset, 'conflicting Content-Length');
+    if (first === undefined) first = { len, offset: valueOffset };
   }
   return { ok: true, value: first ?? { len: 0, offset: 0 } };
 }
@@ -154,7 +157,10 @@ function unfoldHeaderLines(lines: HeaderLine[]): HeaderLine[] {
   for (const line of lines) {
     if (line.value.startsWith(' ') || line.value.startsWith('\t')) {
       if (out.length === 0) continue;
-      out[out.length - 1]!.value = out[out.length - 1]!.value.trimEnd() + ' ' + line.value.trimStart();
+      const prev = out[out.length - 1]!.value;
+      const trimmed = prev.trimEnd();
+      const rest = line.value.trimStart();
+      out[out.length - 1]!.value = rest.length === 0 ? trimmed : trimmed + (trimmed === '' ? '' : ' ') + rest;
     } else {
       out.push(line);
     }

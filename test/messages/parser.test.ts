@@ -202,4 +202,20 @@ describe('parseMessage', () => {
     if (r.ok) throw new Error('expected error');
     expect(r.error.offset).toBe(26); // offset of space in 'Bad Header'
   });
+
+  // C1: folded Content-Length where continuation forms valid decimal
+  it('accepts folded Content-Length that forms a valid decimal when first value is empty', () => {
+    const r = parseMessage(encoder.encode('MESSAGE sip:b SIP/2.0\r\nContent-Length:\r\n 5\r\n\r\nhello'));
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(decoder.decode(r.value.body)).toBe('hello');
+  });
+
+  // I4: whitespace-only continuation
+  it('does not append trailing space for whitespace-only continuation', () => {
+    const r = parseMessage(encoder.encode('MESSAGE sip:b SIP/2.0\r\nX: a\r\n\t\r\nContent-Length: 0\r\n\r\n'));
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.headers.get('X')).toBe('a');
+  });
 });
