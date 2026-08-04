@@ -42,8 +42,7 @@ export function bodyText(msg: SipMessage): string {
 }
 
 export function withTextBody(msg: SipMessage, body: string, contentType: string): SipMessage {
-  const headers = new Headers();
-  for (const [k, v] of msg.headers.entries()) headers.set(k, v);
+  const headers = msg.headers.clone();
   headers.set('Content-Type', contentType);
   return { ...msg, headers, body: encoder.encode(body) };
 }

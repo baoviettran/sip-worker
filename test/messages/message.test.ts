@@ -61,4 +61,14 @@ describe('message model', () => {
     expect(m2.headers.get('Via')).toBe('one');
     expect(m2.headers.get('Content-Type')).toBe('text/plain');
   });
+
+  it('withTextBody preserves repeated headers in order', () => {
+    const h = new Headers();
+    h.append('Via', 'one');
+    h.append('Via', 'two');
+    const m = makeRequest('INVITE', 'sip:b@host', h);
+    const m2 = withTextBody(m, 'hello', 'text/plain');
+    expect(m2.headers.getAll('Via')).toEqual(['one', 'two']);
+    expect(m2.headers.get('Content-Type')).toBe('text/plain');
+  });
 });
