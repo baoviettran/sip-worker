@@ -1,0 +1,20 @@
+{
+  "name": "sip-worker",
+  "version": "0.1.0",
+  "type": "module",
+  "files": ["dist"],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "require": "./dist/index.cjs" },
+    "./messages": { "types": "./dist/messages/index.d.ts", "import": "./dist/messages/index.js", "require": "./dist/messages/index.cjs" }
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:package": "npm run build && node test/package/exports.test.mjs"
+  },
+  "devDependencies": { "tsup": "^8.0.0", "typescript": "^5.5.0", "vitest": "^2.0.0" }
+}
