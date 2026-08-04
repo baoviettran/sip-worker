@@ -192,13 +192,19 @@ describe('NodeTcpTransport', () => {
 
   it('is one-shot: a failed connect permanently closes the transport', async () => {
     const { socket, transport } = createTransport();
+    const events: TransportEvent[] = [];
     const cause = new Error('connect failed');
+    transport.subscribe((event) => events.push(event));
 
     const pending = transport.connect();
     socket.emit('error', cause);
     await expect(pending).rejects.toMatchObject({ name: 'TransportError', cause });
     await expect(transport.connect()).rejects.toBeInstanceOf(TransportError);
     expect(transport.isConnected()).toBe(false);
+    expect(events).toContainEqual({
+      type: 'disconnected',
+      error: expect.objectContaining({ name: 'TransportError', cause }),
+    });
   });
 
   it('settles disconnect once, rejects post-close sends, and removes socket listeners', async () => {

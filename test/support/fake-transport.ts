@@ -3,7 +3,7 @@ import type {
   TransportCapabilities,
   TransportEvent,
 } from '../../src/transport/index.js';
-import type { TransportError } from '../../src/errors.js';
+import { TransportError } from '../../src/errors.js';
 
 export class FakeTransport implements Transport {
   readonly capabilities: TransportCapabilities;
@@ -19,7 +19,7 @@ export class FakeTransport implements Transport {
 
   async connect(): Promise<void> {
     if (this.closed) {
-      throw new Error('FakeTransport is closed');
+      throw new TransportError('FakeTransport is closed');
     }
     if (this.connected) return;
     this.connected = true;
@@ -35,7 +35,7 @@ export class FakeTransport implements Transport {
 
   async send(data: Uint8Array): Promise<void> {
     if (!this.connected || this.closed) {
-      throw new Error('FakeTransport is not connected');
+      throw new TransportError('FakeTransport is not connected');
     }
     this.sent.push(data.slice());
   }

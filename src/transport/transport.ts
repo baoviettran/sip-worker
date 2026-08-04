@@ -16,9 +16,10 @@ export type TransportEvent =
  *
  * Lifecycle: a `Transport` instance owns one connection attempt. `connect()`
  * resolves when the connection is established (or rejects on failure), and
- * `disconnect()` resolves when the connection is fully torn down. After either
- * `disconnect()` or a failed `connect()`, the instance is closed and further
- * `connect()` calls reject — reconnecting requires a new instance.
+ * `disconnect()` resolves once the connection is fully torn down (or rejects
+ * on teardown failure). After either `disconnect()` or a failed `connect()`,
+ * the instance is closed and further `connect()` calls reject — reconnecting
+ * requires a new instance.
  *
  * Sends: `send()` resolves when the bytes are handed to the underlying socket
  * (fire-and-forget), not when they reach the peer. Callers get no delivery
