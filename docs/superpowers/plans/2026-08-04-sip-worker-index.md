@@ -91,11 +91,25 @@ export interface TransactionLayer {
 
 The layer registers the top Via branch before the first send and removes it on termination. It creates non-2xx ACKs with the original INVITE branch. Dialog/session code creates 2xx ACKs with the INVITE numeric CSeq and a new branch.
 
+## Plan 03 Handoff (deferred items)
+
+Phase 3 (transactions + dialogs) is merged and pushed. The following were deliberately deferred and are NOT yet fixed. Phase 4 builds on the dialog/transaction layer, so the first item is a real cross-phase concern; the rest are Phase-3-internal polish that is safe to fold in or leave.
+
+**Phase 4 must fold in:**
+- `Dialog.makeTopVia` hardcodes the sent-by as `SIP/2.0/UDP 192.0.2.1:5060` (`src/dialogs/dialog.ts`). Phase 4 builds real REGISTER and outbound in-dialog requests, so the sent-by must come from the actual transport/socket rather than a fixed value. Wire the transport's real sent-by (host/port/protocol) into Via construction.
+
+**Phase-3-internal polish (available to fix, not blocking):**
+- `forward()` in `src/transactions/coordinator.ts` deletes the key from BOTH client and server maps on one `terminated` event; client/server keys share the `branch|method` shape and can collide (`branch|INVITE`). Harmless in practice (branches are unique per endpoint), but the helper could take the owning map to be precise.
+- `buildNon2xxAck` (`src/transactions/ack.ts`) clones the entire header set, a superset of the RFC-required headers (Route, From, Call-ID, Max-Forwards, Via); a targeted copy would be tighter.
+- DRY: `cseqMethod` is duplicated in `src/transactions/invite-client.ts` and `src/transactions/non-invite-client.ts`; `contactUri` in `src/dialogs/dialog.ts` re-implements the `<...>` extraction that `extractUri` in `src/dialogs/header-values.ts` already provides.
+- `transportError` is dropped if a late send rejects after the transaction already reached `Terminated` (all four machines) — arguably correct, but untested.
+- Coverage gaps: a non-ACK duplicate in `Confirmed` is not tested; `sendResponse` as a no-op in `Terminated` is not tested; no reliable-INVITE `Confirmed` test (I=0 never exercised).
+
 ## Execution Order
 
 1. [x] [Plan 01 — Codec and package](./2026-08-04-01-codec-and-package.md)
 2. [x] [Plan 02 — Transport and ingress](./2026-08-04-02-transport-and-ingress.md)
-3. [ ] [Plan 03 — Transactions and dialogs](./2026-08-04-03-transactions-and-dialogs.md)
+3. [x] [Plan 03 — Transactions and dialogs](./2026-08-04-03-transactions-and-dialogs.md)
 4. [ ] [Plan 04 — Authentication and registration](./2026-08-04-04-auth-and-registration.md)
 5. [ ] [Plan 05 — Calls and media](./2026-08-04-05-calls-and-media.md)
 6. [ ] [Plan 06 — Reliability and release](./2026-08-04-06-reliability-and-release.md)
