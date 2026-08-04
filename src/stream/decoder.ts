@@ -106,11 +106,12 @@ function findTerminator(bytes: Uint8Array): { index: number; len: number } | und
  * repeated values must agree numerically. All offsets are true byte offsets.
  */
 function contentLength(header: Uint8Array): ParseResult<{ len: number; offset: number }> {
-  const lines = splitHeaderLines(header);
-  const unfolded = unfoldHeaderLines(lines);
+  const headerLines = splitHeaderLines(header).slice(1);
+  const unfolded = unfoldHeaderLines(headerLines);
+  if (!unfolded.ok) return unfolded;
   let first: { len: number; offset: number } | undefined;
 
-  for (const line of unfolded) {
+  for (const line of unfolded.value) {
     if (line.value.length === 0) continue;
     const colon = line.value.indexOf(':');
     if (colon <= 0) continue;
@@ -152,11 +153,13 @@ function splitHeaderLines(bytes: Uint8Array): HeaderLine[] {
   return out;
 }
 
-function unfoldHeaderLines(lines: HeaderLine[]): HeaderLine[] {
+function unfoldHeaderLines(lines: HeaderLine[]): ParseResult<HeaderLine[]> {
   const out: HeaderLine[] = [];
   for (const line of lines) {
     if (line.value.startsWith(' ') || line.value.startsWith('\t')) {
-      if (out.length === 0) continue;
+      if (out.length === 0) {
+        return failAt(line.byteOffset, 'continuation without a header');
+      }
       const prev = out[out.length - 1]!.value;
       const trimmed = prev.trimEnd();
       const rest = line.value.trimStart();
@@ -165,5 +168,5 @@ function unfoldHeaderLines(lines: HeaderLine[]): HeaderLine[] {
       out.push(line);
     }
   }
-  return out;
+  return { ok: true, value: out };
 }

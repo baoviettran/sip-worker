@@ -344,4 +344,20 @@ describe('SipStreamDecoder', () => {
     if (!parsed.ok) throw new Error(parsed.error.message);
     expect(parsed.value.headers.get('X')).toBe('a');
   });
+
+  it('rejects an orphan header continuation and resets', () => {
+    const badText = 'MESSAGE sip:b SIP/2.0\r\n Content-Length: 5\r\n\r\nhello';
+    const bad = encoder.encode(badText);
+    const d = new SipStreamDecoder();
+
+    const rejected = d.push(bad);
+    expect(rejected.ok).toBe(false);
+    if (rejected.ok) throw new Error('expected orphan continuation error');
+    expect(rejected.error.offset).toBe(badText.indexOf(' Content-Length'));
+
+    const fresh = d.push(MSG);
+    expect(fresh.ok).toBe(true);
+    if (!fresh.ok) throw new Error(fresh.error.message);
+    expect(fresh.value).toHaveLength(1);
+  });
 });
