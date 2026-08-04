@@ -212,10 +212,12 @@ describe('BrowserWebSocketTransport', () => {
 
     const buffer = new Uint8Array([2, 3]).buffer;
     const backing = new Uint8Array([9, 4, 5, 9]);
-    const view = new Uint8Array(backing.buffer, 1, 2);
+    const typedView = new Uint8Array(backing.buffer, 1, 2);
+    const dataView = new DataView(backing.buffer, 1, 2);
     socket.emitMessage('A');
     socket.emitMessage(buffer);
-    socket.emitMessage(view);
+    socket.emitMessage(typedView);
+    socket.emitMessage(dataView);
     socket.emitMessage('');
     new Uint8Array(buffer).fill(8);
     backing.fill(8);
@@ -223,6 +225,7 @@ describe('BrowserWebSocketTransport', () => {
     expect(events.filter((event) => event.type === 'data')).toEqual([
       { type: 'data', data: new Uint8Array([65]) },
       { type: 'data', data: new Uint8Array([2, 3]) },
+      { type: 'data', data: new Uint8Array([4, 5]) },
       { type: 'data', data: new Uint8Array([4, 5]) },
       { type: 'data', data: new Uint8Array() },
     ]);

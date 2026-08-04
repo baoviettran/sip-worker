@@ -9,6 +9,8 @@ export class FakeTransport implements Transport {
   readonly capabilities: TransportCapabilities;
   readonly sent: Uint8Array[] = [];
   private connected = false;
+  private closed = false;
+  private disconnectedEmitted = false;
   private readonly listeners = new Set<(event: TransportEvent) => void>();
 
   constructor(capabilities: TransportCapabilities) {
@@ -16,15 +18,25 @@ export class FakeTransport implements Transport {
   }
 
   async connect(): Promise<void> {
+    if (this.closed) {
+      throw new Error('FakeTransport is closed');
+    }
+    if (this.connected) return;
     this.connected = true;
     this.emit({ type: 'connected' });
   }
 
   async disconnect(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    this.connected = false;
     this.emitDisconnected();
   }
 
   async send(data: Uint8Array): Promise<void> {
+    if (!this.connected || this.closed) {
+      throw new Error('FakeTransport is not connected');
+    }
     this.sent.push(data.slice());
   }
 
@@ -47,6 +59,9 @@ export class FakeTransport implements Transport {
 
   emitDisconnected(error?: TransportError): void {
     this.connected = false;
+    this.closed = true;
+    if (this.disconnectedEmitted) return;
+    this.disconnectedEmitted = true;
     this.emit(error === undefined ? { type: 'disconnected' } : { type: 'disconnected', error });
   }
 

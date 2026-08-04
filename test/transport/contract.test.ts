@@ -29,6 +29,7 @@ describe('transport contract', () => {
     const transport = new FakeTransport({ reliable: true, framing: 'message' });
     const data = new Uint8Array([1, 2]);
 
+    await transport.connect();
     await transport.send(data);
     data[0] = 9;
 

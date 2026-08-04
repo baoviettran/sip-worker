@@ -68,7 +68,15 @@ export class NodeTcpTransport implements Transport {
     if (!this.socketListenersActive) return;
     const error = new TransportError('TCP socket error', args[0]);
     const connect = this.pendingConnect;
-    if (connect !== undefined) this.failConnect(connect, error);
+    if (connect !== undefined) {
+      this.failConnect(connect, error);
+      try {
+        this.emit({ type: 'error', error });
+      } finally {
+        this.finishClose(error);
+      }
+      return;
+    }
     this.emit({ type: 'error', error });
   };
 

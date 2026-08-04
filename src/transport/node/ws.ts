@@ -305,6 +305,9 @@ function webSocketCloseError(
   code: unknown,
   reason: unknown,
 ): TransportError | undefined {
+  // 1005 signals "no close code received" (RFC 6455), which is normal when a
+  // peer acknowledges our client-initiated close with an empty frame. A clean
+  // disconnect and a peer that simply omitted the code are both non-errors.
   if (code === undefined || code === 1000 || code === 1005) return undefined;
   return new TransportError(`${name} closed with code ${String(code)}`, { code, reason });
 }
