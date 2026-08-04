@@ -1,6 +1,7 @@
-# sip-worker — SIP Stack v1 Implementation Plan
+# SIP Worker Stack Implementation Plan (Superseded)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Archived on 2026-08-04. Do not execute this file; use [the staged implementation plan index](../2026-08-04-sip-worker-index.md).
+
 
 **Goal:** A from-scratch TypeScript SIP client stack that can register against a digest-auth registrar and place/receive one call — running unmodified in a web worker, browser main thread, and Node.
 
