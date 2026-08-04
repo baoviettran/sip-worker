@@ -1,1 +1,1 @@
-export {};
+export { SipStreamDecoder } from './decoder.js';

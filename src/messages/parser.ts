@@ -3,9 +3,9 @@ import { Headers } from './headers.js';
 import type { SipMessage, ParseResult } from './message.js';
 
 /** Maximum header block size: start line + header lines only (RFC 3261, 4.1 / 20). */
-const MAX_HEADER_BLOCK = 65536;
+export const MAX_HEADER_BLOCK = 65536;
 /** Maximum message body size (plan constraint, 1 MiB). */
-const MAX_BODY = 1048576;
+export const MAX_BODY = 1048576;
 const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const COMPACT: Record<string, string> = {
   v: 'Via', f: 'From', t: 'To', i: 'Call-ID', m: 'Contact', l: 'Content-Length', c: 'Content-Type',

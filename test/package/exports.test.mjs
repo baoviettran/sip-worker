@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const root = await import('../../dist/index.js');
+const messages = await import('../../dist/messages/index.js');
+const stream = await import('../../dist/stream/index.js');
+const required = require('../../dist/index.cjs');
+assert.equal(typeof root.SipStreamDecoder, 'function');
+assert.equal(typeof stream.SipStreamDecoder, 'function');
+assert.equal(typeof messages.parseMessage, 'function');
+assert.equal(typeof required.serializeMessage, 'function');
