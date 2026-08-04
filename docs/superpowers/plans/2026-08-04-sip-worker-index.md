@@ -94,7 +94,7 @@ The layer registers the top Via branch before the first send and removes it on t
 ## Execution Order
 
 1. [x] [Plan 01 — Codec and package](./2026-08-04-01-codec-and-package.md)
-2. [ ] [Plan 02 — Transport and ingress](./2026-08-04-02-transport-and-ingress.md)
+2. [x] [Plan 02 — Transport and ingress](./2026-08-04-02-transport-and-ingress.md)
 3. [ ] [Plan 03 — Transactions and dialogs](./2026-08-04-03-transactions-and-dialogs.md)
 4. [ ] [Plan 04 — Authentication and registration](./2026-08-04-04-auth-and-registration.md)
 5. [ ] [Plan 05 — Calls and media](./2026-08-04-05-calls-and-media.md)
