@@ -2,6 +2,7 @@ import { ParseError } from '../errors.js';
 import type { ParseResult } from '../messages/message.js';
 import { MAX_BODY, MAX_HEADER_BLOCK } from '../messages/parser.js';
 
+const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8');
 
@@ -156,8 +157,12 @@ function unfoldHeaderLines(lines: HeaderLine[]): ParseResult<HeaderLine[]> {
       if (out.length === 0) {
         return failAt(line.byteOffset, 'continuation without a header');
       }
+      const anchor = out[out.length - 1]!;
+      if (!isHeaderField(anchor.value)) {
+        return failAt(anchor.byteOffset, 'continuation after a malformed header');
+      }
       const previous = trimEndMappedLine(out[out.length - 1]!);
-      const rest = trimStartMappedLine(line);
+      const rest = trimMappedLine(line);
       if (rest.value === '') {
         out[out.length - 1] = previous;
       } else if (previous.value === '') {
@@ -174,6 +179,11 @@ function unfoldHeaderLines(lines: HeaderLine[]): ParseResult<HeaderLine[]> {
     }
   }
   return { ok: true, value: out };
+}
+
+function isHeaderField(line: string): boolean {
+  const colon = line.indexOf(':');
+  return colon > 0 && HEADER_NAME_RE.test(line.slice(0, colon));
 }
 
 function mappedHeaderLine(value: string, byteOffset: number): HeaderLine {

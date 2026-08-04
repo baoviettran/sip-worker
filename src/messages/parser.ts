@@ -51,8 +51,9 @@ export function parseMessage(input: Uint8Array): ParseResult<SipMessage> {
       const row = rows[rows.length - 1]!;
       const trimmed = row.value.trimEnd();
       const trimmedOffsets = row.valueOffsets.slice(0, trimmed.length);
-      const rest = line.text.trimStart();
-      const restStart = line.text.length - rest.length;
+      const restWithTrailingWhitespace = line.text.trimStart();
+      const rest = restWithTrailingWhitespace.trimEnd();
+      const restStart = line.text.length - restWithTrailingWhitespace.length;
       const restOffset = line.offset + encoder.encode(line.text.slice(0, restStart)).byteLength;
       const restOffsets = byteOffsetsForText(rest, restOffset);
       if (rest.length === 0) {

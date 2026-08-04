@@ -387,4 +387,34 @@ describe('SipStreamDecoder', () => {
       expect(result.error.offset).toBe(input.indexOf('x'));
     }
   });
+
+  it('rejects a continuation anchored to a malformed header and resets', () => {
+    const badText = 'MESSAGE sip:b SIP/2.0\r\nBogus\r\n Content-Length: 5\r\n\r\nhello';
+    const decoder = new SipStreamDecoder();
+
+    const rejected = decoder.push(encoder.encode(badText));
+    expect(rejected.ok).toBe(false);
+    if (rejected.ok) throw new Error('expected malformed continuation anchor');
+    expect(rejected.error.offset).toBe(badText.indexOf('Bogus'));
+
+    const fresh = decoder.push(MSG);
+    expect(fresh.ok).toBe(true);
+    if (!fresh.ok) throw new Error(fresh.error.message);
+    expect(fresh.value).toHaveLength(1);
+  });
+
+  it('round-trips folded Content-Length with trailing whitespace', () => {
+    const input = 'MESSAGE sip:b SIP/2.0\r\nContent-Length:\r\n 5 \r\n\r\nhello';
+    const stream = new SipStreamDecoder();
+
+    const framed = stream.push(encoder.encode(input));
+    expect(framed.ok).toBe(true);
+    if (!framed.ok) throw new Error(framed.error.message);
+    expect(framed.value).toHaveLength(1);
+
+    const parsed = parseMessage(framed.value[0]!);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    expect(decoder.decode(parsed.value.body)).toBe('hello');
+  });
 });
