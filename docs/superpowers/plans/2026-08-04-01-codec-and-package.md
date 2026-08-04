@@ -8,6 +8,8 @@
 
 **Tech Stack:** TypeScript 5.x strict ESM, Vitest, tsup, Node 22+, no runtime dependencies.
 
+**Status:** Complete — verified with 87 tests, typecheck, and ESM/CJS/package export gates.
+
 ## Global Constraints
 
 - Parsing returns `ParseResult<SipMessage>` and never throws for malformed input.
@@ -58,7 +60,7 @@ test/package/exports.test.mjs
 - Consumes: nothing.
 - Produces: `SipError`, `ParseError`, `TransportError`; ESM/CJS/declaration build entries for `.`, `./messages`, and the initial public barrels.
 
-- [ ] **Step 1: Write the initial package/build files**
+- [x] **Step 1: Write the initial package/build files**
 
 Use these scripts and initial build entries; later plans extend the exports and build-entry maps:
 
@@ -96,7 +98,7 @@ export default defineConfig({
 });
 ```
 
-- [ ] **Step 2: Define typed errors**
+- [x] **Step 2: Define typed errors**
 
 ```ts
 export class SipError extends Error {
@@ -110,13 +112,13 @@ export class TransportError extends Error {
 }
 ```
 
-- [ ] **Step 3: Verify the empty package**
+- [x] **Step 3: Verify the empty package**
 
 Run: `npm install && npm run typecheck && npm test && npm run build`
 
 Expected: all commands exit 0 and `dist/index.{js,cjs,d.ts}` plus `dist/messages/index.{js,cjs,d.ts}` exist.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add package.json tsconfig.json vitest.config.ts tsup.config.ts .gitignore src
@@ -135,7 +137,7 @@ git commit -m "chore: scaffold strict SIP codec package"
 - Consumes: `ParseError` only through later tasks.
 - Produces: `Headers`, `SipRequestMessage`, `SipResponseMessage`, `SipMessage`, constructors, guards, `bodyText`, and `withTextBody`.
 
-- [ ] **Step 1: Write failing mutation and body tests**
+- [x] **Step 1: Write failing mutation and body tests**
 
 ```ts
 it('separates append from replacement', () => {
@@ -153,13 +155,13 @@ it('stores UTF-8 bodies as bytes', () => {
 });
 ```
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
 
 Run: `npx vitest run test/messages/headers.test.ts test/messages/message.test.ts`
 
 Expected: FAIL because the modules do not exist.
 
-- [ ] **Step 3: Implement the exact public shapes**
+- [x] **Step 3: Implement the exact public shapes**
 
 ```ts
 export class Headers {
@@ -180,13 +182,13 @@ export class Headers {
 
 Define the message interfaces exactly as frozen in the index. Constructors default `headers` to a new `Headers` and `body` to an empty `Uint8Array`; `withTextBody` clones headers, replaces `Content-Type`, and encodes with `TextEncoder`.
 
-- [ ] **Step 4: Verify focused and regression suites**
+- [x] **Step 4: Verify focused and regression suites**
 
 Run: `npx vitest run test/messages && npm run typecheck && npm test`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/messages test/messages
@@ -205,7 +207,7 @@ git commit -m "feat: add ordered SIP headers and byte messages"
 - Consumes: Task 2 message values and Task 1 `ParseError`.
 - Produces: `parseMessage(bytes): ParseResult<SipMessage>` and `serializeMessage(message): Uint8Array`.
 
-- [ ] **Step 1: Write the acceptance matrix as failing tests**
+- [x] **Step 1: Write the acceptance matrix as failing tests**
 
 Cover exact byte fixtures for: CRLF and lone LF; folded headers; compact `v/f/t/i/m/l/c`; IPv6 bracket hosts; quoted commas; repeated equal and conflicting Content-Length; truncated bodies; 65,537-byte headers; 1,048,577-byte bodies; malformed request/response start lines; multibyte bodies; and CR/LF injection. Include:
 
@@ -223,25 +225,25 @@ it('serializes one Content-Length', () => {
 });
 ```
 
-- [ ] **Step 2: Run tests to verify failure**
+- [x] **Step 2: Run tests to verify failure**
 
 Run: `npx vitest run test/messages/parser.test.ts test/messages/serializer.test.ts`
 
 Expected: FAIL because parser/serializer are absent.
 
-- [ ] **Step 3: Implement byte-boundary parsing**
+- [x] **Step 3: Implement byte-boundary parsing**
 
 Implement these exact stages: scan bytes for `CRLFCRLF`, falling back to `LFLF`; reject oversized header blocks before decoding; decode only the header slice; unfold continuation lines; validate the start line grammar; normalize compact names; require decimal Content-Length tokens; accept duplicate lengths only when numerically equal; reject declared bodies above the maximum or shorter than declared; copy exactly the declared body bytes; return trailing-byte errors for the single-message parser. Every failure constructs `ParseError` at the first offending byte.
 
 Serializer stages are: validate start-line and header names/values; omit every existing long or compact Content-Length; encode the start line and headers with strict CRLF; append one canonical `Content-Length`; concatenate header bytes and the original body bytes.
 
-- [ ] **Step 4: Verify focused and regression suites**
+- [x] **Step 4: Verify focused and regression suites**
 
 Run: `npx vitest run test/messages && npm run typecheck && npm test`
 
 Expected: PASS with no thrown parser exception in a 10,000-input malformed-byte fuzz loop.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/messages test/messages
@@ -264,21 +266,21 @@ git commit -m "feat: add byte-correct SIP parser and serializer"
 - Consumes: parser limits and complete-message codec.
 - Produces: `SipStreamDecoder.push(chunk): ParseResult<Uint8Array[]>`, `reset()`, and usable package exports.
 
-- [ ] **Step 1: Write failing chunk-boundary tests**
+- [x] **Step 1: Write failing chunk-boundary tests**
 
 Test every split position across a header delimiter and the five-byte `café` body, two messages in one chunk, compact `l`, conflicting lengths, oversized declared bodies, and reset after error.
 
-- [ ] **Step 2: Run the decoder test to verify failure**
+- [x] **Step 2: Run the decoder test to verify failure**
 
 Run: `npx vitest run test/stream/decoder.test.ts`
 
 Expected: FAIL because `SipStreamDecoder` is absent.
 
-- [ ] **Step 3: Implement framing and barrels**
+- [x] **Step 3: Implement framing and barrels**
 
 The decoder buffers bytes, scans only the buffered header prefix, parses long or compact Content-Length without decoding body bytes, emits copied complete-message slices, preserves remaining bytes, and returns a `ParseError` while resetting on invalid/oversized input. Export all public codec symbols from `src/messages/index.ts`, `src/stream/index.ts`, and `src/index.ts`. Add `stream/index` to the tsup entry map and add a matching `./stream` package export.
 
-- [ ] **Step 4: Add and run the package assertion**
+- [x] **Step 4: Add and run the package assertion**
 
 ```js
 import assert from 'node:assert/strict';
@@ -298,7 +300,7 @@ Run: `npm run typecheck && npm test && npm run test:package`
 
 Expected: PASS and all nine `.js/.cjs/.d.ts` root/message/stream artifacts exist.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src package.json tsup.config.ts test/package test/stream
