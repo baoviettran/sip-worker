@@ -8,3 +8,11 @@ export type {
   SipMessage, SipRequestMessage, SipResponseMessage, ParseResult,
 } from './messages/index.js';
 export { SipStreamDecoder } from './stream/index.js';
+export { SipIngress } from './transport/index.js';
+export type {
+  Clock,
+  MessageSink,
+  Transport,
+  TransportCapabilities,
+  TransportEvent,
+} from './transport/index.js';

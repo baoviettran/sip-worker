@@ -23,6 +23,16 @@
       "types": "./dist/stream/index.d.ts",
       "import": "./dist/stream/index.js",
       "require": "./dist/stream/index.cjs"
+    },
+    "./transport/node": {
+      "types": "./dist/transport/node/index.d.ts",
+      "import": "./dist/transport/node/index.js",
+      "require": "./dist/transport/node/index.cjs"
+    },
+    "./transport/browser": {
+      "types": "./dist/transport/browser/index.d.ts",
+      "import": "./dist/transport/browser/index.js",
+      "require": "./dist/transport/browser/index.cjs"
     }
   },
   "scripts": {
