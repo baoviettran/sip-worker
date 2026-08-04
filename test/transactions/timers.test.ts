@@ -20,6 +20,12 @@ describe('deriveTimers', () => {
     expect(derived.M).toBe(64 * DEFAULT_TIMERS.T1);
   });
 
+  it('scales D to max(32000, 64*T1) for unreliable transports with a custom T1', () => {
+    const config = { ...DEFAULT_TIMERS, T1: 1000 };
+    expect(deriveTimers(config, false).D).toBe(64000);
+    expect(deriveTimers(config, true).D).toBe(0);
+  });
+
   it('leaves the base TimerConfig values intact', () => {
     const derived = deriveTimers(DEFAULT_TIMERS, false);
     expect(derived.T1).toBe(DEFAULT_TIMERS.T1);

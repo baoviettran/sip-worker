@@ -19,7 +19,7 @@ export function deriveTimers(config: TimerConfig, reliable: boolean): DerivedTim
     T2: config.T2,
     T4: config.T4,
     B: max,
-    D: reliable ? 0 : 32000,
+    D: reliable ? 0 : Math.max(32000, 64 * config.T1),
     F: max,
     H: max,
     I: reliable ? 0 : 5000,
