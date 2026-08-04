@@ -30,9 +30,6 @@ export interface ClientTransaction {
   readonly state: string;
 }
 
-// Placeholder: the full ServerTransaction machine is built in a later task.
-// Defined here with the same shape as ClientTransaction so the event union
-// typechecks until the real machine lands.
 export interface ServerTransaction {
   readonly key: TransactionKey;
   readonly request: SipRequestMessage;
