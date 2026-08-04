@@ -2,8 +2,6 @@ import { ParseError } from '../errors.js';
 import type { ParseResult } from '../messages/message.js';
 import { MAX_BODY, MAX_HEADER_BLOCK } from '../messages/parser.js';
 
-const CRLFCRLF = '\r\n\r\n';
-const LFLF = '\n\n';
 const DIGITS_RE = /^\d+$/;
 const decoder = new TextDecoder('utf-8');
 
@@ -28,9 +26,6 @@ export class SipStreamDecoder {
 
   push(chunk: Uint8Array): ParseResult<Uint8Array[]> {
     const input = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
-    if (this.rx.length + input.length > MAX_HEADER_BLOCK + MAX_BODY + 4) {
-      return this.failAndReset(0, 'stream buffer too large');
-    }
     this.rx = this.rx.length === 0 ? input.slice() : this.append(input);
     const out: Uint8Array[] = [];
 
@@ -60,6 +55,10 @@ export class SipStreamDecoder {
         out.push(this.rx.slice(0, this.frameLen));
         this.rx = this.rx.subarray(this.frameLen);
         this.frameLen = undefined;
+        // Check pending buffer size after consuming a complete frame
+        if (this.rx.length > MAX_HEADER_BLOCK + MAX_BODY + 4) {
+          return this.failAndReset(0, 'stream buffer too large');
+        }
       } else {
         break; // wait for the remaining body octets
       }
@@ -85,60 +84,80 @@ export class SipStreamDecoder {
   }
 }
 
+/**
+ * Finds the earliest header terminator (\r\n\r\n or \n\n) directly in bytes.
+ * Returns true byte offsets, never decoded-string indices.
+ */
 function findTerminator(bytes: Uint8Array): { index: number; len: number } | undefined {
-  const text = decoder.decode(bytes);
-  const crlf = text.indexOf(CRLFCRLF);
-  if (crlf >= 0) return { index: crlf, len: 4 };
-  const lf = text.indexOf(LFLF);
-  if (lf >= 0) return { index: lf, len: 2 };
+  for (let i = 0; i + 1 < bytes.length; i += 1) {
+    if (bytes[i] === 0x0d && i + 3 < bytes.length && bytes[i + 1] === 0x0a && bytes[i + 2] === 0x0d && bytes[i + 3] === 0x0a) {
+      return { index: i, len: 4 };
+    }
+    if (bytes[i] === 0x0a && bytes[i + 1] === 0x0a) {
+      return { index: i, len: 2 };
+    }
+  }
   return undefined;
 }
 
 /**
- * Scans only the header prefix for a Content-Length. Repeats the parser's
- * rules for the length field alone: decimal token only, repeated values must
- * agree numerically. Returns the length and the byte offset of its header
- * line, mirroring the parser's error offsets. The start line and any field
- * other than Content-Length are skipped so framing needs no message grammar.
+ * Scans only the header prefix for a Content-Length. Unfolds continuation lines
+ * before interpreting the value, matching the parser's rules: decimal token only,
+ * repeated values must agree numerically. All offsets are true byte offsets.
  */
 function contentLength(header: Uint8Array): ParseResult<{ len: number; offset: number }> {
-  const text = decoder.decode(header);
+  const lines = splitHeaderLines(header);
+  const unfolded = unfoldHeaderLines(lines);
   let first: { len: number; offset: number } | undefined;
 
-  const lines = splitLines(text);
-  for (let i = 1; i < lines.length; i += 1) {
-    const line = lines[i]!;
-    const raw = line.value;
-    if (raw === '' || raw.startsWith(' ') || raw.startsWith('\t')) continue;
-    const colon = raw.indexOf(':');
+  for (const line of unfolded) {
+    if (line.value.length === 0) continue;
+    const colon = line.value.indexOf(':');
     if (colon <= 0) continue;
-    const name = raw.slice(0, colon).trim();
+    const name = line.value.slice(0, colon).trim();
     if (name === '') continue;
     const lower = name.toLowerCase();
     if (lower !== 'content-length' && lower !== 'l') continue;
 
-    const value = raw.slice(colon + 1).trim();
-    if (!DIGITS_RE.test(value)) return failAt(line.offset, 'non-decimal Content-Length');
+    const value = line.value.slice(colon + 1).trim();
+    if (!DIGITS_RE.test(value)) return failAt(line.byteOffset, 'non-decimal Content-Length');
     const len = Number(value);
-    if (first !== undefined && first.len !== len) return failAt(line.offset, 'conflicting Content-Length');
-    if (first === undefined) first = { len, offset: line.offset };
+    if (first !== undefined && first.len !== len) return failAt(line.byteOffset, 'conflicting Content-Length');
+    if (first === undefined) first = { len, offset: line.byteOffset };
   }
   return { ok: true, value: first ?? { len: 0, offset: 0 } };
 }
 
-interface Line { value: string; offset: number }
+interface HeaderLine { value: string; byteOffset: number }
 
-function splitLines(text: string): Line[] {
-  const out: Line[] = [];
+function splitHeaderLines(bytes: Uint8Array): HeaderLine[] {
+  const out: HeaderLine[] = [];
   let start = 0;
-  for (let i = 0; i < text.length; i += 1) {
-    const at = text[i];
-    if (at === '\r' || at === '\n') {
-      out.push({ value: text.slice(start, i), offset: start });
-      if (at === '\r' && i + 1 < text.length && text[i + 1] === '\n') i += 1;
-      start = i + 1;
+  let pos = 0;
+  while (pos < bytes.length) {
+    const at = bytes[pos]!;
+    if (at === 13 || at === 10) {
+      out.push({ value: decoder.decode(bytes.slice(start, pos)), byteOffset: start });
+      if (at === 13 && pos + 1 < bytes.length && bytes[pos + 1] === 10) pos += 1;
+      pos += 1;
+      start = pos;
+    } else {
+      pos += 1;
     }
   }
-  if (start < text.length) out.push({ value: text.slice(start), offset: start });
+  if (start < pos) out.push({ value: decoder.decode(bytes.slice(start, pos)), byteOffset: start });
+  return out;
+}
+
+function unfoldHeaderLines(lines: HeaderLine[]): HeaderLine[] {
+  const out: HeaderLine[] = [];
+  for (const line of lines) {
+    if (line.value.startsWith(' ') || line.value.startsWith('\t')) {
+      if (out.length === 0) continue;
+      out[out.length - 1]!.value = out[out.length - 1]!.value.trimEnd() + ' ' + line.value.trimStart();
+    } else {
+      out.push(line);
+    }
+  }
   return out;
 }

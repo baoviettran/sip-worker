@@ -11,17 +11,11 @@ const COMPACT: Record<string, string> = {
   v: 'Via', f: 'From', t: 'To', i: 'Call-ID', m: 'Contact', l: 'Content-Length', c: 'Content-Type',
 };
 
-const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8');
+const HEADER_NAME_CHAR_RE = /[!#$%&'*+.^_`|~0-9A-Za-z-]/;
 
 function fail<T>(offset: number, message: string): ParseResult<T> {
   return { ok: false, error: new ParseError(offset, message) };
-}
-
-function bytesEquals(block: Uint8Array, i: number, seq: Uint8Array): boolean {
-  if (i + seq.length > block.length) return false;
-  for (let j = 0; j < seq.length; j += 1) if (block[i + j] !== seq[j]) return false;
-  return true;
 }
 
 /**
@@ -46,9 +40,7 @@ export function parseMessage(input: Uint8Array): ParseResult<SipMessage> {
   const startField = startLineType(startLine.text);
   if (startField === 'bad') return fail(startLine.offset, 'malformed start line');
 
-  const rows: Array<{ name: string; value: string }> = [];
-  let contentLength: number | undefined;
-  let contentLengthOffset = startLine.offset;
+  const rows: Array<{ name: string; value: string; offset: number; valueOffset: number }> = [];
 
   for (let i = 1; i < lines.length; i += 1) {
     const line = lines[i]!;
@@ -63,22 +55,36 @@ export function parseMessage(input: Uint8Array): ParseResult<SipMessage> {
     const colon = line.text.indexOf(':');
     if (colon <= 0) return fail(line.offset, 'malformed header line');
     const rawName = line.text.slice(0, colon);
-    if (!HEADER_NAME_RE.test(rawName)) return fail(line.offset, 'malformed header name');
+    if (!HEADER_NAME_RE.test(rawName)) {
+      for (let j = 0; j < rawName.length; j += 1) {
+        if (!HEADER_NAME_CHAR_RE.test(rawName[j]!)) {
+          return fail(line.offset + j, 'malformed header name');
+        }
+      }
+      return fail(line.offset, 'malformed header name');
+    }
     const lower = rawName.toLowerCase();
     const canonical = COMPACT[lower] ?? (lower === 'content-length' ? 'Content-Length' : rawName);
-    const value = line.text.slice(colon + 1).trim();
+    const afterColon = line.text.slice(colon + 1);
+    const leadingSpaces = afterColon.length - afterColon.trimStart().length;
+    const value = afterColon.trim();
+    const valueOffset = line.offset + colon + 1 + leadingSpaces;
+    rows.push({ name: canonical, value, offset: line.offset, valueOffset });
+  }
 
-    if (canonical === 'Content-Length') {
-      if (!/^\d+$/.test(value)) return fail(line.offset, 'non-decimal Content-Length');
-      const n = Number(value);
+  let contentLength: number | undefined;
+  let contentLengthOffset = startLine.offset;
+
+  for (const row of rows) {
+    if (row.name === 'Content-Length') {
+      if (!/^\d+$/.test(row.value)) return fail(row.valueOffset, 'non-decimal Content-Length');
+      const n = Number(row.value);
       if (contentLength !== undefined && contentLength !== n) {
-        return fail(line.offset, 'conflicting Content-Length');
+        return fail(row.valueOffset, 'conflicting Content-Length');
       }
       contentLength = n;
-      contentLengthOffset = line.offset;
-      continue;
+      contentLengthOffset = row.valueOffset;
     }
-    rows.push({ name: canonical, value });
   }
 
   const headers = new Headers();
@@ -98,18 +104,33 @@ export function parseMessage(input: Uint8Array): ParseResult<SipMessage> {
 
   if (startField === 'request') {
     const fields = startLine.text.split(' ');
-    if (fields.length < 3 || fields[2] !== 'SIP/2.0' || fields[0] === '' || fields[1] === '') {
+    if (fields.length !== 3 || fields[2] !== 'SIP/2.0' || fields[0] === '' || fields[1] === '') {
       return fail(startLine.offset, 'malformed request start line');
+    }
+    if (!HEADER_NAME_RE.test(fields[0]!)) {
+      return fail(startLine.offset, 'malformed request method');
+    }
+    if (/\s/.test(fields[1]!)) {
+      return fail(startLine.offset, 'malformed request URI');
     }
     return { ok: true, value: { kind: 'request', method: fields[0]!, uri: fields[1]!, headers, body } };
   }
   const fields = startLine.text.split(' ');
-  if (fields.length < 3 || fields[0] !== 'SIP/2.0' || !/^\d{3}$/.test(fields[1]!)) {
+  if (fields.length < 3 || fields[0] !== 'SIP/2.0') {
     return fail(startLine.offset, 'malformed response start line');
   }
-  const code = Number(fields[1]);
-  if (code < 100 || code > 699) return fail(startLine.offset, 'response status code out of range');
-  return { ok: true, value: { kind: 'response', statusCode: code, reasonPhrase: fields.slice(2).join(' '), headers, body } };
+  const codeField = fields[1]!;
+  if (!/^\d{3}$/.test(codeField)) {
+    const badByteOffset = startLine.offset + 8 + (/^\d{0,2}/.exec(codeField)?.[0].length ?? 0);
+    return fail(badByteOffset, 'malformed response status code');
+  }
+  const code = Number(codeField);
+  if (code < 100 || code > 699) return fail(startLine.offset + 8, 'response status code out of range');
+  const reasonPhrase = fields.slice(2).join(' ');
+  if (/[\r\n]/.test(reasonPhrase)) {
+    return fail(startLine.offset, 'malformed response reason phrase');
+  }
+  return { ok: true, value: { kind: 'response', statusCode: code, reasonPhrase, headers, body } };
 }
 
 function startLineType(s: string): 'request' | 'response' | 'bad' {
@@ -119,11 +140,19 @@ function startLineType(s: string): 'request' | 'response' | 'bad' {
   return 'bad';
 }
 
+/**
+ * Finds the earliest header terminator (\r\n\r\n or \n\n) directly in bytes.
+ * Returns true byte offsets, never decoded-string indices.
+ */
 function findHeaderEnd(bytes: Uint8Array): { index: number; len: number } | undefined {
-  const crlfcrlf = encoder.encode('\r\n\r\n');
-  const lflf = encoder.encode('\n\n');
-  for (let i = 0; i < bytes.length; i += 1) if (bytesEquals(bytes, i, crlfcrlf)) return { index: i, len: 4 };
-  for (let i = 0; i < bytes.length; i += 1) if (bytesEquals(bytes, i, lflf)) return { index: i, len: 2 };
+  for (let i = 0; i + 1 < bytes.length; i += 1) {
+    if (bytes[i] === 0x0d && i + 3 < bytes.length && bytes[i + 1] === 0x0a && bytes[i + 2] === 0x0d && bytes[i + 3] === 0x0a) {
+      return { index: i, len: 4 };
+    }
+    if (bytes[i] === 0x0a && bytes[i + 1] === 0x0a) {
+      return { index: i, len: 2 };
+    }
+  }
   return undefined;
 }
 

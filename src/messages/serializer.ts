@@ -2,6 +2,7 @@ import type { SipMessage } from './message.js';
 
 const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const INJECT_RE = /[\r\n]/;
+const METHOD_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const CRLF = '\r\n';
 const encoder = new TextEncoder();
 
@@ -11,10 +12,29 @@ const encoder = new TextEncoder();
  * programmer error (header injection), not malformed input.
  */
 export function serializeMessage(message: SipMessage): Uint8Array {
-  const startLine =
-    message.kind === 'request'
-      ? `${message.method} ${message.uri} SIP/2.0`
-      : `SIP/2.0 ${message.statusCode} ${message.reasonPhrase}`;
+  let startLine: string;
+
+  if (message.kind === 'request') {
+    if (!METHOD_RE.test(message.method)) {
+      throw new Error(`invalid method: must be a token without whitespace or CR/LF: ${JSON.stringify(message.method)}`);
+    }
+    if (message.uri === '' || /\s/.test(message.uri)) {
+      throw new Error(`invalid URI: must be non-empty with no whitespace: ${JSON.stringify(message.uri)}`);
+    }
+    if (INJECT_RE.test(message.uri)) {
+      throw new Error('header injection: CR/LF in URI');
+    }
+    startLine = `${message.method} ${message.uri} SIP/2.0`;
+  } else {
+    if (!Number.isInteger(message.statusCode) || message.statusCode < 100 || message.statusCode > 699) {
+      throw new Error(`invalid status code: must be integer 100-699: ${message.statusCode}`);
+    }
+    if (INJECT_RE.test(message.reasonPhrase)) {
+      throw new Error('header injection: CR/LF in reason phrase');
+    }
+    startLine = `SIP/2.0 ${message.statusCode} ${message.reasonPhrase}`;
+  }
+
   if (INJECT_RE.test(startLine)) throw new Error('header injection: CR/LF in start line');
 
   let res = startLine + CRLF;

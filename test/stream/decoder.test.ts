@@ -224,4 +224,60 @@ describe('SipStreamDecoder', () => {
     expect(Array.from(msgs[0]!)).toEqual(Array.from(empty));
     expect(msgs[0]!.byteLength).toBe(empty.byteLength);
   });
+
+  // P1-1: UTF-16 offsets instead of byte offsets in framing
+  it('handles multibyte header values (Subject: café) correctly', () => {
+    const msg = concat(
+      encoder.encode('MESSAGE sip:b SIP/2.0\r\nSubject: café\r\nContent-Length: 1\r\n\r\nX'),
+    );
+    const d = new SipStreamDecoder();
+    const r = d.push(msg);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value).toHaveLength(1);
+    const parsed = parseMessage(r.value[0]!);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    expect(parsed.value.headers.get('Subject')).toBe('café');
+  });
+
+  // P1-2: Folded Content-Length misparsed
+  it('rejects folded Content-Length that does not form a valid decimal', () => {
+    const msg = concat(
+      encoder.encode('MESSAGE sip:b SIP/2.0\r\nContent-Length: 1\r\n 2\r\n\r\n'),
+    );
+    const d = new SipStreamDecoder();
+    const r = d.push(msg);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected error for folded Content-Length');
+    expect(r.error.message).toMatch(/non-decimal|Content-Length/i);
+  });
+
+  // P1-3: Lone-LF framing prefers a later CRLFCRLF
+  it('frames LF-terminated message with CRLFCRLF in body', () => {
+    const msg = concat(
+      encoder.encode('MESSAGE sip:b SIP/2.0\nContent-Length: 5\n\n\r\n\r\nX'),
+    );
+    const d = new SipStreamDecoder();
+    const r = d.push(msg);
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value).toHaveLength(1);
+    const body = r.value[0]!.subarray(r.value[0]!.byteLength - 5);
+    expect(decoder.decode(body)).toBe('\r\n\r\nX');
+  });
+
+  // P2-1: Batch of two valid max-sized frames rejected
+  it('accepts two valid max-sized messages in one push', () => {
+    const largeBody = new Uint8Array(600000).fill(0x61);
+    const largeMsg = concat(
+      encoder.encode('MESSAGE sip:b SIP/2.0\r\nContent-Length: 600000\r\n\r\n'),
+      largeBody,
+    );
+    const d = new SipStreamDecoder();
+    const r = d.push(concat(largeMsg, largeMsg));
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value).toHaveLength(2);
+  });
 });

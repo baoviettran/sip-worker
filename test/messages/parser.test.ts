@@ -121,7 +121,7 @@ describe('parseMessage', () => {
     const r = parseMessage(encoder.encode('SIP/2.0 1a0 OK\r\n\r\n'));
     expect(r.ok).toBe(false);
     if (!r.ok) {
-      expect(r.error.offset).toBe(0);
+      expect(r.error.offset).toBe(9); // P2-4: offset of first bad byte 'a'
       expect(Number.isInteger(r.error.offset)).toBe(true);
     }
   });
@@ -147,5 +147,59 @@ describe('parseMessage', () => {
       for (let j = 0; j < bytes.length; j += 1) bytes[j] = Math.floor(Math.random() * 256);
       expect(() => parseMessage(bytes)).not.toThrow();
     }
+  });
+
+  // P1-1: UTF-16 offsets instead of byte offsets in framing
+  it('handles multibyte header values (Subject: café) correctly', () => {
+    const r = parseMessage(encoder.encode('MESSAGE sip:b SIP/2.0\r\nSubject: café\r\nContent-Length: 1\r\n\r\nX'));
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.headers.get('Subject')).toBe('café');
+  });
+
+  // P1-2: Folded Content-Length misparsed
+  it('rejects folded Content-Length that does not form a valid decimal', () => {
+    const r = parseMessage(encoder.encode('MESSAGE sip:b SIP/2.0\r\nContent-Length: 1\r\n 2\r\n\r\n'));
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected error for folded Content-Length');
+    expect(r.error.message).toMatch(/non-decimal|Content-Length/i);
+  });
+
+  // P1-3: Lone-LF framing prefers a later CRLFCRLF
+  it('frames LF-terminated message with CRLFCRLF in body', () => {
+    const r = parseMessage(encoder.encode('MESSAGE sip:b SIP/2.0\nContent-Length: 5\n\n\r\n\r\nX'));
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(r.error.message);
+    expect(decoder.decode(r.value.body)).toBe('\r\n\r\nX');
+  });
+
+  // P2-2: Request parser accepts trailing start-line tokens
+  it('rejects request start line with trailing junk', () => {
+    const r = parseMessage(encoder.encode('OPTIONS sip:b SIP/2.0 junk\r\n\r\n'));
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected error for trailing tokens');
+    expect(r.error.message).toMatch(/malformed request start line/i);
+  });
+
+  // P2-4: ParseError.offset not the first offending byte
+  it('reports offset of first bad character in status code', () => {
+    const r = parseMessage(encoder.encode('SIP/2.0 1a0 OK\r\n\r\n'));
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected error');
+    expect(r.error.offset).toBe(9); // offset of 'a'
+  });
+
+  it('reports offset of first bad character in Content-Length', () => {
+    const r = parseMessage(encoder.encode('MESSAGE sip:b SIP/2.0\r\nContent-Length: abc\r\n\r\n'));
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected error');
+    expect(r.error.offset).toBe(39); // offset of 'a' in 'abc' (23 + 16)
+  });
+
+  it('reports offset of first bad character in header name', () => {
+    const r = parseMessage(encoder.encode('OPTIONS sip:b SIP/2.0\r\nBad Header: value\r\n\r\n'));
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected error');
+    expect(r.error.offset).toBe(26); // offset of space in 'Bad Header'
   });
 });
