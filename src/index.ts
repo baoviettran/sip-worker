@@ -10,6 +10,8 @@ export type {
 export { SipStreamDecoder } from './stream/index.js';
 export { SipIngress } from './transport/index.js';
 export { TransactionLayer, buildNon2xxAck } from './transactions/index.js';
+export { Dialog } from './dialogs/index.js';
+export type { IdGenerator } from './dialogs/index.js';
 export type {
   Clock,
   MessageSink,
