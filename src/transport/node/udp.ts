@@ -18,7 +18,7 @@ export interface DatagramSocketLike {
   ): void;
   close(callback: () => void): void;
   on(event: DatagramEvent, listener: SocketListener): void;
-  off?(event: DatagramEvent, listener: SocketListener): void;
+  off(event: DatagramEvent, listener: SocketListener): void;
   removeListener?(event: DatagramEvent, listener: SocketListener): void;
 }
 
@@ -139,8 +139,11 @@ export class NodeUdpTransport implements Transport {
       this.socket.close(() => this.finishClose());
     } catch (cause) {
       const error = new TransportError('UDP close failed', cause);
-      this.emit({ type: 'error', error });
-      this.finishClose(error);
+      try {
+        this.emit({ type: 'error', error });
+      } finally {
+        this.finishClose(error);
+      }
     }
     return promise;
   }
@@ -214,24 +217,22 @@ export class NodeUdpTransport implements Transport {
     this.pendingDisconnect = undefined;
     this.removeSocketListeners();
 
-    if (!this.disconnectedEmitted) {
-      this.disconnectedEmitted = true;
-      this.emit(error === undefined ? { type: 'disconnected' } : { type: 'disconnected', error });
-    }
     if (disconnect !== undefined) {
       if (error === undefined) disconnect.resolve();
       else disconnect.reject(error);
+    }
+    if (!this.disconnectedEmitted) {
+      this.disconnectedEmitted = true;
+      this.emit(error === undefined ? { type: 'disconnected' } : { type: 'disconnected', error });
     }
   }
 
   private removeSocketListeners(): void {
     if (!this.socketListenersActive) return;
     this.socketListenersActive = false;
-    const remove = this.socket.off ?? this.socket.removeListener;
-    if (remove === undefined) return;
-    remove.call(this.socket, 'message', this.handleMessage);
-    remove.call(this.socket, 'error', this.handleError);
-    remove.call(this.socket, 'close', this.handleClose);
+    this.socket.off('message', this.handleMessage);
+    this.socket.off('error', this.handleError);
+    this.socket.off('close', this.handleClose);
   }
 
   private emit(event: TransportEvent): void {

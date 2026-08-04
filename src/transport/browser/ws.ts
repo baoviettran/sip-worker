@@ -74,8 +74,11 @@ export class BrowserWebSocketTransport implements Transport {
     const connect = this.pendingConnect;
     if (connect !== undefined) {
       this.failed = true;
-      this.emit({ type: 'error', error });
-      this.closeAfterFailure(error);
+      try {
+        this.emit({ type: 'error', error });
+      } finally {
+        this.closeAfterFailure(error);
+      }
       return;
     }
     this.emit({ type: 'error', error });
@@ -107,8 +110,11 @@ export class BrowserWebSocketTransport implements Transport {
     } catch (cause) {
       const error = new TransportError('Browser WebSocket creation failed', cause);
       this.failed = true;
-      this.emit({ type: 'error', error });
-      this.finishClose(error);
+      try {
+        this.emit({ type: 'error', error });
+      } finally {
+        this.finishClose(error);
+      }
       return attempt.promise;
     }
 
@@ -149,8 +155,11 @@ export class BrowserWebSocketTransport implements Transport {
       socket.close(1000);
     } catch (cause) {
       const error = new TransportError('Browser WebSocket close failed', cause);
-      this.emit({ type: 'error', error });
-      this.finishClose(error);
+      try {
+        this.emit({ type: 'error', error });
+      } finally {
+        this.finishClose(error);
+      }
     }
     return attempt.promise;
   }
@@ -201,8 +210,11 @@ export class BrowserWebSocketTransport implements Transport {
         `Browser WebSocket negotiated unsupported protocol: ${socket.protocol || '(none)'}`,
       );
       this.failed = true;
-      this.emit({ type: 'error', error });
-      this.closeAfterFailure(error);
+      try {
+        this.emit({ type: 'error', error });
+      } finally {
+        this.closeAfterFailure(error);
+      }
       return;
     }
 
@@ -227,8 +239,11 @@ export class BrowserWebSocketTransport implements Transport {
       this.finishClose(error);
     } catch (cause) {
       const closeError = new TransportError('Browser WebSocket close failed', cause);
-      this.emit({ type: 'error', error: closeError });
-      this.finishClose(closeError);
+      try {
+        this.emit({ type: 'error', error: closeError });
+      } finally {
+        this.finishClose(closeError);
+      }
     }
   }
 
@@ -249,15 +264,15 @@ export class BrowserWebSocketTransport implements Transport {
     this.pendingDisconnect = undefined;
     this.removeSocketListeners();
 
+    if (disconnect !== undefined) {
+      if (error === undefined) disconnect.resolve();
+      else disconnect.reject(error);
+    }
     if (!this.disconnectedEmitted) {
       this.disconnectedEmitted = true;
       this.emit(error === undefined
         ? { type: 'disconnected' }
         : { type: 'disconnected', error });
-    }
-    if (disconnect !== undefined) {
-      if (error === undefined) disconnect.resolve();
-      else disconnect.reject(error);
     }
   }
 

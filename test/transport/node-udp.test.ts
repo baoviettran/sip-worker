@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import { TransportError } from '../../src/errors.js';
 import {
   NodeUdpTransport,
@@ -87,6 +87,12 @@ async function connect(socket: FakeDatagramSocket, transport: NodeUdpTransport):
 }
 
 describe('NodeUdpTransport', () => {
+  it('requires injected sockets to provide listener removal', () => {
+    expectTypeOf<DatagramSocketLike['off']>().toEqualTypeOf<
+      (event: DatagramEvent, listener: SocketListener) => void
+    >();
+  });
+
   it('advertises datagram capabilities and emits a copied event for each datagram', async () => {
     const { socket, transport } = createTransport();
     const events: TransportEvent[] = [];
@@ -140,9 +146,12 @@ describe('NodeUdpTransport', () => {
     const events: TransportEvent[] = [];
     const cause = new Error('bind failed');
     transport.subscribe((event) => events.push(event));
+    transport.subscribe(() => {
+      throw new Error('subscriber failed');
+    });
 
     const pending = transport.connect();
-    socket.emit('error', cause);
+    expect(() => socket.emit('error', cause)).toThrow('subscriber failed');
     await expect(pending).rejects.toMatchObject({ name: 'TransportError', cause });
     socket.completeBind();
 
@@ -173,5 +182,25 @@ describe('NodeUdpTransport', () => {
     await expect(transport.send(new Uint8Array([1]))).rejects.toBeInstanceOf(TransportError);
     expect(socket.offCalls.map(({ event }) => event).sort()).toEqual(['close', 'error', 'message']);
     expect([...socket.listeners.values()].every((listeners) => listeners.size === 0)).toBe(true);
+  });
+
+  it('settles disconnect before notifying a throwing subscriber', async () => {
+    const { socket, transport } = createTransport();
+    await connect(socket, transport);
+    transport.subscribe(() => {
+      throw new Error('subscriber failed');
+    });
+
+    let outcome = 'pending';
+    const disconnected = transport.disconnect().then(
+      () => { outcome = 'resolved'; },
+      () => { outcome = 'rejected'; },
+    );
+
+    expect(() => socket.emit('close')).toThrow('subscriber failed');
+    await Promise.resolve();
+
+    expect(outcome).toBe('resolved');
+    await disconnected;
   });
 });

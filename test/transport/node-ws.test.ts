@@ -140,6 +140,26 @@ describe('NodeWebSocketTransport', () => {
     expect(events.filter((event) => event.type === 'connected')).toHaveLength(0);
   });
 
+  it('rejects a pre-open socket error when a subscriber throws', async () => {
+    const socket = new FakeNodeWebSocket();
+    const transport = new NodeWebSocketTransport(socket);
+    const cause = new Error('handshake failed');
+    transport.subscribe(() => {
+      throw new Error('subscriber failed');
+    });
+
+    let rejection: unknown;
+    const connected = transport.connect().catch((error: unknown) => {
+      rejection = error;
+    });
+
+    expect(() => socket.emitError(cause)).toThrow('subscriber failed');
+    await Promise.resolve();
+
+    expect(rejection).toMatchObject({ name: 'TransportError', cause });
+    await connected;
+  });
+
   it('rejects a connection that negotiates another subprotocol', async () => {
     const socket = new FakeNodeWebSocket();
     const transport = new NodeWebSocketTransport(socket);
@@ -258,5 +278,26 @@ describe('NodeWebSocketTransport', () => {
     socket.emitClose(1005);
     await pending;
     expect(settled).toBe(true);
+  });
+
+  it('settles disconnect before notifying a throwing subscriber', async () => {
+    const socket = new FakeNodeWebSocket();
+    const transport = new NodeWebSocketTransport(socket);
+    await connect(socket, transport);
+    transport.subscribe(() => {
+      throw new Error('subscriber failed');
+    });
+
+    let outcome = 'pending';
+    const disconnected = transport.disconnect().then(
+      () => { outcome = 'resolved'; },
+      () => { outcome = 'rejected'; },
+    );
+
+    expect(() => socket.emitClose(1005)).toThrow('subscriber failed');
+    await Promise.resolve();
+
+    expect(outcome).toBe('resolved');
+    await disconnected;
   });
 });

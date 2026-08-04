@@ -70,8 +70,11 @@ export class NodeWebSocketTransport implements Transport {
     const connect = this.pendingConnect;
     if (connect !== undefined) {
       this.failed = true;
-      this.emit({ type: 'error', error });
-      this.closeAfterFailure(error);
+      try {
+        this.emit({ type: 'error', error });
+      } finally {
+        this.closeAfterFailure(error);
+      }
       return;
     }
     this.emit({ type: 'error', error });
@@ -132,8 +135,11 @@ export class NodeWebSocketTransport implements Transport {
       this.socket.close(1000);
     } catch (cause) {
       const error = new TransportError('Node WebSocket close failed', cause);
-      this.emit({ type: 'error', error });
-      this.finishClose(error);
+      try {
+        this.emit({ type: 'error', error });
+      } finally {
+        this.finishClose(error);
+      }
     }
     return attempt.promise;
   }
@@ -191,8 +197,11 @@ export class NodeWebSocketTransport implements Transport {
         `Node WebSocket negotiated unsupported protocol: ${this.socket.protocol || '(none)'}`,
       );
       this.failed = true;
-      this.emit({ type: 'error', error });
-      this.closeAfterFailure(error);
+      try {
+        this.emit({ type: 'error', error });
+      } finally {
+        this.closeAfterFailure(error);
+      }
       return;
     }
 
@@ -216,8 +225,11 @@ export class NodeWebSocketTransport implements Transport {
       this.finishClose(error);
     } catch (cause) {
       const closeError = new TransportError('Node WebSocket close failed', cause);
-      this.emit({ type: 'error', error: closeError });
-      this.finishClose(closeError);
+      try {
+        this.emit({ type: 'error', error: closeError });
+      } finally {
+        this.finishClose(closeError);
+      }
     }
   }
 
@@ -238,15 +250,15 @@ export class NodeWebSocketTransport implements Transport {
     this.pendingDisconnect = undefined;
     this.removeSocketListeners();
 
+    if (disconnect !== undefined) {
+      if (error === undefined) disconnect.resolve();
+      else disconnect.reject(error);
+    }
     if (!this.disconnectedEmitted) {
       this.disconnectedEmitted = true;
       this.emit(error === undefined
         ? { type: 'disconnected' }
         : { type: 'disconnected', error });
-    }
-    if (disconnect !== undefined) {
-      if (error === undefined) disconnect.resolve();
-      else disconnect.reject(error);
     }
   }
 
