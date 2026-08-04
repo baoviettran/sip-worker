@@ -67,6 +67,15 @@ export class TransactionLayer implements MessageSink {
     this.emit = options.emit;
   }
 
+  /** Forward a machine event outward, removing the transaction from the maps on termination. */
+  private forward(event: TransactionLayerEvent): void {
+    if (event.type === 'terminated') {
+      this.clients.delete(event.key);
+      this.servers.delete(event.key);
+    }
+    this.emit(event);
+  }
+
   /** Send a request, creating and starting the matching client transaction. */
   sendRequest(request: SipRequestMessage): ClientHandle {
     const branch = branchOf(request);
@@ -77,7 +86,7 @@ export class TransactionLayer implements MessageSink {
     const existing = this.clients.get(key);
     if (existing !== undefined) return existing;
 
-    const emit = (event: TransactionLayerEvent): void => this.emit(event);
+    const emit = (event: TransactionLayerEvent): void => this.forward(event);
 
     let tx: ClientHandle;
     if (request.method === 'INVITE') {
@@ -130,7 +139,7 @@ export class TransactionLayer implements MessageSink {
   }
 
   private createServer(request: SipRequestMessage, key: TransactionKey): void {
-    const emit = (event: TransactionLayerEvent): void => this.emit(event);
+    const emit = (event: TransactionLayerEvent): void => this.forward(event);
     let tx: ServerHandle;
     if (request.method === 'INVITE') {
       tx = new InviteServerTransaction({

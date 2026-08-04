@@ -145,7 +145,7 @@ describe('TransactionLayer', () => {
   it('removes the map entry only after terminated', () => {
     const { clock, layer, events } = setup();
     const invite = makeInvite();
-    layer.sendRequest(invite);
+    const first = layer.sendRequest(invite);
     // Before termination the transaction is still tracked: a 2xx routes to it.
     layer.receive(responseFor('z9hG4bK-abc', 200));
     expect(events.filter((e) => e.type === 'response')).toHaveLength(1);
@@ -155,6 +155,11 @@ describe('TransactionLayer', () => {
     // After termination the map entry is gone; a late response is dropped.
     layer.receive(responseFor('z9hG4bK-abc', 200));
     expect(events.filter((e) => e.type === 'response')).toHaveLength(1);
+    // The map entry is gone: a fresh request with the same key creates a NEW
+    // transaction instead of returning the stale terminated one.
+    const second = layer.sendRequest(makeInvite());
+    expect(second).not.toBe(first);
+    expect(second.state).not.toBe('Terminated');
   });
 
   it('rejects a request whose top Via branch lacks the magic cookie', () => {
