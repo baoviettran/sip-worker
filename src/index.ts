@@ -9,6 +9,7 @@ export type {
 } from './messages/index.js';
 export { SipStreamDecoder } from './stream/index.js';
 export { SipIngress } from './transport/index.js';
+export { TransactionLayer, buildNon2xxAck } from './transactions/index.js';
 export type {
   Clock,
   MessageSink,
@@ -16,3 +17,11 @@ export type {
   TransportCapabilities,
   TransportEvent,
 } from './transport/index.js';
+export type {
+  ClientTransaction,
+  DerivedTimers,
+  ServerTransaction,
+  TimerConfig,
+  TransactionKey,
+  TransactionLayerEvent,
+} from './transactions/index.js';
