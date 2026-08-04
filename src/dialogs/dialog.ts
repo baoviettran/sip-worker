@@ -185,25 +185,26 @@ export class Dialog {
   private requestTarget(): string {
     if (this.routeSetValues.length === 0) return this.remoteTarget;
     const first = this.routeSetValues[0] ?? '';
-    if (this.routeSetValues.length === 1 && isStrictRouter(first)) return this.remoteTarget;
+    if (isStrictRouter(first)) return this.remoteTarget;
     return first;
   }
 
   /**
    * Populate the Route header for an in-dialog request. The first route set
    * entry becomes the request URI, so the remaining entries go in Route. A
-   * strict (non-loose) router cannot resolve the target itself, so the remote
-   * target is appended to the Route set (RFC 3261 12.2.1.1).
+   * strict (non-loose) first router cannot resolve the target itself, so the
+   * whole route set is kept in Route with the remote target appended as the
+   * last value (RFC 3261 12.2.1.1).
    */
   private setRoute(headers: Headers): void {
     if (this.routeSetValues.length === 0) return;
-    const last = this.routeSetValues[this.routeSetValues.length - 1] ?? '';
-    if (this.routeSetValues.length === 1 && isStrictRouter(last)) {
-      headers.set('Route', `${last}, ${this.remoteTarget}`);
+    const first = this.routeSetValues[0] ?? '';
+    if (isStrictRouter(first)) {
+      const route = [...this.routeSetValues, this.remoteTarget].join(', ');
+      headers.set('Route', route);
       return;
     }
-    let route = this.routeSetValues.slice(1).join(', ');
-    if (isStrictRouter(last)) route = route === '' ? this.remoteTarget : `${route}, ${this.remoteTarget}`;
+    const route = this.routeSetValues.slice(1).join(', ');
     if (route !== '') headers.set('Route', route);
   }
 }

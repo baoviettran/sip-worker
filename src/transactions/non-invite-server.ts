@@ -18,6 +18,9 @@ export interface NonInviteServerOptions {
   readonly transport: Transport;
   readonly clock: Clock;
   readonly timers: DerivedTimers;
+  // `reliable` is intentionally unused here: Timer J correctness depends on the
+  // caller passing timers derived from the transport reliability (J=0 on a
+  // reliable transport), so the transaction itself does not branch on it.
   readonly reliable: boolean;
   readonly emit: (event: TransactionLayerEvent) => void;
 }

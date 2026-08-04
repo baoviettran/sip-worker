@@ -85,7 +85,10 @@ describe('dialog routing', () => {
     expect(bye.headers.get('Route')).toBe('sip:p1.example.com;lr');
   });
 
-  it('appends the target to Route for a strict first route', () => {
+  it('does not append the target to Route for a loose first route', () => {
+    // Record-Route [p1 strict, p2 loose] reversed => route set [p2 loose, p1 strict].
+    // The first entry is loose, so the request targets it directly and the
+    // remaining entries go in Route without appending the remote target.
     const dialog = Dialog.fromUac(
       makeInvite(),
       make2xx(['<sip:p1.example.com>', '<sip:p2.example.com;lr>']),
@@ -93,7 +96,24 @@ describe('dialog routing', () => {
     );
     const bye = dialog.createRequest('BYE');
     expect(bye.uri).toBe('sip:p2.example.com;lr');
-    expect(bye.headers.get('Route')).toBe('sip:p1.example.com, sip:bob@192.0.2.5:5060');
+    expect(bye.headers.get('Route')).toBe('sip:p1.example.com');
+  });
+
+  it('appends the target to Route for a strict first route', () => {
+    // Record-Route [p2 loose, p1 strict] reversed => route set [p1 strict, p2 loose].
+    // The first entry is strict, so the request is addressed to the remote
+    // target and the whole route set is kept in Route with the target appended
+    // as the last value (RFC 3261 12.2.1.1).
+    const dialog = Dialog.fromUac(
+      makeInvite(),
+      make2xx(['<sip:p2.example.com;lr>', '<sip:p1.example.com>']),
+      fakeIdGenerator(),
+    );
+    const bye = dialog.createRequest('BYE');
+    expect(bye.uri).toBe('sip:bob@192.0.2.5:5060');
+    expect(bye.headers.get('Route')).toBe(
+      'sip:p1.example.com, sip:p2.example.com;lr, sip:bob@192.0.2.5:5060',
+    );
   });
 
   it('uses the remote target directly when the route set is empty', () => {

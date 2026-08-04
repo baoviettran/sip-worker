@@ -67,7 +67,12 @@ export class TransactionLayer implements MessageSink {
     this.emit = options.emit;
   }
 
-  /** Forward a machine event outward, removing the transaction from the maps on termination. */
+  /**
+   * Forward a machine event outward, removing the transaction from the maps on
+   * termination. Client and server keys can collide (both are `branch|method`),
+   * but a single-key delete is acceptable because branches are unique per
+   * endpoint, so a key can only ever name one live client and one live server.
+   */
   private forward(event: TransactionLayerEvent): void {
     if (event.type === 'terminated') {
       this.clients.delete(event.key);
