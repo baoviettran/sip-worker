@@ -117,6 +117,20 @@ describe('parseMessage', () => {
     expect(r.ok).toBe(false);
   });
 
+  it('rejects a response with a non-numeric 3-digit status code', () => {
+    const r = parseMessage(encoder.encode('SIP/2.0 1a0 OK\r\n\r\n'));
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.offset).toBe(0);
+      expect(Number.isInteger(r.error.offset)).toBe(true);
+    }
+  });
+
+  it('rejects a response status code outside the 100-699 range', () => {
+    expect(parseMessage(encoder.encode('SIP/2.0 099 OK\r\n\r\n')).ok).toBe(false);
+    expect(parseMessage(encoder.encode('SIP/2.0 700 OK\r\n\r\n')).ok).toBe(false);
+  });
+
   it('rejects a non-decimal Content-Length token', () => {
     const r = parseMessage(encoder.encode('MESSAGE sip:b SIP/2.0\r\nContent-Length: abc\r\n\r\n'));
     expect(r.ok).toBe(false);

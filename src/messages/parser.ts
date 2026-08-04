@@ -104,10 +104,12 @@ export function parseMessage(input: Uint8Array): ParseResult<SipMessage> {
     return { ok: true, value: { kind: 'request', method: fields[0]!, uri: fields[1]!, headers, body } };
   }
   const fields = startLine.text.split(' ');
-  if (fields.length < 3 || fields[0] !== 'SIP/2.0' || fields[1]!.length !== 3 || fields[1]! < '100') {
+  if (fields.length < 3 || fields[0] !== 'SIP/2.0' || !/^\d{3}$/.test(fields[1]!)) {
     return fail(startLine.offset, 'malformed response start line');
   }
-  return { ok: true, value: { kind: 'response', statusCode: Number(fields[1]), reasonPhrase: fields.slice(2).join(' '), headers, body } };
+  const code = Number(fields[1]);
+  if (code < 100 || code > 699) return fail(startLine.offset, 'response status code out of range');
+  return { ok: true, value: { kind: 'response', statusCode: code, reasonPhrase: fields.slice(2).join(' '), headers, body } };
 }
 
 function startLineType(s: string): 'request' | 'response' | 'bad' {
