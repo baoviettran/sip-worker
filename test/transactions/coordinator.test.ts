@@ -175,4 +175,31 @@ describe('TransactionLayer', () => {
     layer.receive(responseFor('z9hG4bK-reg', 200, 'REGISTER', '1'));
     expect(events).toContainEqual(expect.objectContaining({ type: 'response', transaction: expect.objectContaining({ key: tx.key }) }));
   });
+
+  it('fans out layer events to every subscriber and stops after unsubscribe', () => {
+    const { clock, layer } = setup(true);
+    const first: TransactionLayerEvent[] = [];
+    const second: TransactionLayerEvent[] = [];
+    const unsubscribe = layer.subscribe((e) => first.push(e));
+    layer.subscribe((e) => second.push(e));
+
+    layer.sendRequest(makeRegister());
+    layer.receive(responseFor('z9hG4bK-reg', 200, 'REGISTER', '1'));
+    // Both subscribers see the response; advancement past timer K (reliable:
+    // K = 0) terminates the transaction, which forward also fans out.
+    clock.advance(TIMERS.K);
+    expect(first).toContainEqual(expect.objectContaining({ type: 'response' }));
+    expect(second).toContainEqual(expect.objectContaining({ type: 'response' }));
+    expect(first).toContainEqual({ type: 'terminated', key: 'z9hG4bK-reg|REGISTER' });
+    expect(second).toContainEqual({ type: 'terminated', key: 'z9hG4bK-reg|REGISTER' });
+
+    // Unsubscribed subscriber is never called again, while a fresh one is.
+    const after: TransactionLayerEvent[] = [];
+    unsubscribe();
+    layer.subscribe((e) => after.push(e));
+    layer.sendRequest(makeInvite());
+    layer.receive(responseFor('z9hG4bK-abc', 486));
+    expect(after).toContainEqual(expect.objectContaining({ type: 'response' }));
+    expect(first.filter((e) => e.type === 'response' && (e as { response: SipResponseMessage }).response.statusCode === 486)).toHaveLength(0);
+  });
 });

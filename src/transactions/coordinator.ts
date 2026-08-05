@@ -58,6 +58,7 @@ export class TransactionLayer implements MessageSink {
   private readonly emit: (event: TransactionLayerEvent) => void;
   private readonly clients = new Map<TransactionKey, ClientHandle>();
   private readonly servers = new Map<TransactionKey, ServerHandle>();
+  private readonly subscribers = new Set<(event: TransactionLayerEvent) => void>();
 
   constructor(options: TransactionLayerOptions) {
     this.transport = options.transport;
@@ -79,6 +80,20 @@ export class TransactionLayer implements MessageSink {
       this.servers.delete(event.key);
     }
     this.emit(event);
+    for (const listener of this.subscribers) listener(event);
+  }
+
+  /**
+   * Subscribe to the transaction-layer event stream the constructor `emit`
+   * callback already receives (`response`, `request`, `statelessRequest`,
+   * `timeout`, `transportError`, `terminated`). Returns an unsubscribe
+   * function; a listener is never called after unsubscribing.
+   */
+  subscribe(listener: (event: TransactionLayerEvent) => void): () => void {
+    this.subscribers.add(listener);
+    return () => {
+      this.subscribers.delete(listener);
+    };
   }
 
   /** Send a request, creating and starting the matching client transaction. */
