@@ -1,0 +1,319 @@
+/**
+ * Registrar request/state machine (RFC 3261 10).
+ *
+ * Owns the registration identity (stable Call-ID, strictly increasing CSeq),
+ * the REGISTER request lifecycle across 401/407/423 retries, expiry-based
+ * refresh scheduling, unregister (Contact `*` / Expires 0), and reconnect
+ * (transport loss re-registers rather than silently dropping to unregistered).
+ *
+ * Every outbound attempt installs exactly one transaction-layer event listener
+ * and tears it down when that attempt settles, so repeated register/unregister
+ * cycles never leak listeners or timers. The refresh timer runs on the injected
+ * virtual `Clock` only — never a real sleep.
+ */
+
+import { Headers, makeRequest } from '../messages/index.js';
+import type { SipRequestMessage, SipResponseMessage } from '../messages/message.js';
+import { SipError } from '../errors.js';
+import { makeBranch } from '../dialogs/header-values.js';
+import type { IdGenerator, AuthManager, AuthFailure } from '../auth/manager.js';
+import type { TransactionLayer } from '../transactions/coordinator.js';
+import type { TransactionLayerEvent } from '../transactions/types.js';
+import type { Clock } from '../transport/index.js';
+import type { RegistrationIdentity, RegisterState } from './registration-types.js';
+
+export interface RegistrarOptions {
+  readonly registrarUri: string;
+  readonly aor: string;
+  readonly credentials?: { readonly username: string; readonly password: string };
+  /** Contact URI for the UA, e.g. `<sip:alice@192.0.2.1:5060>`. `'*'` unregisters. */
+  readonly contact: string;
+  readonly idGenerator: IdGenerator;
+  readonly layer: TransactionLayer;
+  readonly clock: Clock;
+  readonly authManager?: AuthManager;
+  /** Refresh when this fraction of the granted expiry has elapsed. Default 0.5. */
+  readonly refreshFraction?: number;
+}
+
+/** Snapshot of the registrar's externally visible state. */
+export interface RegistrarStatus {
+  readonly state: RegisterState;
+  readonly callId: string;
+  readonly nextCSeq: number;
+}
+
+/** Pull the numeric CSeq from a REGISTER, or undefined when malformed. */
+function numeric(headers: Headers): number | undefined {
+  const cseq = headers.get('CSeq');
+  return cseq === undefined ? undefined : Number.parseInt(cseq.split(' ')[0] ?? '', 10);
+}
+
+/** Response-level or per-Contact `expires=`; prefers the matching Contact. */
+function grantedExpiry(response: SipResponseMessage): number | undefined {
+  const contact = response.headers.get('Contact');
+  if (contact !== undefined) {
+    const contactExpires = Number(contact.match(/expires=(\d+)/)?.[1] ?? NaN);
+    if (Number.isFinite(contactExpires)) return contactExpires;
+  }
+  const responseExpires = Number(response.headers.get('Expires') ?? NaN);
+  return Number.isFinite(responseExpires) ? responseExpires : undefined;
+}
+
+/** Min-Expires value, defaulting to 600 when a 423 omits it. */
+function minExpiresFor(response: SipResponseMessage): number {
+  const value = Number(response.headers.get('Min-Expires') ?? NaN);
+  return Number.isFinite(value) ? value : 600;
+}
+
+/**
+ * Tracks registration for a single UA account. Registers/unregisters return
+ * promises settling on final 2xx protocol outcomes.
+ */
+export class Registrar {
+  private readonly layer: TransactionLayer;
+  private readonly clock: Clock;
+  private readonly registrarUri: string;
+  private readonly aor: string;
+  private readonly contact: string;
+  private readonly fromTag: string;
+  private readonly authManager?: AuthManager;
+  private readonly credentials?: { readonly username: string; readonly password: string };
+  private readonly refreshAfter: (granted: number) => number;
+  private readonly identity: RegistrationIdentity;
+  private branchCounter = 0;
+
+  private stateValue: RegisterState = 'unregistered';
+  private refreshTimer = -1;
+  private refreshMs = 0;
+  private reconnectPending = false;
+  private unsubscribe: (() => void) | undefined;
+  private deferred: { resolve: () => void; reject: (reason: unknown) => void } | undefined;
+
+  constructor(options: RegistrarOptions) {
+    this.layer = options.layer;
+    this.clock = options.clock;
+    this.registrarUri = options.registrarUri;
+    this.aor = options.aor;
+    this.contact = options.contact;
+    this.authManager = options.authManager;
+    this.credentials = options.credentials;
+    this.refreshAfter = (granted) => Math.max(1, Math.floor(granted * (options.refreshFraction ?? 0.5)));
+    this.identity = { callId: options.idGenerator.branch(), nextCSeq: 1 };
+    this.fromTag = options.idGenerator.branch();
+  }
+
+  /** Current registration state. */
+  get state(): RegisterState {
+    return this.stateValue;
+  }
+
+  /** Externally visible snapshot, for Plan 06 recovery / the UA event surface. */
+  status(): RegistrarStatus {
+    return { state: this.stateValue, callId: this.identity.callId, nextCSeq: this.identity.nextCSeq };
+  }
+
+  /**
+   * Register against the registrar. Resolves only after a final 2xx has
+   * established the granted expiry; rejects with `SipError` on nonrecoverable
+   * finals, timeout, or transport error.
+   */
+  register(): Promise<void> {
+    if (this.stateValue === 'registering' || this.stateValue === 'unregistering') {
+      return Promise.reject(new SipError(0, 'a registration exchange is already in progress'));
+    }
+    this.reconnectPending = false;
+    return this.startExchange(this.nextRequest(undefined, this.contact));
+  }
+
+  /**
+   * Unregister: cancel the refresh timer, then send `REGISTER` with Contact `*`
+   * and `Expires: 0`. Resolves only on the 2xx.
+   */
+  unregister(): Promise<void> {
+    if (this.stateValue === 'registering' || this.stateValue === 'unregistering') {
+      return Promise.reject(new SipError(0, 'a registration exchange is already in progress'));
+    }
+    this.cancelRefresh();
+    this.stateValue = 'unregistering';
+    return this.startExchange(this.nextRequest(0, '*'));
+  }
+
+  /** UA hook: transport is up again after a loss — re-issue the registration. */
+  onTransportConnected(): void {
+    if (!this.reconnectPending) return;
+    this.reconnectPending = false;
+    void this.register();
+  }
+
+  /** UA hook: transport lost — drop to unregistered and cancel the refresh timer. */
+  onTransportDisconnected(): void {
+    this.teardownExchange();
+    this.cancelRefresh();
+    if (this.stateValue !== 'unregistering') this.stateValue = 'unregistered';
+    this.reconnectPending = true;
+  }
+
+  /**
+   * Build and send-allocate the next REGISTER. Consumes exactly one CSeq slot:
+   * the request carries `identity.nextCSeq`, then the counter advances, so the
+   * wire sequence across initial/authenticated/423/refresh/unregister/reconnect
+   * is strictly `1,2,3,…` on one stable Call-ID.
+   */
+  private nextRequest(expires: number | undefined, contact: string): SipRequestMessage {
+    const headers = new Headers();
+    const branch = makeBranch(`reg-${(this.branchCounter += 1)}`);
+    headers.set('Via', `SIP/2.0/UDP 192.0.2.1:5060;branch=${branch}`);
+    headers.set('Max-Forwards', '70');
+    headers.set('From', `<${this.aor}>;tag=${this.fromTag}`);
+    headers.set('To', `<${this.aor}>`);
+    headers.set('Call-ID', this.identity.callId);
+    headers.set('CSeq', `${this.identity.nextCSeq} REGISTER`);
+    headers.set('Contact', contact);
+    if (expires !== undefined) headers.set('Expires', String(expires));
+    this.identity.nextCSeq += 1;
+    return makeRequest('REGISTER', this.registrarUri, headers);
+  }
+
+  private startExchange(request: SipRequestMessage): Promise<void> {
+    this.stateValue = this.stateValue === 'unregistering' ? 'unregistering' : 'registering';
+    return new Promise<void>((resolve, reject) => {
+      this.deferred = { resolve, reject };
+      this.send(request);
+    });
+  }
+
+  private send(request: SipRequestMessage): void {
+    try {
+      // Install the listener before sending so a response arriving synchronously
+      // inside `sendRequest` (reliable transport) is still observed.
+      this.attachListener(request);
+      this.layer.sendRequest(request);
+    } catch (err) {
+      this.fail(err);
+    }
+  }
+
+  /** Install the single transaction-layer listener for one attempt. */
+  private attachListener(request: SipRequestMessage): void {
+    if (this.unsubscribe !== undefined) this.unsubscribe();
+    this.unsubscribe = this.layer.subscribe((event: TransactionLayerEvent) => {
+      switch (event.type) {
+        case 'response':
+          this.onResponse(request, event.response);
+          break;
+        case 'timeout':
+        case 'transportError':
+          this.fail(new SipError(0, `REGISTER ${event.type}`));
+          break;
+        default:
+          break;
+      }
+    });
+  }
+
+  private onResponse(base: SipRequestMessage, response: SipResponseMessage): void {
+    // Only answer responses that match this attempt's chain (same CSeq).
+    if (numeric(response.headers) !== numeric(base.headers)) return;
+    const code = response.statusCode;
+    if (code === 401 || code === 407) {
+      this.handleAuth(base, response);
+    } else if (code === 423) {
+      this.handleMinExpires(base, response);
+    } else if (code >= 200 && code < 300) {
+      this.onGranted(response);
+    } else if (code >= 300) {
+      this.fail(new SipError(code, `REGISTER rejected with ${code}`));
+    }
+  }
+
+  private handleAuth(base: SipRequestMessage, response: SipResponseMessage): void {
+    if (this.authManager === undefined || this.credentials === undefined) {
+      this.fail(new SipError(response.statusCode, `${response.statusCode} received but no credentials configured`));
+      return;
+    }
+    const result = this.authManager.retry({
+      requestId: `${this.identity.callId}:${numeric(base.headers) ?? 0}`,
+      request: base,
+      response,
+      credentials: this.credentials,
+    });
+    if (isAuthFailure(result)) {
+      this.fail(result.error);
+      return;
+    }
+    // Retry is a NEW request on a NEW client transaction (new branch). Re-stamp
+    // its CSeq from the single persisted counter so the wire sequence stays
+    // strictly increasing on one Call-ID across every outbound REGISTER.
+    result.headers.set('CSeq', `${this.identity.nextCSeq} REGISTER`);
+    this.identity.nextCSeq += 1;
+    this.send(result);
+  }
+
+  private handleMinExpires(base: SipRequestMessage, response: SipResponseMessage): void {
+    const interval = minExpiresFor(response);
+    const request = this.nextRequest(interval, base.headers.get('Contact') ?? this.contact);
+    // Carry any in-progress authorization (from an earlier 401/407) forward.
+    const authorization = base.headers.get('Authorization');
+    const proxyAuthorization = base.headers.get('Proxy-Authorization');
+    if (authorization !== undefined) request.headers.set('Authorization', authorization);
+    if (proxyAuthorization !== undefined) request.headers.set('Proxy-Authorization', proxyAuthorization);
+    this.send(request);
+  }
+
+  private onGranted(response: SipResponseMessage): void {
+    if (this.stateValue === 'unregistering') {
+      this.settle();
+      this.stateValue = 'unregistered';
+      return;
+    }
+    this.stateValue = 'registered';
+    const granted = grantedExpiry(response);
+    if (granted !== undefined) this.scheduleRefresh(granted);
+    this.settle();
+  }
+
+  private scheduleRefresh(granted: number): void {
+    this.cancelRefresh();
+    this.refreshMs = this.refreshAfter(granted);
+    this.refreshTimer = this.clock.setTimeout(() => {
+      if (this.stateValue === 'registered') void this.register();
+    }, this.refreshMs * 1000);
+  }
+
+  private cancelRefresh(): void {
+    if (this.refreshTimer !== -1) {
+      this.clock.clearTimeout(this.refreshTimer);
+      this.refreshTimer = -1;
+      this.refreshMs = 0;
+    }
+  }
+
+  private settle(): void {
+    this.teardownExchange();
+    const deferred = this.deferred;
+    this.deferred = undefined;
+    if (deferred !== undefined) deferred.resolve();
+  }
+
+  private fail(reason: unknown): void {
+    this.teardownExchange();
+    this.cancelRefresh();
+    if (this.stateValue !== 'unregistering') this.stateValue = 'failed';
+    const deferred = this.deferred;
+    this.deferred = undefined;
+    if (deferred !== undefined) deferred.reject(reason);
+  }
+
+  /** Remove the single transaction listener for the active attempt. */
+  private teardownExchange(): void {
+    if (this.unsubscribe !== undefined) {
+      this.unsubscribe();
+      this.unsubscribe = undefined;
+    }
+  }
+}
+
+function isAuthFailure(result: SipRequestMessage | AuthFailure): result is AuthFailure {
+  return (result as { type?: string }).type !== undefined;
+}
