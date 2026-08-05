@@ -9,6 +9,12 @@ export interface DigestChallenge {
   readonly realm: string;
   readonly nonce: string;
   readonly algorithm?: 'MD5' | 'SHA-256';
+  /**
+   * The raw algorithm token exactly as challenged, including unsupported
+   * values (e.g. `MD5-sess`). Retained so `selectChallenge` can reject
+   * candidates whose algorithm this client cannot answer.
+   */
+  readonly rawAlgorithm?: string;
   readonly qop?: ReadonlyArray<'auth' | 'auth-int'>;
   readonly opaque?: string;
   readonly stale?: boolean;
@@ -148,6 +154,9 @@ export function parseDigestChallenges(values: string[]): ParseResult<DigestChall
     const challenge: DigestChallenge = {
       realm,
       nonce,
+      ...(algorithm !== undefined
+        ? { rawAlgorithm: algorithm }
+        : {}),
       ...(algorithm !== undefined && SUPPORTED_ALGORITHMS.has(algorithm.toUpperCase())
         ? { algorithm: algorithm.toUpperCase() as 'MD5' | 'SHA-256' }
         : {}),
@@ -241,7 +250,7 @@ export function selectChallenge(challenges: DigestChallenge[]): DigestChallenge 
   let bestScore = -1;
   for (const c of challenges) {
     if (c.realm === undefined || c.nonce === undefined) continue;
-    if (c.algorithm !== undefined && !SUPPORTED_ALGORITHMS.has(c.algorithm)) continue;
+    if (c.rawAlgorithm !== undefined && !SUPPORTED_ALGORITHMS.has(c.rawAlgorithm.toUpperCase())) continue;
     const algScore = c.algorithm === 'SHA-256' ? 2 : c.algorithm === 'MD5' ? 1 : 0;
     const qopScore = c.qop !== undefined && c.qop.includes('auth') ? 1 : 0;
     const score = algScore * 2 + qopScore;

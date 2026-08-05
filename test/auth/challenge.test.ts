@@ -52,6 +52,17 @@ describe('parseDigestChallenges', () => {
     expect(selectChallenge(parsed.value)?.nonce).toBe('n2');
   });
 
+  it('does not select a lone unsupported-algorithm challenge', () => {
+    const parsed = parseDigestChallenges([
+      'Digest realm="r", nonce="n1", algorithm=MD5-sess, qop="auth"',
+    ]);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value).toHaveLength(1);
+    // The raw algorithm is retained so selection can reject it.
+    expect(selectChallenge(parsed.value)).toBeUndefined();
+  });
+
   it('selectChallenge ignores candidates lacking a realm or nonce', () => {
     const candidateMissingRealm = { nonce: 'n1', algorithm: 'MD5' } as DigestChallenge;
     const candidateMissingNonce = { realm: 'r', algorithm: 'MD5' } as DigestChallenge;
