@@ -338,4 +338,34 @@ describe('Registrar', () => {
     await expect(registration).rejects.toThrow();
     expect(h.registrar.state).toBe('failed');
   });
+
+  it('rejects an in-flight register when the transport disconnects', async () => {
+    const h = setup();
+    const registration = h.registrar.register();
+    await flush();
+    // UA hook fires mid-exchange; the pending promise must reject, not hang.
+    h.registrar.onTransportDisconnected();
+    await expect(Promise.race([registration, new Promise((resolve) => setTimeout(resolve, 20))])).rejects.toThrow('transport disconnected');
+    expect(h.registrar.state).toBe('failed');
+    expect(h.registrar.status()).toMatchObject({ nextCSeq: 2 });
+  });
+
+  it('does not get stuck on a failed unregister', async () => {
+    const h = setup();
+    await completeRegister(h, [{ status: 200 }]);
+    const unregistration = h.registrar.unregister();
+    await flush();
+    // Fail the removal REGISTER with a non-2xx final.
+    respond(h, 403);
+    await expect(unregistration).rejects.toThrow();
+    // The registrar must leave 'unregistering'…
+    expect(h.registrar.state).toBe('failed');
+    // …and a subsequent register() can proceed with the next CSeq.
+    const re = h.registrar.register();
+    await flush();
+    respond(h, 200);
+    await re;
+    expect(h.registrar.state).toBe('registered');
+    expect(h.registrar.status().nextCSeq).toBeGreaterThanOrEqual(3);
+  });
 });

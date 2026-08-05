@@ -146,11 +146,19 @@ export class Registrar {
     void this.register();
   }
 
-  /** UA hook: transport lost — drop to unregistered and cancel the refresh timer. */
+  /** UA hook: transport lost — settle any in-flight exchange, drop to unregistered, cancel refresh. */
   onTransportDisconnected(): void {
     this.teardownExchange();
     this.cancelRefresh();
-    if (this.stateValue !== 'unregistering') this.stateValue = 'unregistered';
+    const deferred = this.deferred;
+    this.deferred = undefined;
+    if (deferred !== undefined) {
+      // An exchange was in flight; settle it with a rejection rather than hang.
+      this.stateValue = 'failed';
+      deferred.reject(new SipError(0, 'transport disconnected during a registration exchange'));
+    } else if (this.stateValue !== 'unregistering') {
+      this.stateValue = 'unregistered';
+    }
     this.reconnectPending = true;
   }
 
@@ -299,7 +307,11 @@ export class Registrar {
   private fail(reason: unknown): void {
     this.teardownExchange();
     this.cancelRefresh();
-    if (this.stateValue !== 'unregistering') this.stateValue = 'failed';
+    // Always exit the exchange states: a failed unregister must not leave the
+    // registrar stuck in 'unregistering' (later register/unregister calls would
+    // reject with "exchange already in progress" forever). 'failed' lets the
+    // UA retry with a fresh attempt.
+    this.stateValue = 'failed';
     const deferred = this.deferred;
     this.deferred = undefined;
     if (deferred !== undefined) deferred.reject(reason);
