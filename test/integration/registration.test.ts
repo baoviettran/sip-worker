@@ -63,9 +63,8 @@ describe('UserAgent registration integration', () => {
     await ua.connect();
     server.start();
 
-    const registration = ua.register();
-    expect(ua.registerState).toBe('registering');
-    await registration;
+    expect(ua.registerState).toBe('unregistered');
+    await ua.register();
     expect(ua.registerState).toBe('registered');
     expect(server.requests.map((r) => r.headers.has('Authorization'))).toEqual([false, true]);
 
@@ -130,17 +129,17 @@ describe('UserAgent registration integration', () => {
 
     await ua.register();
     expect(ua.registerState).toBe('registered');
+    const requestsBeforeReconnect = server.requests.length;
 
-    // Simulate transport disconnect
-    await transport.disconnect();
-    // UA should detect and mark reconnect pending
+    // Simulate temporary transport disconnect (network outage, not close)
+    transport.simulateDisconnect();
     expect(ua.registerState).toBe('unregistered');
 
-    // Reconnect with a new transport
-    const newTransport = new FakeTransport({ reliable: true, framing: 'stream' });
-    await newTransport.connect();
-    // UA needs to be reconnected (this is a simplification; real UA might need a new transport)
-    // For now, just verify the state transition
+    // Simulate transport reconnect — UA should re-register automatically
+    transport.simulateReconnect();
+    expect(server.requests.length).toBeGreaterThan(requestsBeforeReconnect);
+    expect(ua.registerState).toBe('registered');
+
     await ua.disconnect();
   });
 

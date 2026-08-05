@@ -8,8 +8,8 @@
  * Supports: 401 challenge → 2xx, 423 (Min-Expires), arbitrary status codes,
  * and unregister (Contact `*`).
  *
- * Tracks challenged requests by (Call-ID, CSeq) so retries (which carry new
- * branches but incremented CSeqs) aren't re-challenged, breaking the recursion.
+ * Tracks challenged requests by Call-ID so retries (which carry new branches
+ * but incremented CSeqs) aren't re-challenged, breaking the recursion.
  */
 
 import { Headers } from '../../src/messages/index.js';
@@ -129,11 +129,8 @@ export class MockRegistrar {
 
   private deliver(response: SipResponseMessage): void {
     const bytes = serializeMessage(response);
-    // Defer delivery to the next microtask so the registrar's register()
-    // promise is returned before the response is processed, allowing tests
-    // to observe the 'registering' state.
-    queueMicrotask(() => {
-      this.transport.emitData(bytes);
-    });
+    // Deliver synchronously to prove branch tracking and ingress are installed
+    // BEFORE the first byte goes out.
+    this.transport.emitData(bytes);
   }
 }

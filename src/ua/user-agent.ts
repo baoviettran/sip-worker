@@ -100,10 +100,12 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     });
     this.ingress.start();
 
-    // Subscribe to transport disconnect events
+    // Subscribe to transport events
     this.transportUnsubscribe = this.transport.subscribe((event) => {
       if (event.type === 'disconnected') {
         this.onTransportDisconnected();
+      } else if (event.type === 'connected') {
+        this.onTransportReconnected();
       }
     });
 
@@ -202,6 +204,12 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     this.registrar?.onTransportDisconnected();
     // Note: we don't set this.connected = false here because the transport
     // might reconnect. The UA tracks its own lifecycle separately.
+  }
+
+  /** Handle transport reconnect: restart ingress, notify registrar. */
+  private onTransportReconnected(): void {
+    this.ingress?.start();
+    this.registrar?.onTransportConnected();
   }
 
   /** Forward transaction layer events (for future dialog/invite handling). */

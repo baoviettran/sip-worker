@@ -68,6 +68,21 @@ export class FakeTransport implements Transport {
     this.emit(error === undefined ? { type: 'disconnected' } : { type: 'disconnected', error });
   }
 
+  /**
+   * Simulate a temporary transport disconnect (network outage) without closing.
+   * Allows subsequent reconnect via simulateReconnect().
+   */
+  simulateDisconnect(): void {
+    this.connected = false;
+    this.emit({ type: 'disconnected' });
+  }
+
+  /** Simulate transport reconnect after a temporary disconnect. */
+  simulateReconnect(): void {
+    this.connected = true;
+    this.emit({ type: 'connected' });
+  }
+
   private emit(event: TransportEvent): void {
     for (const listener of this.listeners) listener(event);
   }
