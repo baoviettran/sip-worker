@@ -91,14 +91,42 @@ export interface TransactionLayer {
 
 The layer registers the top Via branch before the first send and removes it on termination. It creates non-2xx ACKs with the original INVITE branch. Dialog/session code creates 2xx ACKs with the INVITE numeric CSeq and a new branch.
 
-## Plan 03 Handoff (deferred items)
+## Plan 04 Handoff (deferred items)
 
-Phase 3 (transactions + dialogs) is merged and pushed. The following were deliberately deferred and are NOT yet fixed. Phase 4 builds on the dialog/transaction layer, so the first item is a real cross-phase concern; the rest are Phase-3-internal polish that is safe to fold in or leave.
+Phase 4 (authentication + registration) is merged and pushed. The following were deliberately deferred and are NOT yet fixed.
 
-**Phase 4 must fold in:**
-- `Dialog.makeTopVia` hardcodes the sent-by as `SIP/2.0/UDP 192.0.2.1:5060` (`src/dialogs/dialog.ts`). Phase 4 builds real REGISTER and outbound in-dialog requests, so the sent-by must come from the actual transport/socket rather than a fixed value. Wire the transport's real sent-by (host/port/protocol) into Via construction.
+**Cross-phase concern resolved:**
+- `Dialog.makeTopVia` hardcodes the sent-by as `SIP/2.0/UDP 192.0.2.1:5060` (`src/dialogs/dialog.ts`). Verified: REGISTER does NOT flow through `Dialog.makeTopVia` (it builds its own Via in `Registrar`). Only in-dialog requests (ACK/BYE/INVITE) use it. This is a Phase 5 concern when building outbound INVITE/ACK/BYE.
 
-**Phase-3-internal polish (available to fix, not blocking):**
+**Phase 5 must address (highest priority first):**
+
+*Authentication (highest priority):*
+- `authorization.ts:44-54` quoted values not backslash-escaped — a username/realm containing `"` or `\` produces a malformed quoted-string. Fix early in Phase 5 if user-supplied display names appear in credentials.
+- `digest.ts:66` qop typed `'auth' | 'auth-int'` but only `auth` formula implemented. If Phase 5 needs entity-body integrity, add the `auth-int` HA2 (`H(method:uri:H(entity-body))`) and stop stripping it in `selectChallenge`/`AuthManager.retry`.
+- `challenge.test.ts:438` malformed-escape test doesn't actually exercise malformed-escape path (error raised is missing-nonce). Test correctness issue only; the malformed-escape code path is correct.
+
+*Registrar/UA:*
+- `registrar.ts:202-204` every statusCode >= 300 treated as hard SipError — RFC 3261 10.2 defines 3xx as followable redirects, recoverable not nonrecoverable. Phase 5 redirect handling task should address this.
+- `user-agent.ts` `disconnect()` doesn't explicitly cancel registrar's refresh timer — sets `this.registrar = undefined` without calling `registrar.onTransportDisconnected()` or `cancelRefresh()`. The registrar's `clock.setTimeout` handle leaks until the FakeClock is GC'd. Call `registrar.onTransportDisconnected()` in `disconnect()` before nilling the reference, or give `Registrar` an explicit `dispose()`.
+- `manager.ts` `retriesByRequest` and `nonceCounts` maps grow unboundedly across a long-lived UA session. The UA constructs one `AuthManager` per `UserAgent` and the Registrar keys `requestId` as `callId:cseq`, so each CSeq gets a fresh budget entry and the map grows by one entry per outbound REGISTER. Phase 5 should either construct-per-exchange or add eviction before adding INVITE auth retries on the same manager instance.
+- `manager.ts:300-308` `nextVia` reconstructs Via from transport+sent-by+bare `;rport`, dropping other original params (`;comp`, `;transport`, `;received`). Phase 5 transport-diverse work (TLS/SCTP) should preserve these on auth retries.
+- `manager.ts:290` missing-CSeq fallback hardcodes method `INVITE` — only fires on malformed requests lacking CSeq (never in the REGISTER path).
+- `manager.ts:219-221` renderer line-split assumes exactly `": "` — safe because `renderAuthorization` always emits `Header: value`, but convention-couples two modules.
+
+*Challenge parser robustness:*
+- `challenge.ts:176` unquoted multi-word values split on whitespace; `:159-166` boundary heuristic breaks on a param hypothetically named `digest`; `:199-200` missing-realm/nonce error offsets hardcoded 0. Edge-case parser robustness items. The parser handles every RFC-conformant challenge in the test suite including quoted commas and multiple challenges. These are defensive-hardening items for a hardened-parser task, not merge blockers.
+
+*Coordinator/events:*
+- `coordinator.ts:53` `forward()` — a subscriber that throws propagates through the layer, breaking unrelated consumers. Internal API; the Registrar's subscriber never throws. A per-listener try/catch isolation is a defensive improvement for when external subscribers (dialogs, Phase 5 INVITE handling) attach to the same event stream.
+- `events.ts` `TypedEventEmitter` uses `Function`/`unknown[]` erasing payload types internally. The overload-based `RegistrationEventEmitter` interface preserves types at the call site; the implementation class internally erases. Consumers get typed events via the interface. Cosmetic only.
+- Event types (`RegistrationEvent`, `RegistrationEventEmitter`, `RegistrationStateChangedEvent`, `RegistrationFailedEvent`) not re-exported from `src/index.ts`. `RegistrationIdentity` and `RegisterState` are lifted. Phase 5 should add the event types to `src/index.ts` when the event surface is finalized for Plan 06 recovery.
+
+*Test coverage:*
+- `hash.test.ts:19` MD5 test label says "448-bit … abcdefghijklmnopqrstuvwxyz" — that string is 26 bytes = 208 bits, single-block. The 448-bit/two-block vector is the SHA-256 case below it. Test-description-only bug; expected value correct.
+- `digest.test.ts` throw tests don't assert the error message and miss the `cnonce`-present/`nc`-missing combination; the code path is identical so neither is load-bearing.
+- `manager.test.ts` stale=true tests don't discriminate budget consumption (both pass whether stale consumes budget; no boundary case), and stale path never tested with a genuinely NEW nonce so the nc-reset branch is untested.
+
+**Phase-3-internal polish (still available to fix, not blocking):**
 - `forward()` in `src/transactions/coordinator.ts` deletes the key from BOTH client and server maps on one `terminated` event; client/server keys share the `branch|method` shape and can collide (`branch|INVITE`). Harmless in practice (branches are unique per endpoint), but the helper could take the owning map to be precise.
 - `buildNon2xxAck` (`src/transactions/ack.ts`) clones the entire header set, a superset of the RFC-required headers (Route, From, Call-ID, Max-Forwards, Via); a targeted copy would be tighter.
 - DRY: `cseqMethod` is duplicated in `src/transactions/invite-client.ts` and `src/transactions/non-invite-client.ts`; `contactUri` in `src/dialogs/dialog.ts` re-implements the `<...>` extraction that `extractUri` in `src/dialogs/header-values.ts` already provides.
@@ -110,7 +138,7 @@ Phase 3 (transactions + dialogs) is merged and pushed. The following were delibe
 1. [x] [Plan 01 — Codec and package](./2026-08-04-01-codec-and-package.md)
 2. [x] [Plan 02 — Transport and ingress](./2026-08-04-02-transport-and-ingress.md)
 3. [x] [Plan 03 — Transactions and dialogs](./2026-08-04-03-transactions-and-dialogs.md)
-4. [ ] [Plan 04 — Authentication and registration](./2026-08-04-04-auth-and-registration.md)
+4. [x] [Plan 04 — Authentication and registration](./2026-08-04-04-auth-and-registration.md)
 5. [ ] [Plan 05 — Calls and media](./2026-08-04-05-calls-and-media.md)
 6. [ ] [Plan 06 — Reliability and release](./2026-08-04-06-reliability-and-release.md)
 
