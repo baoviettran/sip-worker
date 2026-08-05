@@ -27,3 +27,9 @@ export type {
   TransactionKey,
   TransactionLayerEvent,
 } from './transactions/index.js';
+export { UserAgent, Registrar } from './ua/index.js';
+export type { RegistrationIdentity, RegisterState } from './ua/index.js';
+export { AuthManager } from './auth/manager.js';
+export { computeDigest } from './auth/digest.js';
+export { parseDigestChallenges, selectChallenge } from './auth/challenge.js';
+export { renderAuthorization } from './auth/authorization.js';
