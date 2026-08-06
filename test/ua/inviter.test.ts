@@ -138,7 +138,9 @@ function setup(options: { credentials?: boolean; rejectTransport?: boolean } = {
   const authManager = credentials ? new AuthManager(idGenerator) : undefined;
   const options_: InviterOptions = {
     to: REMOTE_URI,
+    from: AOR,
     contact: CONTACT,
+    viaAddress: '192.0.2.1:5060',
     idGenerator,
     layer,
     clock,
@@ -166,7 +168,9 @@ function respond(
   const headers = new Headers();
   headers.set('Via', request.headers.get('Via') ?? `SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-test`);
   headers.set('From', request.headers.get('From') ?? `<${AOR}>;tag=inv-1`);
-  headers.set('To', request.headers.get('To') ?? `<${REMOTE_URI}>;tag=${over.toTag ?? 'bob-1'}`);
+  // Construct To header with tag (don't use request's To which has no tag)
+  const toUri = request.headers.get('To')?.match(/<([^>]+)>/)?.[1] ?? REMOTE_URI;
+  headers.set('To', `<${toUri}>;tag=${over.toTag ?? 'bob-1'}`);
   headers.set('Call-ID', request.headers.get('Call-ID') ?? 'call@example.com');
   headers.set('CSeq', request.headers.get('CSeq') ?? '1 INVITE');
   headers.set('Max-Forwards', '70');
@@ -308,6 +312,7 @@ describe('Inviter (outgoing SIP call session)', () => {
 
     respond(h, 200, { sdp: STUB_SDP, toTag: 'bob-1' });
     await flush();
+
     expect(acks(h).length).toBe(2);
     const secondAck = acks(h)[1]!.bytes;
     expect(Buffer.from(secondAck).equals(Buffer.from(firstAck))).toBe(true);

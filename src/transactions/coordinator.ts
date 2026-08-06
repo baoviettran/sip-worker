@@ -144,8 +144,8 @@ export class TransactionLayer implements MessageSink {
   private receiveResponse(response: SipResponseMessage): void {
     const key = clientKey(response);
     const tx = this.clients.get(key);
-    if (tx === undefined) {
-      // Unmatched response: emit for dialog-level handling (e.g. repeated 2xx)
+    if (tx === undefined || tx.state === 'Terminated') {
+      // Unmatched or terminated transaction: emit for dialog-level handling (e.g. repeated 2xx)
       const event = { type: 'statelessResponse' as const, response };
       this.emit(event);
       for (const listener of this.subscribers) listener(event);

@@ -14,7 +14,7 @@
 import { Headers, makeRequest, bodyText, serializeMessage } from '../messages/index.js';
 import type { SipRequestMessage, SipResponseMessage } from '../messages/message.js';
 import { SipError } from '../errors.js';
-import { makeBranch } from '../dialogs/header-values.js';
+import { makeBranch, extractTag } from '../dialogs/header-values.js';
 import { Dialog, type IdGenerator } from '../dialogs/dialog.js';
 import type { TransactionLayer } from '../transactions/coordinator.js';
 import type { TransactionLayerEvent } from '../transactions/types.js';
@@ -25,7 +25,9 @@ import { Session } from './session.js';
 
 export interface InviterOptions {
   readonly to: string;
+  readonly from: string;
   readonly contact: string;
+  readonly viaAddress: string;
   readonly idGenerator: IdGenerator;
   readonly layer: TransactionLayer;
   readonly clock: Clock;
@@ -44,7 +46,9 @@ function cseqNumber(msg: SipRequestMessage | SipResponseMessage): number {
 export class Inviter {
   readonly session: Session;
   private readonly to: string;
+  private readonly from: string;
   private readonly contact: string;
+  private readonly viaAddress: string;
   private readonly idGenerator: IdGenerator;
   private readonly layer: TransactionLayer;
   private readonly controller: WorkerMediaController;
@@ -69,7 +73,9 @@ export class Inviter {
   constructor(options: InviterOptions) {
     this.session = new Session();
     this.to = options.to;
+    this.from = options.from;
     this.contact = options.contact;
+    this.viaAddress = options.viaAddress;
     this.idGenerator = options.idGenerator;
     this.layer = options.layer;
     this.controller = options.controller;
@@ -137,9 +143,9 @@ export class Inviter {
   private buildInviteRequest(sdp: string): SipRequestMessage {
     const headers = new Headers();
     const branch = makeBranch(`inv-${(this.branchCounter += 1)}`);
-    headers.set('Via', `SIP/2.0/UDP 192.0.2.1:5060;branch=${branch}`);
+    headers.set('Via', `SIP/2.0/UDP ${this.viaAddress};branch=${branch}`);
     headers.set('Max-Forwards', '70');
-    headers.set('From', `<sip:alice@example.com>;tag=${this.fromTag}`);
+    headers.set('From', `<${this.from}>;tag=${this.fromTag}`);
     headers.set('To', `<${this.to}>`);
     headers.set('Call-ID', this.callId);
     headers.set('CSeq', `${this.localCSeq} INVITE`);
@@ -171,9 +177,15 @@ export class Inviter {
         if (this.dialog !== undefined && this.cachedAckBytes !== undefined) {
           const response = event.response;
           if (cseqNumber(response) === cseqNumber(request) && response.statusCode >= 200 && response.statusCode < 300) {
-            // Resend cached ACK, no state change
-            const transport = this.layer.getTransport();
-            void transport.send(this.cachedAckBytes);
+            // Verify this is for the same dialog
+            const callId = response.headers.get('Call-ID');
+            const fromTag = extractTag(response.headers.get('From'));
+            const toTag = extractTag(response.headers.get('To'));
+            if (callId === this.dialog.callId && fromTag === this.dialog.localTag && toTag === this.dialog.remoteTag) {
+              // Resend cached ACK, no state change
+              const transport = this.layer.getTransport();
+              void transport.send(this.cachedAckBytes);
+            }
           }
         }
       } else if (event.type === 'timeout' || event.type === 'transportError') {
