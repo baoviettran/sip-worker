@@ -136,10 +136,11 @@ describe('TransactionLayer', () => {
     expect(events[0]).toEqual(expect.objectContaining({ type: 'statelessRequest' }));
   });
 
-  it('drops unmatched responses', () => {
+  it('emits statelessResponse for unmatched responses', () => {
     const { events, layer } = setup();
     layer.receive(responseFor('z9hG4bK-unknown', 200));
-    expect(events).toHaveLength(0);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toEqual(expect.objectContaining({ type: 'statelessResponse' }));
   });
 
   it('removes the map entry only after terminated', () => {

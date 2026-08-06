@@ -68,6 +68,11 @@ export class TransactionLayer implements MessageSink {
     this.emit = options.emit;
   }
 
+  /** Expose the transport for direct sends (e.g. 2xx ACKs that bypass transactions). */
+  getTransport(): Transport {
+    return this.transport;
+  }
+
   /**
    * Forward a machine event outward, removing the transaction from the maps on
    * termination. Client and server keys can collide (both are `branch|method`),
@@ -139,7 +144,13 @@ export class TransactionLayer implements MessageSink {
   private receiveResponse(response: SipResponseMessage): void {
     const key = clientKey(response);
     const tx = this.clients.get(key);
-    if (tx === undefined) return; // unmatched response: drop
+    if (tx === undefined) {
+      // Unmatched response: emit for dialog-level handling (e.g. repeated 2xx)
+      const event = { type: 'statelessResponse' as const, response };
+      this.emit(event);
+      for (const listener of this.subscribers) listener(event);
+      return;
+    }
     tx.receive(response);
   }
 

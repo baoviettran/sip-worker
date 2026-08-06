@@ -40,6 +40,7 @@ export type TransactionLayerEvent =
   | { type: 'response'; transaction: ClientTransaction; response: SipResponseMessage }
   | { type: 'request'; transaction: ServerTransaction; request: SipRequestMessage }
   | { type: 'statelessRequest'; request: SipRequestMessage }
+  | { type: 'statelessResponse'; response: SipResponseMessage }
   | { type: 'timeout'; key: TransactionKey }
   | { type: 'transportError'; key: TransactionKey; error: TransportError }
   | { type: 'terminated'; key: TransactionKey };
