@@ -17,6 +17,7 @@ export type SessionState =
   | 'failed';
 
 export interface SessionEvent {
+  readonly session: Session;
   readonly previous: SessionState;
   readonly state: SessionState;
   readonly error?: Error;
@@ -42,7 +43,7 @@ export class Session {
     if (to === this.stateValue) return;
     const previous = this.stateValue;
     this.stateValue = to;
-    const event: SessionEvent = { previous, state: to, error };
+    const event: SessionEvent = { session: this, previous, state: to, error };
     for (const listener of this.listeners) listener(event);
   }
 }
