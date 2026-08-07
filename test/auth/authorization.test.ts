@@ -41,4 +41,16 @@ describe('renderAuthorization', () => {
     });
     expect(line).toBe('Authorization: Digest username="alice", realm="r", nonce="n", uri="sip:x", response="abc"');
   });
+
+  it('backslash-escapes a quote and a backslash inside quoted fields', () => {
+    const line = renderAuthorization({
+      username: 'a"b\\c',
+      realm: 'r',
+      nonce: 'n',
+      uri: 'sip:x',
+      response: 'abc',
+    });
+    // Every `"` and `\` inside the quoted username is escaped.
+    expect(line).toContain('username="a\\"b\\\\c"');
+  });
 });

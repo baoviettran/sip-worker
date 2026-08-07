@@ -19,19 +19,24 @@ export interface AuthorizationParams {
   readonly opaque?: string;
 }
 
+/** Escape `\` and `"` per RFC 2617 quoted-pair so a value can't break its quoted-string. */
+function escapeQuoted(value: string): string {
+  return value.replace(/[\\"]/g, (ch) => `\\${ch}`);
+}
+
 export function renderAuthorization(params: AuthorizationParams, proxy = false): string {
   const header = proxy ? 'Proxy-Authorization' : 'Authorization';
   const parts: string[] = [
-    `username="${params.username}"`,
-    `realm="${params.realm}"`,
-    `nonce="${params.nonce}"`,
-    `uri="${params.uri}"`,
-    `response="${params.response}"`,
+    `username="${escapeQuoted(params.username)}"`,
+    `realm="${escapeQuoted(params.realm)}"`,
+    `nonce="${escapeQuoted(params.nonce)}"`,
+    `uri="${escapeQuoted(params.uri)}"`,
+    `response="${escapeQuoted(params.response)}"`,
   ];
   if (params.algorithm !== undefined) parts.push(`algorithm=${params.algorithm}`);
   if (params.qop !== undefined) parts.push(`qop=${params.qop}`);
   if (params.nc !== undefined) parts.push(`nc=${params.nc}`);
-  if (params.cnonce !== undefined) parts.push(`cnonce="${params.cnonce}"`);
-  if (params.opaque !== undefined) parts.push(`opaque="${params.opaque}"`);
+  if (params.cnonce !== undefined) parts.push(`cnonce="${escapeQuoted(params.cnonce)}"`);
+  if (params.opaque !== undefined) parts.push(`opaque="${escapeQuoted(params.opaque)}"`);
   return `${header}: Digest ${parts.join(', ')}`;
 }
