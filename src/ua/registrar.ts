@@ -34,6 +34,12 @@ export interface RegistrarOptions {
   readonly authManager?: AuthManager;
   /** Refresh when this fraction of the granted expiry has elapsed. Default 0.5. */
   readonly refreshFraction?: number;
+  /**
+   * Optional recovery identity (stable Call-ID + next CSeq) to resume, instead
+   * of generating a fresh one. Used by the worker bridge so a replacement
+   * generation preserves its Call-ID and never reuses a CSeq.
+   */
+  readonly initialIdentity?: RegistrationIdentity;
 }
 
 /** Snapshot of the registrar's externally visible state. */
@@ -99,7 +105,10 @@ export class Registrar {
     this.authManager = options.authManager;
     this.credentials = options.credentials;
     this.refreshAfter = (granted) => Math.max(1, Math.floor(granted * (options.refreshFraction ?? 0.5)));
-    this.identity = { callId: options.idGenerator.branch(), nextCSeq: 1 };
+    this.identity = {
+      callId: options.initialIdentity?.callId ?? options.idGenerator.branch(),
+      nextCSeq: options.initialIdentity?.nextCSeq ?? 1,
+    };
     this.fromTag = options.idGenerator.branch();
   }
 

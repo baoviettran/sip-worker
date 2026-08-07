@@ -56,19 +56,8 @@ export interface UserAgentOptions {
    * Ping/Pong socket supplies `new NodeWebSocketLiveness(...)` here instead.
    */
   readonly liveness?: LivenessStrategy;
-}
-
-export interface UserAgentOptions {
-  readonly transport: Transport;
-  readonly clock: Clock;
-  readonly registrarUri: string;
-  readonly aor: string;
-  readonly contact: string;
-  readonly credentials?: { readonly username: string; readonly password: string };
-  readonly idGenerator: IdGenerator;
-  readonly authManager?: AuthManager;
-  readonly refreshFraction?: number;
-  readonly mediaController?: WorkerMediaController;
+  /** Optional recovery identity (Call-ID + next CSeq) to resume. */
+  readonly initialIdentity?: RegistrationIdentity;
 }
 
 export class UserAgent extends TypedEventEmitter implements RegistrationEventEmitter {
@@ -165,6 +154,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       clock: this.clock,
       authManager,
       refreshFraction: this.options.refreshFraction,
+      initialIdentity: this.options.initialIdentity,
     };
     this.registrar = new Registrar(registrarOptions);
 
