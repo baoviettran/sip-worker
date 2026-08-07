@@ -81,7 +81,6 @@ const supervisor = new WorkerSupervisor({
     spawn: () => {
       const runtime = new WorkerRuntime({
         port, // the worker half of a MessageChannel-style boundary
-        clock,
         buildUserAgent: (snapshot) =>
           new UserAgent({
             transport,

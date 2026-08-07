@@ -330,7 +330,7 @@ describe('release smoke: Scenario B (incoming call, TU 2xx retransmission)', () 
     transport.emitData(serializeMessage(makeRequest('BYE', REMOTE, bye)));
     await ticks();
     expect(invitation.session.state).toBe('terminated');
-    expect(countStatusCode(sent(transport), 200)).toBeGreaterThanOrEqual(afterAck);
+    expect(countStatusCode(sent(transport), 200)).toBe(afterAck + 1); // the BYE's own 200
 
     await ua.disconnect();
 
@@ -503,7 +503,6 @@ class FakeWorkerBeat implements SupervisedWorker {
     this.server = new MockRegistrar({ transport: this.transport });
     this.runtime = new WorkerRuntime({
       port: this.pair.worker,
-      clock,
       buildUserAgent: (registration: RegistrationSnapshot) => {
         const idGenerator = makeId();
         return new UserAgent({

@@ -101,7 +101,6 @@ class FakeWorkerBeat implements SupervisedWorker {
     this.server = new MockRegistrar({ transport });
     this.runtime = new WorkerRuntime({
       port: this.pair.worker,
-      clock,
       buildUserAgent: (registration: RegistrationSnapshot) =>
         new UserAgent({
           transport,

@@ -80,6 +80,31 @@ describe('NodeWebSocketLiveness', () => {
     expect(failures).toHaveLength(0);
   });
 
+  it('emits a fresh, distinct nonce per probe and clears it with its own matching pong', () => {
+    const { clock, socket, failures, liveness } = setup();
+    liveness.start();
+
+    clock.advance(5000); // first probe
+    const first = socket.pings[0]!;
+    expect(first.length).toBe(16);
+
+    socket.replyPong(); // clear first probe
+    clock.advance(5000); // second probe
+    expect(socket.pings).toHaveLength(2);
+    const second = socket.pings[1]!;
+    expect(second.length).toBe(16);
+
+    // Freshness: two consecutive probes must carry different nonce bytes.
+    expect(second).not.toEqual(first);
+
+    // A stale pong echoing the FIRST (already-cleared) nonce must not clear the SECOND.
+    socket.replyPong(first);
+    // The dedicated deadline for the second probe is still outstanding.
+    clock.advance(1000);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.message).toBe('liveness timeout');
+  });
+
   it('ignores a pong that does not match the outstanding nonce', () => {
     const { clock, socket, failures, liveness } = setup();
     liveness.start();

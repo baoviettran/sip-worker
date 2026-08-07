@@ -53,7 +53,7 @@ const CASES: Case[] = [
     name: 'duplicate-content-length.sip',
     accepted: false,
     offset: 58, // index of '6' in the second 'Content-Length: 6'
-    // 68-byte fixture; second value '6' at byte 57.
+    // 68-byte fixture; second value '6' at byte 58.
   },
   {
     // A line that cannot be a request or a response start line is rejected.

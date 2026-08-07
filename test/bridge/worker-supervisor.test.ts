@@ -368,7 +368,6 @@ describe('WorkerRuntime credential redaction', () => {
     });
     const runtime = new WorkerRuntime({
       port,
-      clock,
       buildUserAgent: () => uaShim as unknown as UserAgent,
     });
     const snapshotWithSecret: RegistrationSnapshot = {

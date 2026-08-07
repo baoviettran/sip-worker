@@ -318,7 +318,6 @@ declare const workerPort: WorkerPort;
 const runtimeLegacyPort = workerPort as unknown as WorkerToSupervisor;
 const runtimeOptions: WorkerRuntimeOptions = {
   port: { postMessage: (m: WorkerToSupervisor) => void m, subscribe: (l: (m: SupervisorToWorker) => void) => () => void l } as never,
-  clock,
   buildUserAgent: (snapshot: RegistrationSnapshot) =>
     new UACls({
       transport,

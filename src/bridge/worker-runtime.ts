@@ -14,7 +14,6 @@
  * application's to recreate.
  */
 
-import type { Clock } from '../transport/index.js';
 import type { UserAgent } from '../ua/user-agent.js';
 import type {
   RegistrationSnapshot,
@@ -28,7 +27,6 @@ const REDACTED = '[redacted]';
 export interface WorkerRuntimeOptions {
   /** The worker half of the boundary. */
   readonly port: WorkerRuntimePort;
-  readonly clock: Clock;
   /**
    * Builds the UA to run in this worker, given the recovery snapshot. A fresh
    * instance per generation; the caller seeds `initialIdentity` from the

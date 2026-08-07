@@ -43,6 +43,8 @@ export class NodeWebSocketLiveness implements LivenessStrategy {
   private deadlineTimer?: number;
   private pendingNonce?: Uint8Array;
   private unlisten?: () => void;
+  /** Monotonic counter driving a uniqueness-guaranteed nonce per probe. */
+  private nonceCounter = 0;
 
   constructor(readonly options: NodeWebSocketLivenessOptions) {
     this.socket = options.socket;
@@ -79,9 +81,19 @@ export class NodeWebSocketLiveness implements LivenessStrategy {
     // is preserved by the rescheduled timer above, so the next interval can probe
     // as soon as the matching pong clears the outstanding slot.
     if (this.pendingNonce !== undefined) return;
-    this.pendingNonce = new Uint8Array(new Uint8Array(16).fill(0)); // nonce body
+    this.pendingNonce = this.nextNonce();
     this.socket.ping(this.pendingNonce);
     this.deadlineTimer = this.clock.setTimeout(() => this.handleTimeout(), this.deadlineMs);
+  }
+
+  private nextNonce(): Uint8Array {
+    const nonce = new Uint8Array(16); // fresh 16-byte body, deterministic
+    let value = ++this.nonceCounter;
+    for (let i = nonce.length - 1; i >= 0 && value > 0; i -= 1) {
+      nonce[i] = value % 256;
+      value = Math.floor(value / 256);
+    }
+    return nonce;
   }
 
   private handlePong(payload: Uint8Array): void {
