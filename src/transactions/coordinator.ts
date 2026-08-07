@@ -85,6 +85,11 @@ export class TransactionLayer implements MessageSink {
       this.servers.delete(event.key);
     }
     this.emit(event);
+    this.emitToSubscribers(event);
+  }
+
+  /** Fan out an event to every subscriber, isolating any that throw. */
+  private emitToSubscribers(event: TransactionLayerEvent): void {
     for (const listener of this.subscribers) {
       try {
         listener(event);
@@ -163,7 +168,7 @@ export class TransactionLayer implements MessageSink {
       // Unmatched or terminated transaction: emit for dialog-level handling (e.g. repeated 2xx)
       const event = { type: 'statelessResponse' as const, response };
       this.emit(event);
-      for (const listener of this.subscribers) listener(event);
+      this.emitToSubscribers(event);
       return;
     }
     tx.receive(response);
@@ -180,7 +185,7 @@ export class TransactionLayer implements MessageSink {
       // Unmatched ACK: no transaction exists. Emit for dialog/TU matching.
       const event = { type: 'statelessRequest' as const, request };
       this.emit(event);
-      for (const listener of this.subscribers) listener(event);
+      this.emitToSubscribers(event);
       return;
     }
     this.createServer(request, key);

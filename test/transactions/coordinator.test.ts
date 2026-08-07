@@ -213,5 +213,32 @@ describe('TransactionLayer', () => {
     layer.receive(responseFor('z9hG4bK-reg', 200, 'REGISTER', '1'));
     clock.advance(TIMERS.K);
     expect(good).toContain('response');
+    // The terminated fan-out also reaches `good` past the throwing subscriber.
+    expect(good).toContain('terminated');
+  });
+
+  it('isolates a throwing subscriber on an unmatched response', () => {
+    const { layer } = setup();
+    const good: unknown[] = [];
+    layer.subscribe(() => { throw new Error('boom'); });
+    layer.subscribe((e) => good.push(e.type));
+    // No matching client transaction: routed as a statelessResponse.
+    layer.receive(responseFor('z9hG4bK-unknown', 200));
+    expect(good).toContain('statelessResponse');
+  });
+
+  it('isolates a throwing subscriber on an unmatched ACK', () => {
+    const { layer } = setup();
+    const good: unknown[] = [];
+    layer.subscribe(() => { throw new Error('boom'); });
+    layer.subscribe((e) => good.push(e.type));
+    const ack = makeRequest('ACK', 'sip:bob@example.com', new Headers());
+    ack.headers.set('Via', viaHeader('z9hG4bK-fresh2xx'));
+    ack.headers.set('From', '<sip:alice@example.com>');
+    ack.headers.set('To', '<sip:bob@example.com>');
+    ack.headers.set('Call-ID', 'ack123');
+    ack.headers.set('CSeq', '41 ACK');
+    layer.receive(ack);
+    expect(good).toContain('statelessRequest');
   });
 });
