@@ -1,4 +1,5 @@
 import { TransportError } from '../../errors.js';
+import type { NativePingSocket } from '../../reliability/node-ws-liveness.js';
 import type {
   Transport,
   TransportCapabilities,
@@ -19,6 +20,36 @@ export interface NodeWebSocketLike {
   removeListener?(event: NodeWebSocketEvent, listener: SocketListener): void;
   send(data: Uint8Array, callback: (error?: Error) => void): void;
   close(code?: number, reason?: string): void;
+}
+
+/** The native Node WebSocket Ping/Pong surface supplied by an optional adapter. */
+export interface NativeNodeWebSocket {
+  ping(payload: Uint8Array): void;
+  on(event: 'pong', listener: (payload: Uint8Array) => void): void;
+  off(event: 'pong', listener: (payload: Uint8Array) => void): void;
+}
+
+/**
+ * Adapts an optional native Node WebSocket to `NativePingSocket` so the
+ * reliability layer can run protocol-level Ping/Pong. Returns undefined when
+ * `ws` exposes no native ping/pong hooks, in which case the transport provides
+ * no liveness socket and callers fall back to another strategy.
+ */
+export function toNativePingSocket(ws?: NativeNodeWebSocket): NativePingSocket | undefined {
+  if (ws === undefined || typeof ws.ping !== 'function') return undefined;
+  const on = ws.on;
+  const off = ws.off;
+  return {
+    ping(payload: Uint8Array): void {
+      ws.ping(payload);
+    },
+    onPong(listener: (payload: Uint8Array) => void): () => void {
+      on.call(ws, 'pong', listener);
+      return () => {
+        off.call(ws, 'pong', listener);
+      };
+    },
+  };
 }
 
 interface ConnectAttempt {
