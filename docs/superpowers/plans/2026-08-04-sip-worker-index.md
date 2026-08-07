@@ -140,7 +140,7 @@ Phase 4 (authentication + registration) is merged and pushed. The following were
 3. [x] [Plan 03 — Transactions and dialogs](./2026-08-04-03-transactions-and-dialogs.md)
 4. [x] [Plan 04 — Authentication and registration](./2026-08-04-04-auth-and-registration.md)
 5. [x] [Plan 05 — Calls and media](./2026-08-04-05-calls-and-media.md)
-6. [ ] [Plan 06 — Reliability and release](./2026-08-04-06-reliability-and-release.md)
+6. [x] [Plan 06 — Reliability and release](./2026-08-04-06-reliability-and-release.md)
 
 ## Plan Gates
 
