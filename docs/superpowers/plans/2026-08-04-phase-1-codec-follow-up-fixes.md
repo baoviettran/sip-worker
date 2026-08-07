@@ -28,7 +28,7 @@
 - Consumes: `SipStreamDecoder.push(chunk): ParseResult<Uint8Array[]>`.
 - Produces: matching parser/decoder rejection for a continuation without a preceding header.
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 ```ts
 it('rejects an orphan header continuation and resets', () => {
@@ -43,23 +43,23 @@ it('rejects an orphan header continuation and resets', () => {
 });
 ```
 
-- [ ] **Step 2: Run the focused test to verify RED**
+- [x] **Step 2: Run the focused test to verify RED**
 
 Run: `npx vitest run test/stream/decoder.test.ts -t "orphan header continuation"`
 
 Expected: FAIL because the decoder emits a zero-body frame.
 
-- [ ] **Step 3: Implement strict header-only unfolding**
+- [x] **Step 3: Implement strict header-only unfolding**
 
 In `contentLength`, remove the start line before unfolding. Make `unfoldHeaderLines` return `ParseResult<HeaderLine[]>` and return `ParseError(line.byteOffset, 'continuation without a header')` when the first header line is a continuation. Propagate this result through `contentLength` so `push` resets via `failAndReset`.
 
-- [ ] **Step 4: Run the focused decoder suite to verify GREEN**
+- [x] **Step 4: Run the focused decoder suite to verify GREEN**
 
 Run: `npx vitest run test/stream/decoder.test.ts`
 
 Expected: all decoder tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/stream/decoder.ts test/stream/decoder.test.ts
@@ -76,7 +76,7 @@ git commit -m "fix: reject orphan stream header continuations"
 - Consumes: per-frame `MAX_HEADER_BLOCK` and `MAX_BODY` checks.
 - Produces: all complete valid frames present in one `push` result.
 
-- [ ] **Step 1: Write the failing regression test**
+- [x] **Step 1: Write the failing regression test**
 
 ```ts
 it('accepts three large valid messages in one push', () => {
@@ -92,23 +92,23 @@ it('accepts three large valid messages in one push', () => {
 });
 ```
 
-- [ ] **Step 2: Run the focused test to verify RED**
+- [x] **Step 2: Run the focused test to verify RED**
 
 Run: `npx vitest run test/stream/decoder.test.ts -t "three large valid messages"`
 
 Expected: FAIL with `stream buffer too large`.
 
-- [ ] **Step 3: Remove the aggregate pending-buffer rejection**
+- [x] **Step 3: Remove the aggregate pending-buffer rejection**
 
 Delete the post-frame `this.rx.length > MAX_HEADER_BLOCK + MAX_BODY + 4` check. The loop already rejects an incomplete oversized header and `frameLen` already bounds incomplete bodies per frame; complete frames must continue through the loop.
 
-- [ ] **Step 4: Run the focused decoder suite to verify GREEN**
+- [x] **Step 4: Run the focused decoder suite to verify GREEN**
 
 Run: `npx vitest run test/stream/decoder.test.ts`
 
 Expected: all decoder tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/stream/decoder.ts test/stream/decoder.test.ts
@@ -127,7 +127,7 @@ git commit -m "fix: consume all valid batched stream frames"
 - Consumes: unfolded Content-Length logical values.
 - Produces: identical first-invalid-byte offsets from `parseMessage` and `SipStreamDecoder`.
 
-- [ ] **Step 1: Write failing ordinary and folded offset tests**
+- [x] **Step 1: Write failing ordinary and folded offset tests**
 
 ```ts
 const ordinary = 'MESSAGE sip:b SIP/2.0\r\nContent-Length: 12x\r\n\r\n';
@@ -144,23 +144,23 @@ expect(parseMessage(encoder.encode(folded))).toMatchObject({
 
 Add equivalent assertions through `SipStreamDecoder.push`.
 
-- [ ] **Step 2: Run focused tests to verify RED**
+- [x] **Step 2: Run focused tests to verify RED**
 
 Run: `npx vitest run test/messages/parser.test.ts test/stream/decoder.test.ts -t "exact invalid Content-Length byte"`
 
 Expected: FAIL because current errors point to the value start and folded parser/decoder offsets disagree.
 
-- [ ] **Step 3: Add source-byte maps during unfolding**
+- [x] **Step 3: Add source-byte maps during unfolding**
 
 Extend internal header rows/lines with `valueOffsets: number[]`. Build the map by iterating decoded code points and advancing by `TextEncoder.encode(codePoint).byteLength`; map inserted unfolding space to the continuation line's leading whitespace byte. Trim strings and maps together. Locate the first `[^0-9]` index and return `valueOffsets[index]`, falling back to the empty value's byte offset.
 
-- [ ] **Step 4: Run focused suites to verify GREEN**
+- [x] **Step 4: Run focused suites to verify GREEN**
 
 Run: `npx vitest run test/messages/parser.test.ts test/stream/decoder.test.ts`
 
 Expected: all parser and decoder tests pass with matching exact offsets.
 
-- [ ] **Step 5: Run full verification**
+- [x] **Step 5: Run full verification**
 
 Run independently:
 
@@ -173,7 +173,7 @@ git diff --check
 
 Expected: all commands exit 0; no formatting errors.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/messages/parser.ts src/stream/decoder.ts test/messages/parser.test.ts test/stream/decoder.test.ts
