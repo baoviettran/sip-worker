@@ -101,6 +101,31 @@ export class Dialog {
     );
   }
 
+  /**
+   * Create a UAS dialog from the incoming INVITE request and the 2xx response
+   * (RFC 3261 12.1.1). The route set is the Record-Route wire order (not
+   * reversed). The local target is the Contact URI from the request.
+   */
+  static fromUas(
+    request: SipRequestMessage,
+    response: SipResponseMessage,
+    idGenerator: IdGenerator,
+  ): Dialog {
+    const recordRoutes = parseRecordRoutes(request.headers);
+    // UAS: local=To (response), remote=From (request)
+    return new Dialog(
+      idGenerator,
+      cseqNumber(request.headers),
+      contactUri(request.headers) ?? request.uri,
+      contactUri(request.headers),
+      recordRoutes,
+      response.headers.get('To') ?? '',  // fromValue=local=To
+      request.headers.get('From') ?? '', // toValue=remote=From
+      request.headers.get('Call-ID') ?? '',
+      request.headers.get('Max-Forwards') ?? DEFAULT_MAX_FORWARDS,
+    );
+  }
+
   get remoteTag(): string {
     return extractTag(this.toValue) ?? '';
   }

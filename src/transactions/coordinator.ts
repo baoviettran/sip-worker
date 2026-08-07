@@ -135,6 +135,15 @@ export class TransactionLayer implements MessageSink {
     return tx;
   }
 
+  /** Send a response via an existing server transaction. */
+  sendResponse(key: TransactionKey, response: SipResponseMessage): void {
+    const tx = this.servers.get(key);
+    if (tx === undefined) {
+      throw new TransportError(`no server transaction found for key: ${key}`);
+    }
+    tx.sendResponse(response);
+  }
+
   /** Route an incoming message to the correct client or server transaction. */
   receive(message: SipMessage): void {
     if (isRequest(message)) this.receiveRequest(message);
@@ -163,7 +172,9 @@ export class TransactionLayer implements MessageSink {
     }
     if (request.method === 'ACK') {
       // Unmatched ACK: no transaction exists. Emit for dialog/TU matching.
-      this.emit({ type: 'statelessRequest', request });
+      const event = { type: 'statelessRequest' as const, request };
+      this.emit(event);
+      for (const listener of this.subscribers) listener(event);
       return;
     }
     this.createServer(request, key);
