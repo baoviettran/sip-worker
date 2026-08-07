@@ -242,6 +242,24 @@ describe('AuthManager.retry', () => {
     const nc1 = staleRequest.headers.get('Authorization')?.match(/nc=([0-9a-fA-F]{8})/)?.[1];
     expect(nc1).toBe('00000002');
   });
+
+  it('preserves every Via param except branch on auth retry', () => {
+    const f = fixture();
+    // Original Via with params current nextVia drops.
+    f.request.headers.set(
+      'Via',
+      'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-original;received=10.0.0.1;comp=sigcomp;transport=tls;rport',
+    );
+    f.request.headers.set('CSeq', '1 INVITE');
+    const manager = new AuthManager(f.ids());
+    const retried = manager.retry(f.context()) as SipRequestMessage;
+    const via = retried.headers.get('Via');
+    expect(via).toContain('received=10.0.0.1');
+    expect(via).toContain('comp=sigcomp');
+    expect(via).toContain('transport=tls');
+    expect(via).toContain('rport');
+    expect(via).not.toContain('z9hG4bK-original');
+  });
 });
 
 describe('AuthManager.redact', () => {

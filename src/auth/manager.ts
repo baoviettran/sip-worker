@@ -259,15 +259,19 @@ function nextCSeq(headers: Headers): string {
 }
 
 /**
- * Builds a fresh single Via from the topmost Via of the original request,
- * preserving its transport and sent-by while swapping in a new branch.
+ * Builds a fresh Via from the original top Via, replacing only the branch and
+ * keeping every other param (`;received`, `;comp`, `;transport`, `;rport`, …)
+ * verbatim. Falls back to a UDP sent-by when no Via is present.
  */
 function nextVia(idGenerator: IdGenerator, headers: Headers): string {
-  const existing = headers.get('Via');
-  const via = existing ?? 'SIP/2.0/UDP 192.0.2.1:5060';
-  const transport = via.match(/^(SIP\/2\.0\/[A-Z0-9]+)/)?.[1] ?? 'SIP/2.0/UDP';
-  const sentBy = /\s([^;\s]+)/.exec(via)?.[1] ?? '192.0.2.1:5060';
-  const rport = /;rport\b/.test(via) ? ';rport' : '';
+  const via = headers.get('Via');
+  if (via === undefined) {
+    return `SIP/2.0/UDP 192.0.2.1:5060;branch=${makeBranch(idGenerator.branch())}`;
+  }
   const branch = makeBranch(idGenerator.branch());
-  return `${transport} ${sentBy};branch=${branch}${rport}`;
+  // Replace the branch param in place; keep everything else.
+  const reBranch = /(^|;|\s)branch=[^;]*/;
+  return reBranch.test(via)
+    ? via.replace(/branch=[^;]*/, `branch=${branch}`)
+    : `${via};branch=${branch}`;
 }
