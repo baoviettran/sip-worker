@@ -4,6 +4,7 @@ import { makeRequest } from '../messages/message.js';
 import {
   MAGIC_COOKIE,
   extractTag,
+  extractUri,
   isStrictRouter,
   makeBranch,
   parseRecordRoutes,
@@ -29,10 +30,7 @@ function makeTopVia(branch: string): string {
 
 /** Extract the Contact URI from the first Contact header (RFC 3261 12.1.1). */
 function contactUri(headers: Headers): string | undefined {
-  const value = headers.get('Contact');
-  if (value === undefined) return undefined;
-  const match = value.match(/<([^>]+)>/);
-  return match?.[1];
+  return extractUri(headers.get('Contact'));
 }
 
 /**

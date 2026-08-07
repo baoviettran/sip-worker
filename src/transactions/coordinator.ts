@@ -74,15 +74,20 @@ export class TransactionLayer implements MessageSink {
   }
 
   /**
-   * Forward a machine event outward, removing the transaction from the maps on
-   * termination. Client and server keys can collide (both are `branch|method`),
-   * but a single-key delete is acceptable because branches are unique per
-   * endpoint, so a key can only ever name one live client and one live server.
+   * Forward a machine event outward, removing the transaction from the map that
+   * owns it on termination. Client and server keys can collide (both are
+   * `branch|method`), so a `terminated` delete must target only the owning map:
+   * an INVITE client and an INVITE server on the same branch|method key can be
+   * live simultaneously, and a dual delete would remove the wrong transaction.
+   * The owner is captured at the per-transaction `emit` closure site; an event
+   * with no owner (never a `terminated`) deletes nothing.
    */
-  private forward(event: TransactionLayerEvent): void {
-    if (event.type === 'terminated') {
-      this.clients.delete(event.key);
-      this.servers.delete(event.key);
+  private forward(
+    event: TransactionLayerEvent,
+    owner?: Map<TransactionKey, ClientHandle | ServerHandle>,
+  ): void {
+    if (event.type === 'terminated' && owner !== undefined) {
+      owner.delete(event.key);
     }
     this.emit(event);
     this.emitToSubscribers(event);
@@ -122,7 +127,7 @@ export class TransactionLayer implements MessageSink {
     const existing = this.clients.get(key);
     if (existing !== undefined) return existing;
 
-    const emit = (event: TransactionLayerEvent): void => this.forward(event);
+    const emit = (event: TransactionLayerEvent): void => this.forward(event, this.clients);
 
     let tx: ClientHandle;
     if (request.method === 'INVITE') {
@@ -192,7 +197,7 @@ export class TransactionLayer implements MessageSink {
   }
 
   private createServer(request: SipRequestMessage, key: TransactionKey): void {
-    const emit = (event: TransactionLayerEvent): void => this.forward(event);
+    const emit = (event: TransactionLayerEvent): void => this.forward(event, this.servers);
     let tx: ServerHandle;
     if (request.method === 'INVITE') {
       tx = new InviteServerTransaction({

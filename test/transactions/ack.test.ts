@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildNon2xxAck } from '../../src/transactions/index.js';
+import { buildNon2xxAck, cseqMethod } from '../../src/transactions/index.js';
 import type { SipRequestMessage, SipResponseMessage } from '../../src/messages/message.js';
 import { Headers, makeRequest, makeResponse } from '../../src/messages/index.js';
 
@@ -16,6 +16,7 @@ function makeInvite(): SipRequestMessage {
   headers.set('CSeq', '41 INVITE');
   headers.set('Max-Forwards', '70');
   headers.set('Route', '<sip:proxy.example.com>');
+  headers.set('Contact', '<sip:alice@192.0.2.1:5060>');
   headers.set('Content-Type', 'application/sdp');
   return makeRequest('INVITE', 'sip:bob@example.com', headers, new Uint8Array([1, 2, 3]));
 }
@@ -29,6 +30,18 @@ function makeResponse486(): SipResponseMessage {
   headers.set('CSeq', '41 INVITE');
   return makeResponse(486, 'Busy Here', headers);
 }
+
+describe('cseqMethod', () => {
+  it('is exported and returns the last whitespace token of the CSeq', () => {
+    const headers = new Headers();
+    headers.set('CSeq', '41 INVITE');
+    expect(cseqMethod(makeResponse(200, 'OK', headers))).toBe('INVITE');
+  });
+
+  it('returns undefined when the CSeq is absent', () => {
+    expect(cseqMethod(makeResponse(200, 'OK', new Headers()))).toBeUndefined();
+  });
+});
 
 describe('buildNon2xxAck', () => {
   it('builds transaction ACK with original branch and numeric CSeq', () => {
@@ -55,5 +68,14 @@ describe('buildNon2xxAck', () => {
     expect(ack.body.length).toBe(0);
     expect(ack.headers.has('Content-Type')).toBe(false);
     expect(ack.headers.has('Content-Length')).toBe(false);
+  });
+
+  it('carries only the RFC-required ACK headers, dropping the rest', () => {
+    const ack = buildNon2xxAck(makeInvite(), makeResponse486());
+    expect(ack.headers.has('Contact')).toBe(false);
+    expect(ack.headers.has('Content-Type')).toBe(false);
+    expect(ack.headers.has('Content-Length')).toBe(false);
+    expect(ack.headers.has('WWW-Authenticate')).toBe(false);
+    expect(ack.headers.has('X-Extra')).toBe(false);
   });
 });

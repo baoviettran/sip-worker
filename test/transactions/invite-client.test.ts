@@ -194,13 +194,18 @@ describe('InviteClientTransaction', () => {
     expect(events.filter((e) => e.type === 'response')).toHaveLength(responsesBefore);
   });
 
-  it('ignores nonmatching CSeq methods', () => {
+  it('routes via the shared cseqMethod: ignores a nonmatching method but matches INVITE', () => {
     const { transport, events, tx } = setup();
     tx.start();
+    // A non-INVITE CSeq method is ignored through the shared helper.
     tx.receive(response(200, 'BYE'));
     expect(tx.state).toBe('Calling');
     expect(events.filter((e) => e.type === 'response')).toHaveLength(0);
     expect(transport.sent.length).toBe(1);
+    // A matching INVITE CSeq method is routed through the same helper.
+    tx.receive(response(200, 'INVITE'));
+    expect(tx.state).toBe('Accepted');
+    expect(events.filter((e) => e.type === 'response')).toHaveLength(1);
   });
 
   it('ignores invalid status codes', () => {

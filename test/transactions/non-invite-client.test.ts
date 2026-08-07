@@ -186,13 +186,18 @@ describe('NonInviteClientTransaction', () => {
     expect(tx.state).toBe('Completed');
   });
 
-  it('ignores nonmatching CSeq methods', () => {
+  it('routes via the shared cseqMethod: ignores a nonmatching method but matches REGISTER', () => {
     const { transport, events, tx } = setup();
     tx.start();
+    // A non-REGISTER CSeq method is ignored through the shared helper.
     tx.receive(response(200, 'INVITE'));
     expect(tx.state).toBe('Trying');
     expect(events.filter((e) => e.type === 'response')).toHaveLength(0);
     expect(transport.sent.length).toBe(1);
+    // A matching REGISTER CSeq method is routed through the same helper.
+    tx.receive(response(200, 'REGISTER'));
+    expect(tx.state).toBe('Completed');
+    expect(events.filter((e) => e.type === 'response')).toHaveLength(1);
   });
 
   it('ignores invalid status codes', () => {

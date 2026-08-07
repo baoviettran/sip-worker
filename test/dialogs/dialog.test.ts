@@ -57,6 +57,25 @@ describe('Dialog.fromUac', () => {
     expect(dialog.remoteTarget).toBe('sip:bob@192.0.2.5:5060');
   });
 
+  it('extracts the URI contact with a trailing URI parameter (delegates to extractUri)', () => {
+    const response = make2xx();
+    response.headers.set('Contact', '<sip:bob@192.0.2.5:5060>;expires=60');
+    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator());
+    expect(dialog.remoteTarget).toBe('sip:bob@192.0.2.5:5060');
+  });
+
+  it('falls back to the request URI when Contact is absent', () => {
+    const headers = new Headers();
+    headers.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-invite');
+    headers.set('From', '<sip:alice@example.com>;tag=alice9');
+    headers.set('To', '<sip:bob@example.com>;tag=bob77');
+    headers.set('Call-ID', 'abc123');
+    headers.set('CSeq', '41 INVITE');
+    const noContact = makeResponse(200, 'OK', headers);
+    const dialog = Dialog.fromUac(makeInvite(), noContact, fakeIdGenerator());
+    expect(dialog.remoteTarget).toBe('sip:bob@example.com');
+  });
+
   it('keeps the UAC route set as the reversed Record-Route order', () => {
     const dialog = Dialog.fromUac(
       makeInvite(),

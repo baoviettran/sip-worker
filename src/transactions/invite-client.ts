@@ -2,6 +2,7 @@ import { TransportError } from '../errors.js';
 import type { SipRequestMessage, SipResponseMessage } from '../messages/message.js';
 import { serializeMessage } from '../messages/serializer.js';
 import type { Clock, Transport } from '../transport/transport.js';
+import { cseqMethod } from './ack.js';
 import { cancel, schedule } from './timers.js';
 import type {
   ClientTransaction,
@@ -21,14 +22,6 @@ export interface InviteClientOptions {
   readonly reliable: boolean;
   readonly emit: (event: TransactionLayerEvent) => void;
   readonly buildNon2xxAck: (request: SipRequestMessage, response: SipResponseMessage) => SipRequestMessage;
-}
-
-/** Last whitespace-separated token of CSeq is the method; undefined if absent. */
-function cseqMethod(response: SipResponseMessage): string | undefined {
-  const cseq = response.headers.get('CSeq');
-  if (cseq === undefined) return undefined;
-  const parts = cseq.trim().split(/\s+/);
-  return parts[parts.length - 1];
 }
 
 /**

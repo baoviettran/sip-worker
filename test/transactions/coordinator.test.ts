@@ -143,6 +143,48 @@ describe('TransactionLayer', () => {
     expect(events[0]).toEqual(expect.objectContaining({ type: 'statelessResponse' }));
   });
 
+  it('deletes only the owning map entry when a key is shared by client and server', () => {
+    const { clock, events, layer } = setup(true);
+    // A UA both sends and receives on the SAME branch: an INVITE client
+    // transaction and an INVITE server transaction share the key
+    // `z9hG4bK-abc|INVITE`. Terminating one must not delete the other.
+    const invite = makeInvite();
+    layer.sendRequest(invite); // client transaction, key z9hG4bK-abc|INVITE
+    layer.receive(makeInvite()); // server transaction, same key
+    // Both reach Completed.
+    layer.receive(responseFor('z9hG4bK-abc', 486)); // client -> Completed
+    layer.sendResponse('z9hG4bK-abc|INVITE', responseFor('z9hG4bK-abc', 486)); // server -> Completed
+    expect(events.filter((e) => e.type === 'terminated')).toHaveLength(0);
+
+    // Advance past timer D: only the CLIENT terminates. This layer is reliable,
+    // so its derived D = 0 (use TIMERS's own mismatch would skip forward far
+    // enough to also fire the server's timer H).
+    clock.advance(0); // client Completed -> Terminated (reliable D = 0)
+    expect(events).toContainEqual({ type: 'terminated', key: 'z9hG4bK-abc|INVITE' });
+    const terminatedAtClient = events.filter((e) => e.type === 'terminated').length;
+
+    // The SERVER transaction on the same key must still be tracked: a duplicate
+    // INVITE for that branch is routed to it (no fresh transaction, no
+    // statelessRequest for a non-ACK).
+    const requestsBefore = events.filter((e) => e.type === 'request').length;
+    layer.receive(makeInvite());
+    expect(events.filter((e) => e.type === 'statelessRequest')).toHaveLength(0);
+    expect(events.filter((e) => e.type === 'request').length).toBe(requestsBefore);
+
+    // The server ACKs and its own termination does not resurrect anything.
+    const ack = makeRequest('ACK', 'sip:bob@example.com', invite.headers);
+    layer.receive(ack); // server Completed -> Confirmed
+    clock.advance(0); // server Confirmed -> Terminated (reliable I = 0)
+    expect(events.filter((e) => e.type === 'terminated')).toHaveLength(terminatedAtClient + 1);
+
+    // The client entry was removed on client-terminate: a late 2xx is unmatched
+    // and emitted only as a statelessResponse (the earlier 486 was one real
+    // response event).
+    layer.receive(responseFor('z9hG4bK-abc', 200));
+    expect(events.filter((e) => e.type === 'response')).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'statelessResponse')).toHaveLength(1);
+  });
+
   it('removes the map entry only after terminated', () => {
     const { clock, layer, events } = setup();
     const invite = makeInvite();
