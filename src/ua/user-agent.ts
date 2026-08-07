@@ -30,6 +30,33 @@ import type { RegistrationEventEmitter } from './events.js';
 import { Inviter } from './inviter.js';
 import { Invitation } from './invitation.js';
 import type { WorkerMediaController } from '../media/worker-controller.js';
+import type { LivenessStrategy } from '../reliability/index.js';
+import { OptionsLiveness } from '../reliability/index.js';
+import { Headers, makeRequest } from '../messages/index.js';
+import { makeBranch } from '../dialogs/header-values.js';
+
+/** Default SIP OPTIONS probe cadence for the built-in browser-safe strategy. */
+const OPTIONS_PROBE_INTERVAL_MS = 30000;
+
+
+export interface UserAgentOptions {
+  readonly transport: Transport;
+  readonly clock: Clock;
+  readonly registrarUri: string;
+  readonly aor: string;
+  readonly contact: string;
+  readonly credentials?: { readonly username: string; readonly password: string };
+  readonly idGenerator: IdGenerator;
+  readonly authManager?: AuthManager;
+  readonly refreshFraction?: number;
+  readonly mediaController?: WorkerMediaController;
+  /**
+   * Optional injected liveness strategy. Defaults to a SIP OPTIONS strategy
+   * (browser-safe) when absent. A Node composition root that exposes a native
+   * Ping/Pong socket supplies `new NodeWebSocketLiveness(...)` here instead.
+   */
+  readonly liveness?: LivenessStrategy;
+}
 
 export interface UserAgentOptions {
   readonly transport: Transport;
@@ -56,6 +83,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
   private disconnected = false;
   private activeInviter?: Inviter;
   private activeInvitations = new Map<string, Invitation>();
+  private liveness?: LivenessStrategy;
 
   constructor(options: UserAgentOptions) {
     super();
@@ -139,6 +167,13 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       refreshFraction: this.options.refreshFraction,
     };
     this.registrar = new Registrar(registrarOptions);
+
+    // Start liveness only once the transport is connected and all layers are
+    // wired. Injecting an explicit strategy (e.g. NodeWebSocketLiveness) wins;
+    // the default is a browser-safe SIP OPTIONS strategy.
+    this.liveness?.stop();
+    this.liveness = this.options.liveness ?? this.buildOptionsLiveness();
+    this.liveness.start();
   }
 
   /** Register against the registrar. */
@@ -245,6 +280,10 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     if (this.disconnected) return;
     this.disconnected = true;
 
+    // Stop liveness before tearing down the transport.
+    this.liveness?.stop();
+    this.liveness = undefined;
+
     // Stop ingress
     this.ingress?.stop();
     this.ingress = undefined;
@@ -276,6 +315,40 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
   private onTransportReconnected(): void {
     this.ingress?.start();
     this.registrar?.onTransportConnected();
+  }
+
+  /**
+   * Build the default browser-safe OPTIONS liveness strategy. Each probe carries
+   * a fresh Via branch and a strictly increasing CSeq on a stable Call-ID, sent
+   * through the connected transaction layer. Any final response proves liveness;
+   * a timeout or transport error is reported as a typed failure.
+   */
+  private buildOptionsLiveness(): LivenessStrategy {
+    const layer = this.layer;
+    if (layer === undefined) {
+      throw new Error('UserAgent is not connected');
+    }
+    const requestFactory = (index: number) => {
+      const headers = new Headers();
+      headers.set('Via', `SIP/2.0/UDP 192.0.2.1:5060;branch=${makeBranch(`opt-${index}`)}`);
+      headers.set('Max-Forwards', '70');
+      headers.set('From', `<${this.options.aor}>;tag=ua-opt`);
+      headers.set('To', `<${this.options.registrarUri}>`);
+      headers.set('Call-ID', `ua-opt-${this.options.idGenerator.branch()}`);
+      headers.set('CSeq', `${index} OPTIONS`);
+      return makeRequest('OPTIONS', this.options.registrarUri, headers);
+    };
+    return new OptionsLiveness({
+      layer,
+      clock: this.clock,
+      requestFactory,
+      probeIntervalMs: OPTIONS_PROBE_INTERVAL_MS,
+      onFailure: (error) => this.emit('failed', {
+        type: 'failed',
+        error,
+        identity: this.identity ?? { callId: '', nextCSeq: 1 },
+      }),
+    });
   }
 
   /** Forward transaction layer events (for future dialog/invite handling). */
