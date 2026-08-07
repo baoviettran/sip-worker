@@ -271,6 +271,22 @@ describe('AuthManager.retry', () => {
     const cseq = retried.headers.get('CSeq');
     expect(cseq).toMatch(/^1 SUBSCRIBE$/);
   });
+
+  it('routes a rendered header value that itself contains ": "', () => {
+    const f = fixture();
+    const manager = new AuthManager(f.ids());
+    // renderAuthorization emits the full header line; force the manager's splitter
+    // to face a value with ": " by putting colons in the response realm.
+    f.response.headers.set(
+      'WWW-Authenticate',
+      'Digest realm="realm: with: colons", nonce="n", algorithm=MD5',
+    );
+    const retried = manager.retry(f.context()) as SipRequestMessage;
+    const auth = retried.headers.get('Authorization');
+    expect(auth).toContain('realm="realm: with: colons"');
+    // The full value is intact — the splitter consumed only the first ": ".
+    expect(auth).toContain('realm="realm: with: colons", nonce="n"');
+  });
 });
 
 describe('AuthManager.redact', () => {
