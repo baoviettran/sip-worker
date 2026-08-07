@@ -33,13 +33,6 @@ export interface InvitationOptions {
   readonly T2: number;
 }
 
-/** Extract the numeric CSeq from a message. */
-function cseqNumber(msg: SipRequestMessage | SipResponseMessage): number {
-  const cseq = msg.headers.get('CSeq');
-  if (cseq === undefined) return 0;
-  return Number.parseInt(cseq.trim().split(/\s+/)[0] ?? '', 10);
-}
-
 export class Invitation {
   readonly session: Session;
   private readonly request: SipRequestMessage;
@@ -54,7 +47,6 @@ export class Invitation {
   private readonly T2: number;
 
   private readonly sessionId: string;
-  private readonly callId: string;
   private readonly remoteSdp: string;
 
   private answerDeferred: { resolve: () => void; reject: (reason: unknown) => void } | undefined;
@@ -77,7 +69,6 @@ export class Invitation {
     this.T2 = options.T2;
 
     this.sessionId = options.idGenerator.branch();
-    this.callId = options.request.headers.get('Call-ID') ?? options.idGenerator.branch();
     this.remoteSdp = bodyText(options.request);
     this.toTag = options.idGenerator.branch();
   }
@@ -165,14 +156,34 @@ export class Invitation {
 
     this.retransmitter.start();
 
-    // Listen for ACK (stateless request) and BYE (new server transaction request)
+    // Listen for ACK (both stateless and matched to INVITE transaction) and BYE
     this.unsubscribe = this.layer.subscribe((event: TransactionLayerEvent) => {
       if (event.type === 'statelessRequest') {
         this.onStatelessRequest(event.request);
       } else if (event.type === 'request') {
-        this.onInDialogRequest(event.transaction, event.request);
+        // ACK can arrive as a regular request if it matches the INVITE transaction
+        if (event.request.method === 'ACK') {
+          this.onAckRequest(event.request);
+        } else {
+          this.onInDialogRequest(event.transaction, event.request);
+        }
       }
     });
+  }
+
+  private onAckRequest(request: SipRequestMessage): void {
+    if (this.dialog === undefined) return;
+
+    const callId = request.headers.get('Call-ID');
+    const fromTag = extractTag(request.headers.get('From'));
+    const toTag = extractTag(request.headers.get('To'));
+
+    if (callId !== this.dialog.callId) return;
+    if (fromTag !== this.dialog.remoteTag) return;
+    if (toTag !== this.dialog.localTag) return;
+
+    // ACK matches, stop retransmission and resolve
+    this.onAck();
   }
 
   private onStatelessRequest(request: SipRequestMessage): void {

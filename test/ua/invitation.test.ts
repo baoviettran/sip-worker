@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { Headers, makeRequest, bodyText, withTextBody } from '../../src/messages/index.js';
+import { Headers, makeRequest, bodyText } from '../../src/messages/index.js';
 import type { SipRequestMessage } from '../../src/messages/message.js';
 import { parseMessage } from '../../src/messages/parser.js';
 import { TransactionLayer, deriveTimers } from '../../src/transactions/index.js';
@@ -155,18 +155,6 @@ function okResponses(sent: Uint8Array[]): Array<{ msg: any; bytes: Uint8Array }>
   return out;
 }
 
-/** Extract ACK requests from sent bytes. */
-function ackRequests(sent: Uint8Array[]): Array<{ msg: any; bytes: Uint8Array }> {
-  const out: Array<{ msg: any; bytes: Uint8Array }> = [];
-  for (const bytes of sent) {
-    const parsed = parseMessage(bytes);
-    if (parsed.ok && parsed.value.kind === 'request' && parsed.value.method === 'ACK') {
-      out.push({ msg: parsed.value, bytes: bytes.slice() });
-    }
-  }
-  return out;
-}
-
 describe('Invitation (incoming SIP call session)', () => {
   it('receives INVITE, answers with 200 OK, receives ACK → confirmed', async () => {
     const h = setup();
@@ -296,8 +284,9 @@ describe('Invitation (incoming SIP call session)', () => {
     // 486 response was sent
     const responses = h.sent.map((bytes) => parseMessage(bytes)).filter((p) => p.ok && p.value.kind === 'response');
     expect(responses.length).toBeGreaterThanOrEqual(1);
-    const resp = responses[0]!.value;
-    expect(resp.statusCode).toBe(486);
+    const first = responses[0]!;
+    if (!first.ok || first.value.kind !== 'response') throw new Error('Expected response');
+    expect(first.value.statusCode).toBe(486);
 
     // Session failed
     expect(h.invitation.session.state).toBe('failed');

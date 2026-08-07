@@ -66,9 +66,7 @@ export class DialogSet {
 
     // Create new dialog
     const dialog = Dialog.fromUac(request, response, {
-      callId: () => request.headers.get('Call-ID') || '',
-      localTag: () => extractTag(request.headers.get('From') || '') || '',
-      remoteTag: () => remoteTag,
+      branch: () => `ack-${remoteTag}`,
     });
 
     // Send ACK

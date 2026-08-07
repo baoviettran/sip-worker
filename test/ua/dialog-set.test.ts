@@ -76,8 +76,8 @@ describe('DialogSet', () => {
       await dialogSet.handleSuccess(request, response);
 
       expect(ackSent).toBe(true);
-      expect(dialogSet.selectedTag).toBe('tag-a');
-      expect(dialogSet.dialogs.size).toBe(1);
+      expect(dialogSet.selectedTagValue).toBe('tag-a');
+      expect(dialogSet.allDialogs.length).toBe(1);
     });
 
     it('should resend cached ACK for repeated 2xx with same tag', async () => {
@@ -93,8 +93,8 @@ describe('DialogSet', () => {
       await dialogSet.handleSuccess(request, response);
 
       expect(sendCount).toBe(2);
-      expect(dialogSet.selectedTag).toBe('tag-a');
-      expect(dialogSet.dialogs.size).toBe(1);
+      expect(dialogSet.selectedTagValue).toBe('tag-a');
+      expect(dialogSet.allDialogs.length).toBe(1);
     });
 
     it('should ACK and BYE additional dialogs with different tags', async () => {
@@ -112,8 +112,8 @@ describe('DialogSet', () => {
       await dialogSet.handleSuccess(request, responseB);
 
       expect(byeCalled).toBe(true);
-      expect(dialogSet.selectedTag).toBe('tag-a');
-      expect(dialogSet.dialogs.size).toBe(2);
+      expect(dialogSet.selectedTagValue).toBe('tag-a');
+      expect(dialogSet.allDialogs.length).toBe(2);
     });
 
     it('should only BYE each additional dialog once', async () => {

@@ -24,9 +24,12 @@ import type { TransactionLayerEvent } from '../transactions/types.js';
 import { Registrar } from './registrar.js';
 import type { RegistrarOptions } from './registrar.js';
 import type { RegistrationIdentity, RegisterState } from './registration-types.js';
-import type { AuthManager, IdGenerator } from '../auth/manager.js';
+import { AuthManager, type IdGenerator } from '../auth/manager.js';
 import { TypedEventEmitter } from './events.js';
 import type { RegistrationEventEmitter } from './events.js';
+import { Inviter } from './inviter.js';
+import { Invitation } from './invitation.js';
+import type { WorkerMediaController } from '../media/worker-controller.js';
 
 export interface UserAgentOptions {
   readonly transport: Transport;
@@ -38,6 +41,7 @@ export interface UserAgentOptions {
   readonly idGenerator: IdGenerator;
   readonly authManager?: AuthManager;
   readonly refreshFraction?: number;
+  readonly mediaController?: WorkerMediaController;
 }
 
 export class UserAgent extends TypedEventEmitter implements RegistrationEventEmitter {
@@ -50,6 +54,8 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
   private transportUnsubscribe?: () => void;
   private connected = false;
   private disconnected = false;
+  private activeInviter?: Inviter;
+  private activeInvitations = new Map<string, Invitation>();
 
   constructor(options: UserAgentOptions) {
     super();
@@ -68,6 +74,14 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     const status = this.registrar?.status();
     if (status === undefined) return undefined;
     return { callId: status.callId, nextCSeq: status.nextCSeq };
+  }
+
+  /** Current call state (for outgoing calls). */
+  get callState(): string {
+    if (this.activeInviter !== undefined) {
+      return this.activeInviter.session.state;
+    }
+    return 'idle';
   }
 
   /**
@@ -110,6 +124,9 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     });
 
     // Create the registrar (now operations are enabled)
+    const authManager = this.options.authManager ??
+      (this.options.credentials ? new AuthManager(this.options.idGenerator) : undefined);
+
     const registrarOptions: RegistrarOptions = {
       registrarUri: this.options.registrarUri,
       aor: this.options.aor,
@@ -118,7 +135,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       idGenerator: this.options.idGenerator,
       layer: this.layer,
       clock: this.clock,
-      authManager: this.options.authManager,
+      authManager,
       refreshFraction: this.options.refreshFraction,
     };
     this.registrar = new Registrar(registrarOptions);
@@ -174,6 +191,55 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     }
   }
 
+  /** Initiate an outgoing call to the specified target URI. */
+  async invite(target: string): Promise<void> {
+    if (this.layer === undefined) {
+      throw new Error('UserAgent not connected');
+    }
+    if (this.activeInviter !== undefined) {
+      throw new Error('Call already in progress');
+    }
+
+    const mediaController = this.options.mediaController;
+    if (mediaController === undefined) {
+      throw new Error('Media controller not configured');
+    }
+
+    const inviter = new Inviter({
+      to: target,
+      from: this.options.aor,
+      contact: this.options.contact,
+      viaAddress: '192.0.2.1:5060', // TODO: extract from transport
+      idGenerator: this.options.idGenerator,
+      layer: this.layer,
+      clock: this.clock,
+      controller: mediaController,
+      authManager: this.options.authManager,
+      credentials: this.options.credentials,
+    });
+
+    // Listen to session state changes
+    inviter.session.on((event) => {
+      this.emit('stateChanged', {
+        type: 'stateChanged',
+        state: event.state,
+        identity: this.identity!,
+      });
+    });
+
+    this.activeInviter = inviter;
+    await inviter.invite();
+  }
+
+  /** Terminate the active call with BYE. */
+  async bye(): Promise<void> {
+    if (this.activeInviter === undefined) {
+      throw new Error('No active call');
+    }
+    await this.activeInviter.hangup();
+    this.activeInviter = undefined;
+  }
+
   /** Disconnect the transport and clean up all listeners/timers. */
   async disconnect(): Promise<void> {
     if (this.disconnected) return;
@@ -213,7 +279,53 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
   }
 
   /** Forward transaction layer events (for future dialog/invite handling). */
-  private handleTransactionEvent(_event: TransactionLayerEvent): void {
-    // Currently a no-op; future phases will handle INVITE/dialog events here.
+  private handleTransactionEvent(event: TransactionLayerEvent): void {
+    if (event.type === 'request' && event.request.method === 'INVITE') {
+      this.handleIncomingInvite(event.request, event.transaction);
+    }
+  }
+
+  /** Handle an incoming INVITE request. */
+  private handleIncomingInvite(
+    request: import('../messages/message.js').SipRequestMessage,
+    transaction: import('../transactions/types.js').ServerTransaction
+  ): void {
+    const mediaController = this.options.mediaController;
+    if (mediaController === undefined) {
+      console.warn('Media controller not configured, rejecting incoming call');
+      return;
+    }
+
+    const invitation = new Invitation({
+      request,
+      transaction,
+      contact: this.options.contact,
+      viaAddress: '192.0.2.1:5060', // TODO: extract from transport
+      idGenerator: this.options.idGenerator,
+      layer: this.layer!,
+      clock: this.clock,
+      controller: mediaController,
+      T1: 500,
+      T2: 4000,
+    });
+
+    const callId = request.headers.get('Call-ID') ?? '';
+    this.activeInvitations.set(callId, invitation);
+
+    // Listen to session state changes
+    invitation.session.on((event) => {
+      this.emit('stateChanged', {
+        type: 'stateChanged',
+        state: event.state,
+        identity: this.identity!,
+      });
+
+      // Clean up when terminated
+      if (event.state === 'terminated' || event.state === 'failed') {
+        this.activeInvitations.delete(callId);
+      }
+    });
+
+    this.emit('incomingCall', invitation);
   }
 }
