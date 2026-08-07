@@ -1,12 +1,13 @@
 /**
  * WorkerRuntime: the worker-side half of the worker bridge.
  *
- * It receives a `bootstrap` command carrying a serializable RegistrationSnapshot,
- * restores the registration options, the identity (stable Call-ID + next CSeq),
- * and the sequence state from that snapshot, then performs an ordinary
- * `connect()` + `register()` on an injected `UserAgent`. It echoes the bootstrapped
- * `generation` in every reply so the supervisor can correlate messages to its
- * own generation counter.
+ * It is driven entirely by the supervisor's `bootstrap` command, which carries a
+ * serializable RegistrationSnapshot. On bootstrap the runtime stores the
+ * generation it answers for, restores registration options/identity/sequence
+ * state from the snapshot by handing it to the injected `buildUserAgent`, and
+ * performs an ordinary `connect()` + `register()`. The Call-ID and next CSeq
+ * therefore reach the wire resumed from the snapshot the supervisor retained and
+ * advanced — the replacement never reuses a CSeq.
  *
  * Credentials live only in the recovery snapshot; the runtime never echoes them
  * in events or errors. Calls and dialogs end with the old generation and are the
@@ -38,8 +39,8 @@ export interface WorkerRuntimeOptions {
 
 /**
  * Worker-side register kernel. Owns one generation of the worker runtime:
- * boots from a snapshot, registers through the injected UA, and answers
- * supervisor heartbeats until the generation is torn down.
+ * boots from the bootstrap snapshot, registers through the injected UA, reports
+ * readiness/identity, and answers supervisor heartbeats until torn down.
  */
 export class WorkerRuntime {
   private readonly port: WorkerRuntimePort;
@@ -47,6 +48,9 @@ export class WorkerRuntime {
   private readonly detach: () => void;
   private closed = false;
   private generation = 0;
+  private registration?: RegistrationSnapshot;
+  private registerPromise?: Promise<void>;
+  private registerStarted = false;
 
   constructor(options: WorkerRuntimeOptions) {
     this.port = options.port;
@@ -56,23 +60,14 @@ export class WorkerRuntime {
     });
   }
 
-  /**
-   * Restore registration options, identity, and sequence state from the snapshot
-   * and perform a connect()+register(). Resolves once the REGISTER exchange
-   * reaches a final 2xx; rejects (with redacted errors) on failure.
-   */
-  async bootstrapAndRegister(snapshot: RegistrationSnapshot): Promise<void> {
-    if (this.closed) {
-      throw new Error('WorkerRuntime is closed');
-    }
-    const ua = this.buildUserAgent(snapshot);
-    try {
-      await ua.connect();
-      await ua.register();
-    } catch (error) {
-      throw this.redact(error);
-    }
-    this.report(ua);
+  /** Resolves when the current generation's registration exchange settles. */
+  ready(): Promise<void> {
+    return this.registerPromise ?? Promise.resolve();
+  }
+
+  /** The recovery snapshot this runtime was bootstrapped with. */
+  get bootstrapSnapshot(): RegistrationSnapshot | undefined {
+    return this.registration;
   }
 
   /** Stop answering heartbeats and detach from the port. */
@@ -86,8 +81,13 @@ export class WorkerRuntime {
     if (this.closed) return;
     switch (message.type) {
       case 'bootstrap':
-        // The bootstrap carries the generation this worker answers for.
         this.generation = message.generation;
+        this.registration = message.registration;
+        if (!this.registerStarted) {
+          this.registerStarted = true;
+          // Connect()+register() driven entirely by the bootstrap snapshot.
+          this.registerPromise = this.performRegister(message.registration);
+        }
         break;
       case 'heartbeatPing':
         this.port.postMessage({
@@ -97,6 +97,18 @@ export class WorkerRuntime {
         });
         break;
     }
+  }
+
+  private async performRegister(snapshot: RegistrationSnapshot): Promise<void> {
+    if (this.closed) return;
+    const ua = this.buildUserAgent(snapshot);
+    try {
+      await ua.connect();
+      await ua.register();
+    } catch (error) {
+      throw this.redact(error);
+    }
+    this.report(ua);
   }
 
   /** Report readiness + identity after a successful register. */

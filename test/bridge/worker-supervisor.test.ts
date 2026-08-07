@@ -10,12 +10,16 @@
 
 import { describe, expect, it } from 'vitest';
 import { FakeClock } from '../support/fake-clock.js';
+import { FakeTransport } from '../support/fake-transport.js';
+import { UserAgent } from '../../src/ua/user-agent.js';
 import type {
   RegistrationSnapshot,
   SupervisorToWorker,
+  WorkerRuntimePort,
   WorkerToSupervisor,
 } from '../../src/bridge/worker-protocol.js';
 import { WorkerSupervisor } from '../../src/bridge/worker-supervisor.js';
+import { WorkerRuntime } from '../../src/bridge/worker-runtime.js';
 import type {
   SupervisedWorker,
   WorkerFactory,
@@ -167,16 +171,18 @@ function setup(over: Partial<RegistrationSnapshot> = {}): Harness {
   return { clock, factory, supervisor, events };
 }
 
-/** Deliver `ready` and then a matching pong for the worker's latest ping. */
+/** Deliver `ready`, a progressed identity (past the boot's nextCSeq), then `registered`. */
 function boot(h: Harness): { generation: number; callId: string; nextCSeq: number } {
   const worker = h.factory.current;
   const bootstrap = worker.bootstrap;
   expect(bootstrap).toBeDefined();
   const gen = bootstrap!.generation;
+  // The identity reports progress past the boot snapshot (nextCSeq advances 18→19),
+  // exercising the supervisor's snapshot-update branch.
   worker.port.deliver({ type: 'ready', generation: gen });
-  worker.port.deliver({ type: 'registrationIdentity', generation: gen, callId: 'reg-a', nextCSeq: 18 });
+  worker.port.deliver({ type: 'registrationIdentity', generation: gen, callId: 'reg-a', nextCSeq: 19 });
   worker.port.deliver({ type: 'registered', generation: gen });
-  return { generation: gen, callId: 'reg-a', nextCSeq: 18 };
+  return { generation: gen, callId: 'reg-a', nextCSeq: 19 };
 }
 
 /** Advance one heartbeat: fires the ping, then answer it with the real nonce. */
@@ -296,7 +302,8 @@ describe('WorkerSupervisor replacement + pending commands', () => {
     expect(replaced).toBeDefined();
     if (replaced?.type === 'bootstrap') {
       expect(replaced.registration.callId).toBe('reg-a');
-      expect(replaced.registration.nextCSeq).toBe(18);
+      // The retained/advanced snapshot (identity reported 19) reaches the replacement.
+      expect(replaced.registration.nextCSeq).toBe(19);
     }
     // workerRestarted carries the new generation.
     const restarted = h.events.find((e) => e.type === 'workerRestarted');
@@ -316,4 +323,84 @@ describe('WorkerSupervisor stop', () => {
     expect(h.events).toEqual([]);
   });
 });
+
+describe('WorkerRuntime credential redaction', () => {
+  /** A worker-half port capturing what the runtime posts out. */
+  class WorkerRuntimePortCapture implements WorkerRuntimePort {
+    readonly sent: WorkerToSupervisor[] = [];
+    private listeners = new Set<(m: SupervisorToWorker) => void>();
+    postMessage(message: WorkerToSupervisor): void {
+      this.sent.push(message);
+    }
+    subscribe(listener: (m: SupervisorToWorker) => void): () => void {
+      this.listeners.add(listener);
+      return () => this.listeners.delete(listener);
+    }
+    push(message: SupervisorToWorker): void {
+      for (const l of this.listeners) l(message);
+    }
+    get readySeen(): string[] {
+      return this.sent.map((m) => JSON.stringify(m));
+    }
+  }
+
+  it('raises a redacted error when registration fails inside register', async () => {
+    const port = new WorkerRuntimePortCapture();
+    const clock = new FakeClock();
+    // The UA's register fails with a message carrying the password.
+    const ua = new UserAgent({
+      transport: new FakeTransport({ reliable: true, framing: 'stream' }),
+      clock,
+      registrarUri: 'sip:r.example.com',
+      aor: 'sip:a@example.com',
+      contact: '<sip:a@192.0.2.1:5060>',
+      credentials: { username: 'alice', password: 'SuperSecret123' },
+      idGenerator: makeIdGen(),
+    });
+    const uaShim = new Proxy(ua, {
+      get(target, prop) {
+        if (prop === 'register') {
+          return () => Promise.reject(new Error('authentication failed for password SuperSecret123'));
+        }
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const runtime = new WorkerRuntime({
+      port,
+      clock,
+      buildUserAgent: () => uaShim as unknown as UserAgent,
+    });
+    const snapshotWithSecret: RegistrationSnapshot = {
+      aor: 'sip:a@example.com',
+      registrar: 'sip:r.example.com',
+      credentials: { username: 'alice', password: 'SuperSecret123' },
+      registerExpires: 600,
+      contactUri: '<sip:a@192.0.2.1:5060>',
+      callId: 'reg-a',
+      nextCSeq: 18,
+    };
+    port.push({ type: 'bootstrap', generation: 1, registration: snapshotWithSecret });
+    let error: unknown;
+    try {
+      await runtime.ready();
+    } catch (e) {
+      error = e;
+    }
+    expect(error instanceof Error).toBe(true);
+    const message = (error as Error).message;
+    // The password must not appear in the surfaced error.
+    expect(message).not.toContain('SuperSecret123');
+    // The redaction token is present.
+    expect(message).toContain('[redacted]');
+    // No outbound event echoes the credential (register failed before any report).
+    expect(port.sent).toHaveLength(0);
+    runtime.close();
+  });
+});
+
+function makeIdGen() {
+  let n = 0;
+  return { branch: () => `id-${(n += 1)}` };
+}
 

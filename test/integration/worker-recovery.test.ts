@@ -88,7 +88,6 @@ class LinkedPortPair {
 class FakeWorkerBeat implements SupervisedWorker {
   readonly pair: LinkedPortPair;
   readonly port: WorkerSupervisorPort;
-  readonly transport = new FakeTransport({ reliable: true, framing: 'stream' });
   readonly clock: FakeClock;
   readonly server: MockRegistrar;
   readonly runtime: WorkerRuntime;
@@ -98,31 +97,34 @@ class FakeWorkerBeat implements SupervisedWorker {
     this.clock = clock;
     this.pair = new LinkedPortPair();
     this.port = this.pair.supervisor;
-    const idGenerator = makeIdGenerator();
-    this.transport = new FakeTransport({ reliable: true, framing: 'stream' });
-    this.server = new MockRegistrar({ transport: this.transport });
+    const transport = new FakeTransport({ reliable: true, framing: 'stream' });
+    this.server = new MockRegistrar({ transport });
     this.runtime = new WorkerRuntime({
       port: this.pair.worker,
       clock,
-      buildUserAgent: () =>
+      buildUserAgent: (registration: RegistrationSnapshot) =>
         new UserAgent({
-          transport: this.transport,
+          transport,
           clock,
-          registrarUri: snapshot.registrar,
-          aor: snapshot.aor,
-          contact: snapshot.contactUri,
-          credentials: snapshot.credentials,
-          idGenerator,
-          authManager: new AuthManager(idGenerator),
-          initialIdentity: { callId: snapshot.callId, nextCSeq: snapshot.nextCSeq },
+          registrarUri: registration.registrar,
+          aor: registration.aor,
+          contact: registration.contactUri,
+          credentials: registration.credentials,
+          idGenerator: makeIdGenerator(),
+          authManager: new AuthManager(makeIdGenerator()),
+          // Resume the snapshot's Call-ID and next CSeq onto the wire.
+          initialIdentity: { callId: registration.callId, nextCSeq: registration.nextCSeq },
         }),
     });
+    this.server.start();
   }
 
-  /** Boot the runtime from the snapshot and wire the mock registrar. */
-  async boot(): Promise<void> {
-    this.server.start();
-    await this.runtime.bootstrapAndRegister(snapshot);
+  /** Awaits until this beat reports `registered` up to its supervisor half. */
+  async waitRegistered(): Promise<void> {
+    await this.runtime.ready();
+    // Give the async connect()+register() a microtask to settle and report.
+    await Promise.resolve();
+    await Promise.resolve();
   }
 
   /** Simulate the worker process dying: stop the runtime and drop the port. */
@@ -156,12 +158,10 @@ describe('worker recovery (integration)', () => {
     const clock = new FakeClock();
 
     const beats: FakeWorkerBeat[] = [];
-    const boots: Promise<void>[] = [];
     const factory: WorkerFactory = {
       spawn: () => {
         const beat = new FakeWorkerBeat(clock);
         beats.push(beat);
-        boots.push(beat.boot());
         return { port: beat.port, terminate: () => beat.terminate() };
       },
     };
@@ -176,9 +176,9 @@ describe('worker recovery (integration)', () => {
     const events: string[] = [];
     supervisor.subscribe((e) => events.push(e.type));
 
-    // Generation 1 is spawned at start; it bootstraps and registers at CSeq 18.
+    // Generation 1 is spawned at start; it registers at CSeq 18 on Call-ID reg-a.
     supervisor.start();
-    await boots[0]!;
+    await beats[0]!.waitRegistered();
     const beat1 = beats[0]!;
     expect(beat1.calls).toBeGreaterThan(0);
     expect(beat1.latestCSeq).toBe(18);
@@ -193,12 +193,13 @@ describe('worker recovery (integration)', () => {
     expect(beats.length).toBe(2);
     expect(beats[0]!.terminated).toBe(true);
 
-    // Generation 2 re-registers on the SAME Call-ID with the SAME next CSeq (18),
-    // proving the snapshot was carried forward and no REGISTER CSeq was reused.
-    await boots[1]!;
+    // Generation 2 re-registers on the SAME Call-ID at the ADVANCED next CSeq (19):
+    // the supervisor retained gen1's identity progress and the replacement resumes
+    // it, so no REGISTER CSeq is reused.
+    await beats[1]!.waitRegistered();
     const beat2 = beats[1]!;
     expect(beat2.calls).toBeGreaterThan(0);
-    expect(beat2.latestCSeq).toBe(18);
+    expect(beat2.latestCSeq).toBe(19);
     expect(beat2.callIds[0]).toBe('reg-a');
   });
 });
