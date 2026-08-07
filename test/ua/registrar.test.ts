@@ -73,7 +73,7 @@ const branchOf = (request: SipRequestMessage): string =>
 function respond(
   h: Harness,
   statusCode: number,
-  over: { expires?: string; contactExpires?: string; minExpires?: string; challenge?: boolean; challengeHeader?: 'WWW-Authenticate' | 'Proxy-Authenticate'; contact?: string } = {},
+  over: { expires?: string; contactExpires?: string; minExpires?: string; challenge?: boolean; challengeHeader?: 'WWW-Authenticate' | 'Proxy-Authenticate'; contact?: string | null } = {},
 ): void {
   const request = h.sent[h.sent.length - 1];
   if (request === undefined) throw new Error('no outbound request to answer');
@@ -83,7 +83,9 @@ function respond(
   headers.set('To', request.headers.get('To') ?? `<${AOR}>;tag=reg-1`);
   headers.set('Call-ID', request.headers.get('Call-ID') ?? 'call@example.com');
   headers.set('CSeq', request.headers.get('CSeq') ?? '1 REGISTER');
-  headers.set('Contact', over.contact ?? CONTACT);
+  // `contact: null` omits the Contact header (e.g. a Contact-less redirect to
+  // exercise the no-Contact fail path); otherwise default to the UA Contact.
+  if (over.contact !== null) headers.set('Contact', over.contact ?? CONTACT);
   if (over.expires !== undefined) headers.set('Expires', over.expires);
   if (over.contactExpires !== undefined) {
     headers.set('Contact', `${over.contact ?? CONTACT};expires=${over.contactExpires}`);
@@ -405,10 +407,56 @@ describe('Registrar', () => {
       respond(h, 302, { contact: '<sip:hop.example.com>' });
       await flush();
     }
+    // 1 initial REGISTER + 5 redirect re-REGISTERs = exactly 6 sends. A looser
+    // bound would hide a cap regression. The initial targets the configured
+    // registrar; each redirect re-REGISTER targets the redirect Contact.
+    expect(h.sent).toHaveLength(6);
+    expect(h.sent[0]!.uri).toBe(REGISTRAR_URI);
+    for (let i = 1; i < h.sent.length; i += 1) expect(h.sent[i]!.uri).toBe('sip:hop.example.com');
     // Now at the cap: a further 302 must fail rather than resend.
     respond(h, 302, { contact: '<sip:hop.example.com>' });
     await expect(registration).rejects.toThrow(SipError);
-    expect(h.sent.length).toBeLessThanOrEqual(6);
+    // The cap-failing 302 is handled in onResponse without a new send.
+    expect(h.sent).toHaveLength(6);
+    expect(h.registrar.state).toBe('failed');
+  });
+
+  it('persists a 301 redirect target so a fresh register() routes to it', async () => {
+    const h = setup();
+    // First registration: registrar answers 301 (permanent) with a target.
+    const registration = h.registrar.register();
+    await flush();
+    respond(h, 301, { contact: '<sip:perm.example.com>' });
+    await flush();
+    expect(h.sent[h.sent.length - 1]!.uri).toBe('sip:perm.example.com');
+    respond(h, 200);
+    await registration;
+    expect(h.registrar.state).toBe('registered');
+
+    // A 301 is permanent: a fresh registration (after unregister) must open
+    // against the persisted target, not the configured registrar URI.
+    const unreg = h.registrar.unregister();
+    await flush();
+    respond(h, 200);
+    await unreg;
+    expect(h.registrar.state).toBe('unregistered');
+
+    const reReg = h.registrar.register();
+    await flush();
+    expect(h.sent[h.sent.length - 1]!.uri).toBe('sip:perm.example.com');
+    respond(h, 200);
+    await reReg;
+    expect(h.registrar.state).toBe('registered');
+  });
+
+  it('fails a 302 redirect without a Contact rather than re-sending', async () => {
+    const h = setup();
+    const registration = h.registrar.register();
+    await flush();
+    // No Contact on the redirect: nothing to follow — must fail, not re-REGISTER.
+    respond(h, 302, { contact: null });
+    await expect(registration).rejects.toThrow(SipError);
+    expect(h.sent).toHaveLength(1);
     expect(h.registrar.state).toBe('failed');
   });
 });
