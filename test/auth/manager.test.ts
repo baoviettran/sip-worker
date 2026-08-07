@@ -190,6 +190,35 @@ describe('AuthManager.retry', () => {
     expect(failure.error.statusCode).toBe(401);
   });
 
+  it('declines an auth-int-only challenge without throwing or consuming the retry budget', () => {
+    const manager = new AuthManager(f.ids());
+    const plain = { username: 'alice', password: SECRET_PASSWORD };
+    const headers = buildResponseHeaders(REALM, NONCE);
+    headers.set(
+      'WWW-Authenticate',
+      `Digest realm="${REALM}", nonce="${NONCE}", qop="auth-int", algorithm=SHA-256`,
+    );
+    const ctx = f.context({
+      requestId: 'req-ai',
+      credentials: plain,
+      response: makeResponse(401, 'Unauthorized', headers),
+    });
+    // Discriminator: on the pre-fix code this retry() call throws a TypeError
+    // (computeDigest requires a body when qop is 'auth-int'), which escapes
+    // retry() and hangs the caller. The fixed code returns an AuthFailure.
+    let result: SipRequestMessage | AuthFailure | undefined;
+    expect(() => {
+      result = manager.retry(ctx);
+    }).not.toThrow();
+    const failure = expectFailure(result!, 'unsupported');
+    expect(failure.error.statusCode).toBe(401);
+    // The decline is zero-cost: no ordinary retry slot was reserved.
+    expect(manager.retriesByRequestSize).toBe(0);
+    // A later ordinary qop="auth" retry on the same requestId is still allowed.
+    const ordinary = manager.retry(f.context({ requestId: 'req-ai', credentials: plain }));
+    expect(ordinary).not.toMatchObject({ type: expect.any(String) });
+  });
+
   it('returns exhausted after the third ordinary retry', () => {
     const manager = new AuthManager(f.ids());
     const plain = { username: 'alice', password: SECRET_PASSWORD };

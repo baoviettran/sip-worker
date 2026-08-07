@@ -152,6 +152,25 @@ export class AuthManager {
     if ('error' in answered) return answered;
     const { challenge, proxy } = answered;
 
+    // The REGISTER path has no meaningful entity body, so `auth-int` integrity
+    // adds nothing and cannot be answered without a body (computeDigest would
+    // reject it). Decline an auth-int-only challenge outright: this must happen
+    // before the budget bookkeeping below, so an unsupported qop never consumes
+    // an ordinary retry slot.
+    if (
+      challenge.qop !== undefined &&
+      challenge.qop.includes('auth-int') &&
+      !challenge.qop.includes('auth')
+    ) {
+      return {
+        type: 'unsupported',
+        error: new SipError(
+          response.statusCode,
+          'authentication qop "auth-int" is not supported',
+        ),
+      };
+    }
+
     if (challenge.stale !== true) {
       const spent = this.retriesByRequest.get(requestId) ?? 0;
       if (spent >= this.maxOrdinary) {
@@ -167,10 +186,11 @@ export class AuthManager {
     const nc = this.nextNonceCount(challenge.realm, challenge.nonce);
     // Only a valid qop token reaches computeDigest/renderAuthorization. The
     // challenge.qop array may retain unrecognized verbatim tokens (e.g. an
-    // unquoted multi-word value); pick the first exact 'auth'/'auth-int'.
+    // unquoted multi-word value); pick the first exact 'auth'. 'auth-int' is
+    // declined above (unsupported on this path), so it never reaches the digest.
     const qop =
       challenge.qop !== undefined
-        ? challenge.qop.find((q) => q === 'auth' || q === 'auth-int')
+        ? challenge.qop.find((q) => q === 'auth')
         : undefined;
 
     const responseDigest = computeDigest({
