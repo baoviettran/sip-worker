@@ -140,6 +140,35 @@ describe('OptionsLiveness', () => {
     expect(requests).toHaveLength(1);
   });
 
+  it('ignores an unrelated final response from another transaction on the shared layer', () => {
+    const { clock, layer, requests, failures, liveness } = setup();
+    liveness.start();
+
+    clock.advance(1000); // probe 1 (an OPTIONS client transaction) outstanding
+    expect(requests).toHaveLength(1);
+
+    // A concurrent transaction (e.g. a REGISTER 200) closes on the same layer
+    // while the probe is still pending; it must not clear the probe's slot.
+    const unrelated = new Headers();
+    unrelated.set('Via', `SIP/2.0/UDP 192.0.2.1:5060;branch=${makeBranch('reg-99')}`);
+    unrelated.set('From', '<sip:alice@example.com>');
+    unrelated.set('To', '<sip:alice@example.com>');
+    unrelated.set('Call-ID', 'reg-99');
+    unrelated.set('CSeq', '7 REGISTER');
+    layer.receive(makeResponse(200, 'OK', unrelated));
+
+    // The probe slot is still outstanding: the next interval must NOT send a
+    // second OPTIONS.
+    clock.advance(1000);
+    expect(requests).toHaveLength(1);
+
+    // The probe's own final response clears it, letting the next interval probe.
+    layer.receive(responseFor(requests[0]!, 200));
+    clock.advance(1000);
+    expect(requests).toHaveLength(2);
+    expect(failures).toHaveLength(0);
+  });
+
   it('reports one liveness failure on transaction timeout and keeps monitoring', () => {
     const { clock, requests, failures, liveness } = setup();
     liveness.start();

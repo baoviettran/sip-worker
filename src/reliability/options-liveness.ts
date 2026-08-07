@@ -99,8 +99,12 @@ export class OptionsLiveness implements LivenessStrategy {
     if (this.outstanding === undefined) return;
     switch (event.type) {
       case 'response': {
+        // A final response only clears the slot when it belongs to the probe
+        // transaction we own. The layer carries concurrent traffic (REGISTER,
+        // INVITE, BYE) on a shared layer, so an unrelated final response must
+        // not clear the outstanding probe slot or a second probe could start.
         const code = event.response.statusCode;
-        if (code >= 200 && code <= 699) {
+        if (code >= 200 && code <= 699 && event.transaction.key === this.outstanding?.key) {
           // Any final response proves peer liveness; clear the slot so the next
           // probe period can fire. Provisional responses fall through.
           this.clearOutstanding();

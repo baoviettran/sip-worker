@@ -328,13 +328,16 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     if (layer === undefined) {
       throw new Error('UserAgent is not connected');
     }
+    // A stable OPTIONS Call-ID lets a peer deduplicate repeated probes; only the
+    // Via branch and CSeq change per probe. Derive it once for the strategy's life.
+    const optionsCallId = `ua-opt-${this.options.idGenerator.branch()}`;
     const requestFactory = (index: number) => {
       const headers = new Headers();
       headers.set('Via', `SIP/2.0/UDP 192.0.2.1:5060;branch=${makeBranch(`opt-${index}`)}`);
       headers.set('Max-Forwards', '70');
       headers.set('From', `<${this.options.aor}>;tag=ua-opt`);
       headers.set('To', `<${this.options.registrarUri}>`);
-      headers.set('Call-ID', `ua-opt-${this.options.idGenerator.branch()}`);
+      headers.set('Call-ID', optionsCallId);
       headers.set('CSeq', `${index} OPTIONS`);
       return makeRequest('OPTIONS', this.options.registrarUri, headers);
     };
