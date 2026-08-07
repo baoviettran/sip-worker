@@ -260,6 +260,17 @@ describe('AuthManager.retry', () => {
     expect(via).toContain('rport');
     expect(via).not.toContain('z9hG4bK-original');
   });
+
+  it('stamps a CSeq-less retry with the original method', () => {
+    const f = fixture();
+    f.request.headers.delete('CSeq'); // force the fallback
+    const sub = makeRequest('SUBSCRIBE', 'sip:alice@example.com', f.request.headers.clone());
+    const manager = new AuthManager(f.ids());
+    const ctx = f.context({ request: sub });
+    const retried = manager.retry(ctx) as SipRequestMessage;
+    const cseq = retried.headers.get('CSeq');
+    expect(cseq).toMatch(/^1 SUBSCRIBE$/);
+  });
 });
 
 describe('AuthManager.redact', () => {

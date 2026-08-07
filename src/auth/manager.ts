@@ -186,7 +186,7 @@ export class AuthManager {
     const fieldValue = rendered.slice(colon + 2);
 
     const headers = request.headers.clone();
-    headers.set('CSeq', nextCSeq(request.headers));
+    headers.set('CSeq', nextCSeq(request.headers, request.method));
     headers.set('Via', nextVia(this.idGenerator, request.headers));
     headers.set(headerName, fieldValue);
     for (const name of AUTH_HEADERS) {
@@ -250,9 +250,9 @@ export class AuthManager {
 }
 
 /** Returns the CSeq with its numeric field incremented exactly once. */
-function nextCSeq(headers: Headers): string {
+function nextCSeq(headers: Headers, method: string): string {
   const cseq = headers.get('CSeq');
-  if (cseq === undefined) return '1 INVITE';
+  if (cseq === undefined) return `1 ${method}`;
   const match = cseq.match(/^(\d+)\s+(.+)$/);
   if (match === null) return cseq;
   return `${String(Number.parseInt(match[1]!, 10) + 1)} ${match[2]}`;
