@@ -85,7 +85,13 @@ export class TransactionLayer implements MessageSink {
       this.servers.delete(event.key);
     }
     this.emit(event);
-    for (const listener of this.subscribers) listener(event);
+    for (const listener of this.subscribers) {
+      try {
+        listener(event);
+      } catch {
+        // A throwing subscriber must not break the layer or other listeners.
+      }
+    }
   }
 
   /**

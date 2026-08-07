@@ -203,4 +203,15 @@ describe('TransactionLayer', () => {
     expect(after).toContainEqual(expect.objectContaining({ type: 'response' }));
     expect(first.filter((e) => e.type === 'response' && (e as { response: SipResponseMessage }).response.statusCode === 486)).toHaveLength(0);
   });
+
+  it('isolates a throwing subscriber from the rest', () => {
+    const { clock, layer } = setup(true);
+    const good: unknown[] = [];
+    layer.subscribe(() => { throw new Error('boom'); });
+    layer.subscribe((e) => good.push(e.type));
+    layer.sendRequest(makeRegister());
+    layer.receive(responseFor('z9hG4bK-reg', 200, 'REGISTER', '1'));
+    clock.advance(TIMERS.K);
+    expect(good).toContain('response');
+  });
 });
