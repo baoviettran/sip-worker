@@ -33,6 +33,41 @@
       "types": "./dist/transport/browser/index.d.ts",
       "import": "./dist/transport/browser/index.js",
       "require": "./dist/transport/browser/index.cjs"
+    },
+    "./transactions": {
+      "types": "./dist/transactions/index.d.ts",
+      "import": "./dist/transactions/index.js",
+      "require": "./dist/transactions/index.cjs"
+    },
+    "./dialogs": {
+      "types": "./dist/dialogs/index.d.ts",
+      "import": "./dist/dialogs/index.js",
+      "require": "./dist/dialogs/index.cjs"
+    },
+    "./auth": {
+      "types": "./dist/auth/index.d.ts",
+      "import": "./dist/auth/index.js",
+      "require": "./dist/auth/index.cjs"
+    },
+    "./ua": {
+      "types": "./dist/ua/index.d.ts",
+      "import": "./dist/ua/index.js",
+      "require": "./dist/ua/index.cjs"
+    },
+    "./media": {
+      "types": "./dist/media/index.d.ts",
+      "import": "./dist/media/index.js",
+      "require": "./dist/media/index.cjs"
+    },
+    "./reliability": {
+      "types": "./dist/reliability/index.d.ts",
+      "import": "./dist/reliability/index.js",
+      "require": "./dist/reliability/index.cjs"
+    },
+    "./bridge": {
+      "types": "./dist/bridge/index.d.ts",
+      "import": "./dist/bridge/index.js",
+      "require": "./dist/bridge/index.cjs"
     }
   },
   "scripts": {

@@ -29,7 +29,55 @@ export type {
 } from './transactions/index.js';
 export { UserAgent, Registrar } from './ua/index.js';
 export type { RegistrationIdentity, RegisterState } from './ua/index.js';
+export {
+  TypedEventEmitter,
+} from './ua/index.js';
+export type {
+  RegistrationEvent,
+  RegistrationEventEmitter,
+  RegistrationStateChangedEvent,
+  RegistrationFailedEvent,
+} from './ua/index.js';
 export { AuthManager } from './auth/manager.js';
 export { computeDigest } from './auth/digest.js';
 export { parseDigestChallenges, selectChallenge } from './auth/challenge.js';
 export { renderAuthorization } from './auth/authorization.js';
+export {
+  WorkerMediaController,
+  StubMainMediaHandler,
+  STUB_SDP,
+} from './media/index.js';
+export type {
+  MediaCommand,
+  MediaMessage,
+  MediaPort,
+  MediaReply,
+} from './media/index.js';
+export {
+  NodeWebSocketLiveness,
+  OptionsLiveness,
+} from './reliability/index.js';
+export type {
+  LivenessStrategy,
+  NativePingSocket,
+  NodeWebSocketLivenessOptions,
+  OptionsLivenessOptions,
+  RequestFactory,
+} from './reliability/index.js';
+export {
+  WorkerRuntime,
+  WorkerSupervisor,
+  WorkerRestartError,
+} from './bridge/index.js';
+export type {
+  RegistrationSnapshot,
+  SupervisedWorker,
+  SupervisorEvent,
+  SupervisorToWorker,
+  WorkerFactory,
+  WorkerPort,
+  WorkerRuntimeOptions,
+  WorkerSupervisorOptions,
+  WorkerSupervisorPort,
+  WorkerToSupervisor,
+} from './bridge/index.js';
