@@ -97,14 +97,20 @@ export function parseDigestChallenges(values: string[]): ParseResult<DigestChall
       }
 
       // A comma ends the challenge when followed by whitespace + a scheme
-      // token (the break target; the trailing parameter is flushed right
-      // after the loop); otherwise it separates parameters of the challenge.
+      // token that is itself followed by whitespace (or end of input) — that
+      // is a real challenge boundary. A token immediately followed by `=`
+      // (e.g. a parameter literally named `digest`) is a parameter, not a
+      // scheme, so the comma is a parameter separator.
       if (ch === ',') {
         let j = i + 1;
         while (j < raw.length && isSpace(raw.charCodeAt(j))) j += 1;
         let k = j;
         while (k < raw.length && isTokenChar(raw.charCodeAt(k))) k += 1;
-        if (raw.slice(j, k).toLowerCase() === 'digest') {
+        if (
+          k > j &&
+          raw.slice(j, k).toLowerCase() === 'digest' &&
+          (k >= raw.length || isSpace(raw.charCodeAt(k)))
+        ) {
           break;
         }
         // Parameter separator: flush the current parameter and continue.
@@ -115,8 +121,17 @@ export function parseDigestChallenges(values: string[]): ParseResult<DigestChall
         continue;
       }
 
-      // Whitespace separates a name from its value; flush any pending text.
+      // Whitespace: inside an unquoted VALUE (paramStart set, and we have
+      // already consumed the `=`) it is part of the value and must NOT split
+      // the parameter — the value extends to the next `,`/boundary. Otherwise
+      // it separates a NAME from its `=`/value, so flush the pending text.
       if (ch === ' ' || ch === '\t') {
+        if (paramStart !== undefined && hasNameEquals(raw, paramStart, i)) {
+          // In an unquoted value: skip whitespace without committing so the
+          // value accumulates across spaces up to the next `,`/boundary.
+          i += 1;
+          continue;
+        }
         const err = commitParam(params, raw, paramStart, i);
         if (err !== undefined) return fail(err.offset, err.message);
         paramStart = undefined;
@@ -139,16 +154,20 @@ export function parseDigestChallenges(values: string[]): ParseResult<DigestChall
 
     const realm = params['realm'];
     const nonce = params['nonce'];
-    if (realm === undefined) return fail(0, 'Digest challenge missing realm');
-    if (nonce === undefined) return fail(0, 'Digest challenge missing nonce');
+    if (realm === undefined) return fail(schemeStart, 'Digest challenge missing realm');
+    if (nonce === undefined) return fail(schemeStart, 'Digest challenge missing nonce');
 
     const algorithm = params['algorithm'];
     const qop = params['qop'] !== undefined
-      ? params['qop'].split(',').flatMap((q) => {
+      ? params['qop'].split(',').flatMap((q): Array<'auth' | 'auth-int'> => {
         const t = q.trim().toLowerCase();
-        if (t === 'auth') return ['auth' as const];
-        if (t === 'auth-int') return ['auth-int' as const];
-        return [];
+        if (t === 'auth') return ['auth'];
+        if (t === 'auth-int') return ['auth-int'];
+        // Retain unrecognized qop tokens (e.g. an unquoted multi-word value
+        // such as `auth auth-int`) verbatim so callers see what was challenged
+        // rather than a silently truncated list. The narrow element type is a
+        // documented approximation; the runtime value is the raw token.
+        return [q.trim() as 'auth' | 'auth-int'];
       })
       : undefined;
     const challenge: DigestChallenge = {
@@ -176,6 +195,37 @@ export function parseDigestChallenges(values: string[]): ParseResult<DigestChall
 
 function isSpace(code: number): boolean {
   return code === 32 || code === 9;
+}
+
+/**
+ * Reports whether the parameter text spanning `[start, end)` of `raw` already
+ * contains a `=` — i.e. the scanner has crossed the name/value separator and
+ * is now inside an unquoted value. Whitespace there is part of the value and
+ * must not split the parameter. The `=` is found by scanning the unquoted
+ * portion only (a `=` inside a quoted string belongs to the value).
+ */
+function hasNameEquals(raw: string, start: number, end: number): boolean {
+  let inQuotes = false;
+  let escaped = false;
+  for (let p = start; p < end; p += 1) {
+    const ch = raw[p]!;
+    if (inQuotes) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inQuotes = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = true;
+      continue;
+    }
+    if (ch === '=') return true;
+  }
+  return false;
 }
 
 function isTokenChar(code: number): boolean {

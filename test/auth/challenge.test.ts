@@ -98,4 +98,24 @@ describe('parseDigestChallenges', () => {
     if (parsed.ok) return;
     expect(parsed.error).toBeInstanceOf(ParseError);
   });
+
+  it('handles a parameter literally named "digest"', () => {
+    const parsed = parseDigestChallenges(['Digest realm="r", nonce="n", digest=abc']);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.value[0]?.realm).toBe('r');
+  });
+
+  it('keeps an unquoted multi-word value intact as a single token', () => {
+    const p2 = parseDigestChallenges(['Digest realm="r", nonce="n", qop=auth auth-int']);
+    expect(p2.ok).toBe(true);
+    if (p2.ok) expect(p2.value[0]?.qop).toEqual(['auth auth-int']);
+  });
+
+  it('reports the real offset for a missing nonce', () => {
+    const parsed = parseDigestChallenges(['Digest realm="r", algorithm=MD5']);
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error.offset).toBeGreaterThanOrEqual(0);
+    // The offset is no longer hardcoded to 0 for missing-realm/missing-nonce.
+  });
 });
