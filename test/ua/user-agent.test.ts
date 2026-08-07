@@ -6,6 +6,9 @@ import type { LivenessStrategy } from '../../src/reliability/index.js';
 import { parseMessage } from '../../src/messages/parser.js';
 import type { SipRequestMessage } from '../../src/messages/message.js';
 import { Headers, makeResponse, serializeMessage } from '../../src/messages/index.js';
+import { WorkerMediaController } from '../../src/media/worker-controller.js';
+import { STUB_SDP } from '../../src/media/index.js';
+import type { MediaMessage } from '../../src/media/index.js';
 
 function makeIdGenerator() {
   let n = 0;
@@ -23,10 +26,33 @@ class RecordingLiveness implements LivenessStrategy {
   }
 }
 
-function setup(options: { liveness?: LivenessStrategy; intervalMs?: number } = {}) {
+/** Auto-replies to createOffer/answer/setRemote over a microtask with STUB_SDP. */
+class FakeMediaPort {
+  postMessage(message: MediaMessage): void {
+    if (message.type === 'setRemote') {
+      queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId }));
+      return;
+    }
+    queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId, sdp: STUB_SDP }));
+  }
+  subscribe(listener: (message: MediaMessage) => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+  private listeners = new Set<(message: MediaMessage) => void>();
+  private deliver(message: MediaMessage): void {
+    for (const listener of this.listeners) listener(message);
+  }
+}
+
+function setup(options: { liveness?: LivenessStrategy; intervalMs?: number; viaAddress?: string } = {}) {
   const clock = new FakeClock();
   const transport = new FakeTransport({ reliable: true, framing: 'stream' });
   const idGenerator = makeIdGenerator();
+  const media = new FakeMediaPort();
+  const mediaController = new WorkerMediaController(media);
   const ua = new UserAgent({
     transport,
     clock,
@@ -35,8 +61,53 @@ function setup(options: { liveness?: LivenessStrategy; intervalMs?: number } = {
     contact: '<sip:alice@192.0.2.1:5060>',
     idGenerator,
     liveness: options.liveness,
+    mediaController,
+    viaAddress: options.viaAddress,
   });
   return { clock, transport, ua, idGenerator };
+}
+
+/** The Via header of the outbound INVITE request, or '' if none was sent. */
+function captureOutboundVia(transport: FakeTransport): string {
+  for (const bytes of transport.sent) {
+    const parsed = parseMessage(bytes);
+    if (parsed.ok && parsed.value.kind === 'request' && parsed.value.method === 'INVITE') {
+      return parsed.value.headers.get('Via') ?? '';
+    }
+  }
+  return '';
+}
+
+/** Drain pending microtasks so the offer round-trip and INVITE send complete. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** Deliver a 200 OK to the outbound INVITE, confirming the call. */
+async function confirmCall(transport: FakeTransport): Promise<void> {
+  await flush();
+  let bytes: Uint8Array | undefined;
+  for (let i = transport.sent.length - 1; i >= 0; i -= 1) {
+    const m = parseMessage(transport.sent[i]!);
+    if (m.ok && m.value.kind === 'request' && m.value.method === 'INVITE') {
+      bytes = transport.sent[i];
+      break;
+    }
+  }
+  if (bytes === undefined) throw new Error('no outbound INVITE to answer');
+  const parsed = parseMessage(bytes);
+  if (!parsed.ok || parsed.value.kind !== 'request') {
+    throw new Error('outbound INVITE was not a request');
+  }
+  const req = parsed.value;
+  const headers = new Headers();
+  headers.set('Via', req.headers.get('Via') ?? '');
+  headers.set('From', req.headers.get('From') ?? '');
+  headers.set('To', `${req.headers.get('To') ?? 'sip:bob@example.com'};tag=bob-1`);
+  headers.set('Call-ID', req.headers.get('Call-ID') ?? '');
+  headers.set('CSeq', req.headers.get('CSeq') ?? '');
+  headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
+  transport.emitData(serializeMessage(makeResponse(200, 'OK', headers)));
 }
 
 /** All sent OPTIONS requests, parsed. */
@@ -74,6 +145,7 @@ describe('UserAgent liveness wiring', () => {
     const probes = sentOptions(transport);
     expect(probes).toHaveLength(1);
     expect(probes[0]!.headers.get('Via')).toMatch(/branch=z9hG4bK-/);
+    expect(probes[0]!.headers.get('Via')).toContain('192.0.2.1:5060');
     expect(probes[0]!.headers.get('CSeq')).toBe('1 OPTIONS');
 
     // Disconnect stops the probe timer: nothing further is sent.
@@ -114,5 +186,26 @@ describe('UserAgent liveness wiring', () => {
     // timer runs on a 60s cadence, so a leaked refresh timer would survive this.
     clock.advance(1);
     expect(clock.pending()).toBe(0);
+  });
+});
+
+describe('UserAgent viaAddress', () => {
+  it('uses a caller-supplied viaAddress for sent-by', async () => {
+    const { ua, transport } = setup({ viaAddress: '203.0.113.7:5060' });
+    await ua.connect();
+    const invite = ua.invite('sip:bob@example.com');
+    await confirmCall(transport);
+    await invite;
+    // Capture the Via the inviter sent and assert it carries the supplied sent-by.
+    expect(captureOutboundVia(transport)).toContain('203.0.113.7:5060');
+  });
+
+  it('defaults to 192.0.2.1:5060 when viaAddress is absent', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    const invite = ua.invite('sip:bob@example.com');
+    await confirmCall(transport);
+    await invite;
+    expect(captureOutboundVia(transport)).toContain('192.0.2.1:5060');
   });
 });

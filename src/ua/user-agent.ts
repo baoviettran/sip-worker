@@ -50,6 +50,8 @@ export interface UserAgentOptions {
   readonly authManager?: AuthManager;
   readonly refreshFraction?: number;
   readonly mediaController?: WorkerMediaController;
+  /** Via sent-by host:port. Defaults to '192.0.2.1:5060'. */
+  readonly viaAddress?: string;
   /**
    * Optional injected liveness strategy. Defaults to a SIP OPTIONS strategy
    * (browser-safe) when absent. A Node composition root that exposes a native
@@ -99,6 +101,11 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       return this.activeInviter.session.state;
     }
     return 'idle';
+  }
+
+  /** Via sent-by host:port for all SIP requests this UA originates. */
+  private get viaAddress(): string {
+    return this.options.viaAddress ?? '192.0.2.1:5060';
   }
 
   /**
@@ -234,7 +241,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       to: target,
       from: this.options.aor,
       contact: this.options.contact,
-      viaAddress: '192.0.2.1:5060', // TODO: extract from transport
+      viaAddress: this.viaAddress,
       idGenerator: this.options.idGenerator,
       layer: this.layer,
       clock: this.clock,
@@ -324,7 +331,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     const optionsCallId = `ua-opt-${this.options.idGenerator.branch()}`;
     const requestFactory = (index: number) => {
       const headers = new Headers();
-      headers.set('Via', `SIP/2.0/UDP 192.0.2.1:5060;branch=${makeBranch(`opt-${index}`)}`);
+      headers.set('Via', `SIP/2.0/UDP ${this.viaAddress};branch=${makeBranch(`opt-${index}`)}`);
       headers.set('Max-Forwards', '70');
       headers.set('From', `<${this.options.aor}>;tag=ua-opt`);
       headers.set('To', `<${this.options.registrarUri}>`);
@@ -367,7 +374,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       request,
       transaction,
       contact: this.options.contact,
-      viaAddress: '192.0.2.1:5060', // TODO: extract from transport
+      viaAddress: this.viaAddress,
       idGenerator: this.options.idGenerator,
       layer: this.layer!,
       clock: this.clock,
