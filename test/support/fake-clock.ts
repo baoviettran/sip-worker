@@ -25,6 +25,11 @@ export class FakeClock implements Clock {
     this.timers.delete(id);
   }
 
+  /** Number of outstanding timers. */
+  pending(): number {
+    return this.timers.size;
+  }
+
   advance(ms: number): void {
     const target = this.currentTime + ms;
     let next = this.nextTimer(target);

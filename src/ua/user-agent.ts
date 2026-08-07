@@ -290,6 +290,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
 
     // Clear references
     this.layer = undefined;
+    this.registrar?.dispose();
     this.registrar = undefined;
   }
 

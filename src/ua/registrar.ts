@@ -362,6 +362,12 @@ export class Registrar {
     }
   }
 
+  /** Final shutdown: cancel the refresh timer and detach the exchange listener. */
+  dispose(): void {
+    this.teardownExchange();
+    this.cancelRefresh();
+  }
+
   private settle(): void {
     this.teardownExchange();
     const deferred = this.deferred;

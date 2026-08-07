@@ -5,6 +5,7 @@ import { UserAgent } from '../../src/ua/user-agent.js';
 import type { LivenessStrategy } from '../../src/reliability/index.js';
 import { parseMessage } from '../../src/messages/parser.js';
 import type { SipRequestMessage } from '../../src/messages/message.js';
+import { Headers, makeResponse, serializeMessage } from '../../src/messages/index.js';
 
 function makeIdGenerator() {
   let n = 0;
@@ -80,5 +81,38 @@ describe('UserAgent liveness wiring', () => {
     await ua.disconnect();
     clock.advance(60000);
     expect(sentOptions(transport)).toHaveLength(before);
+  });
+
+  it('disconnect() leaves no pending registrar refresh timer', async () => {
+    const { ua, clock, transport } = setup();
+    await ua.connect();
+    const registerPromise = ua.register();
+    // Echo a 200 OK for the outbound REGISTER so registration completes and arms the refresh timer.
+    const bytes = transport.sent.find((b) => {
+      const m = parseMessage(b);
+      return m.ok && m.value.kind === 'request' && m.value.method === 'REGISTER';
+    });
+    const parsed = bytes === undefined ? undefined : parseMessage(bytes);
+    if (parsed?.ok && parsed.value.kind === 'request') {
+      const req = parsed.value;
+      const resp = new Headers();
+      resp.set('Via', req.headers.get('Via') ?? '');
+      resp.set('From', req.headers.get('From') ?? '');
+      resp.set('To', req.headers.get('To') ?? '');
+      resp.set('Call-ID', req.headers.get('Call-ID') ?? '');
+      resp.set('CSeq', req.headers.get('CSeq') ?? '');
+      resp.set('Contact', req.headers.get('Contact') ?? '');
+      resp.set('Expires', '120');
+      transport.emitData(serializeMessage(makeResponse(200, 'OK', resp)));
+    }
+    await registerPromise;
+    // A successful registration arms the registrar's refresh timer.
+    expect(clock.pending()).toBeGreaterThan(0);
+    await ua.disconnect();
+    // Flush the already-completed REGISTER transaction's Timer K (K=0 on a reliable
+    // transport, so it terminates on the next clock tick). The registrar's refresh
+    // timer runs on a 60s cadence, so a leaked refresh timer would survive this.
+    clock.advance(1);
+    expect(clock.pending()).toBe(0);
   });
 });
