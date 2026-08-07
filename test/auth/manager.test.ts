@@ -335,6 +335,31 @@ describe('AuthManager state bounding', () => {
     expect(manager.nonceCountSize).toBeLessThanOrEqual(64);
   });
 
+  it('evicts the oldest nonce counter and preserves the newest (oldest-insertion order)', () => {
+    const f = fixture();
+    const manager = new AuthManager(f.ids());
+    const plain = { username: 'alice', password: SECRET_PASSWORD };
+    for (let i = 0; i < 80; i++) {
+      const headers = buildResponseHeaders(REALM, `nonce-${i}`);
+      // Distinct requestId per iteration so the per-request retry budget never
+      // exhausts (which would short-circuit before nextNonceCount runs).
+      manager.retry(f.context({ requestId: `req-${i}`, credentials: plain, response: makeResponse(401, 'Unauthorized', headers) }));
+    }
+    // Cap is exactly reached (80 distinct nonces, cap 64).
+    expect(manager.nonceCountSize).toBe(64);
+    // nonce-0 was the oldest insertion and has been evicted, so re-touching it
+    // starts a fresh counter at nc=00000001 (proving eviction, not an update).
+    const zeroHeaders = buildResponseHeaders(REALM, 'nonce-0');
+    const zeroRetry = manager.retry(f.context({ requestId: 'req-z', credentials: plain, response: makeResponse(401, 'Unauthorized', zeroHeaders) })) as SipRequestMessage;
+    const zeroNc = zeroRetry.headers.get('Authorization')!.match(/nc=([0-9a-fA-F]{8})/)?.[1];
+    expect(zeroNc).toBe('00000001');
+    // nonce-79 is still retained, so its counter increments from 1 to 2.
+    const lastHeaders = buildResponseHeaders(REALM, 'nonce-79');
+    const lastRetry = manager.retry(f.context({ requestId: 'req-y', credentials: plain, response: makeResponse(401, 'Unauthorized', lastHeaders) })) as SipRequestMessage;
+    const lastNc = lastRetry.headers.get('Authorization')!.match(/nc=([0-9a-fA-F]{8})/)?.[1];
+    expect(lastNc).toBe('00000002');
+  });
+
   it('clears a request retry budget entry once its exchange completes', () => {
     const f = fixture();
     const manager = new AuthManager(f.ids());

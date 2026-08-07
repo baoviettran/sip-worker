@@ -29,6 +29,7 @@ interface Harness {
   events: TransactionLayerEvent[];
   sent: SipRequestMessage[];
   registrar: Registrar;
+  authManager: AuthManager | undefined;
 }
 
 function setup(options: {
@@ -51,6 +52,7 @@ function setup(options: {
     emit: (event) => events.push(event),
   });
   const idGenerator = makeIdGenerator();
+  const authManager = credentials ? new AuthManager(idGenerator) : undefined;
   const options_: RegistrarOptions = {
     registrarUri: REGISTRAR_URI,
     aor: AOR,
@@ -59,11 +61,11 @@ function setup(options: {
     idGenerator,
     layer,
     clock,
-    authManager: credentials ? new AuthManager(idGenerator) : undefined,
+    authManager,
     refreshFraction,
   };
   const registrar = new Registrar(options_);
-  return { clock, transport, layer, events, sent, registrar };
+  return { clock, transport, layer, events, sent, registrar, authManager };
 }
 
 const branchOf = (request: SipRequestMessage): string =>
@@ -280,6 +282,21 @@ describe('Registrar', () => {
     respond(h, 200);
     await re;
     expect(h.registrar.state).toBe('registered');
+  });
+
+  it('releases the retry budget when transport drops mid-auth exchange', async () => {
+    const h = setup();
+    const registration = h.registrar.register();
+    await flush();
+    // 401 challenge consumes one retry-budget entry on the AuthManager.
+    respond(h, 401, { challenge: true });
+    await flush();
+    expect(h.authManager!.retriesByRequestSize).toBe(1);
+    // Transport loss is a third terminal outcome; it must release the budget,
+    // not leak it for the life of the UA.
+    h.registrar.onTransportDisconnected();
+    await expect(registration).rejects.toBeInstanceOf(SipError);
+    expect(h.authManager!.retriesByRequestSize).toBe(0);
   });
 
   it('leaves a single timer and listener after repeated register/unregister cycles', async () => {

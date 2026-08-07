@@ -178,6 +178,7 @@ export class Registrar {
   /** UA hook: transport lost — settle any in-flight exchange, drop to unregistered, cancel refresh. */
   onTransportDisconnected(): void {
     this.teardownExchange();
+    this.releaseAuthBudget();
     this.cancelRefresh();
     const deferred = this.deferred;
     this.deferred = undefined;
