@@ -165,7 +165,13 @@ export class AuthManager {
 
     const cnonce = this.idGenerator.branch();
     const nc = this.nextNonceCount(challenge.realm, challenge.nonce);
-    const qop = challenge.qop !== undefined && challenge.qop.length > 0 ? challenge.qop[0] : undefined;
+    // Only a valid qop token reaches computeDigest/renderAuthorization. The
+    // challenge.qop array may retain unrecognized verbatim tokens (e.g. an
+    // unquoted multi-word value); pick the first exact 'auth'/'auth-int'.
+    const qop =
+      challenge.qop !== undefined
+        ? challenge.qop.find((q) => q === 'auth' || q === 'auth-int')
+        : undefined;
 
     const responseDigest = computeDigest({
       algorithm: challenge.algorithm ?? 'MD5',

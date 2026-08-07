@@ -118,4 +118,27 @@ describe('parseDigestChallenges', () => {
     expect(parsed.error.offset).toBeGreaterThanOrEqual(0);
     // The offset is no longer hardcoded to 0 for missing-realm/missing-nonce.
   });
+
+  it('reports the second challenge scheme offset when a later challenge is missing a nonce', () => {
+    // A NON-first challenge missing a nonce: its scheme starts at byte 44, not 0.
+    // This discriminates fail(schemeStart,...) from a hardcoded fail(0,...).
+    const raw = 'Digest realm="r", nonce="n", algorithm=MD5, Digest realm="r2"';
+    const expectedOffset = raw.indexOf('Digest', 1); // 44
+    const parsed = parseDigestChallenges([raw]);
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error.offset).toBe(expectedOffset);
+    expect(parsed.error.offset).not.toBe(0);
+  });
+
+  it('reports the second challenge scheme offset when a later challenge is missing a realm', () => {
+    // A NON-first challenge missing a realm: its scheme starts at byte 44, not 0.
+    const raw = 'Digest realm="r", nonce="n", algorithm=MD5, Digest nonce="n2"';
+    const expectedOffset = raw.indexOf('Digest', 1); // 44
+    const parsed = parseDigestChallenges([raw]);
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error.offset).toBe(expectedOffset);
+    expect(parsed.error.offset).not.toBe(0);
+  });
 });

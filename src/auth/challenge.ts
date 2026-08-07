@@ -15,7 +15,16 @@ export interface DigestChallenge {
    * candidates whose algorithm this client cannot answer.
    */
   readonly rawAlgorithm?: string;
-  readonly qop?: ReadonlyArray<'auth' | 'auth-int'>;
+  /**
+   * The `qop` directives challenged, in order. Per RFC 2617 a `qop` value is a
+   * comma-separated list of tokens (e.g. `"auth,auth-int"`); an UNQUOTED
+   * multi-word value such as `qop=auth auth-int` is malformed but retained
+   * here as a single verbatim token (e.g. `'auth auth-int'`) so callers can
+   * observe exactly what was challenged rather than a silently truncated list.
+   * Consumers MUST validate before using a token as a Digest `qop`: only
+   * `'auth'` and `'auth-int'` (exact, case-insensitive) are valid qop values.
+   */
+  readonly qop?: ReadonlyArray<string>;
   readonly opaque?: string;
   readonly stale?: boolean;
   readonly domain?: string;
@@ -159,15 +168,15 @@ export function parseDigestChallenges(values: string[]): ParseResult<DigestChall
 
     const algorithm = params['algorithm'];
     const qop = params['qop'] !== undefined
-      ? params['qop'].split(',').flatMap((q): Array<'auth' | 'auth-int'> => {
-        const t = q.trim().toLowerCase();
-        if (t === 'auth') return ['auth'];
-        if (t === 'auth-int') return ['auth-int'];
-        // Retain unrecognized qop tokens (e.g. an unquoted multi-word value
-        // such as `auth auth-int`) verbatim so callers see what was challenged
-        // rather than a silently truncated list. The narrow element type is a
-        // documented approximation; the runtime value is the raw token.
-        return [q.trim() as 'auth' | 'auth-int'];
+      ? params['qop'].split(',').map((q) => {
+        const t = q.trim();
+        const lower = t.toLowerCase();
+        // Normalize valid qop tokens to their canonical lower-case form; retain
+        // unrecognized tokens (e.g. an unquoted multi-word value such as
+        // `auth auth-int`) verbatim so callers see what was challenged.
+        if (lower === 'auth') return 'auth';
+        if (lower === 'auth-int') return 'auth-int';
+        return t;
       })
       : undefined;
     const challenge: DigestChallenge = {
