@@ -323,3 +323,23 @@ describe('AuthManager.redact', () => {
     expect(wire).not.toContain(SECRET_PASSWORD);
   });
 });
+
+describe('AuthManager state bounding', () => {
+  it('keeps nonceCounts under the cap across many distinct nonces', () => {
+    const f = fixture();
+    const manager = new AuthManager(f.ids());
+    for (let i = 0; i < 80; i++) {
+      const headers = buildResponseHeaders(REALM, `nonce-${i}`);
+      manager.retry(f.context({ response: makeResponse(401, 'Unauthorized', headers) }));
+    }
+    expect(manager.nonceCountSize).toBeLessThanOrEqual(64);
+  });
+
+  it('clears a request retry budget entry once its exchange completes', () => {
+    const f = fixture();
+    const manager = new AuthManager(f.ids());
+    manager.retry(f.context()); // consumes one budget entry
+    manager.settle('req-1');    // new: mark exchange complete
+    expect(manager.retriesByRequestSize).toBe(0);
+  });
+});

@@ -51,6 +51,9 @@ export type AuthFailure = {
 /** Default cap on ordinary (non-stale) retries per requestId. */
 const DEFAULT_MAX_RETRIES = 3;
 
+/** Cap on distinct realm+nonce counters retained; evict the oldest insertion. */
+const MAX_NONCE_COUNTS = 64;
+
 const AUTH_HEADERS = ['Authorization', 'Proxy-Authorization'] as const;
 const CHALLENGE_HEADERS = ['WWW-Authenticate', 'Proxy-Authenticate'] as const;
 
@@ -122,6 +125,21 @@ export class AuthManager {
   constructor(idGenerator: IdGenerator, maxOrdinary = DEFAULT_MAX_RETRIES) {
     this.idGenerator = idGenerator;
     this.maxOrdinary = maxOrdinary;
+  }
+
+  /** Number of distinct nonce counters currently retained. */
+  get nonceCountSize(): number {
+    return this.nonceCounts.size;
+  }
+
+  /** Number of in-flight request retry budgets currently retained. */
+  get retriesByRequestSize(): number {
+    return this.retriesByRequest.size;
+  }
+
+  /** Mark an exchange (by requestId) complete so its retry budget is released. */
+  settle(requestId: string): void {
+    this.retriesByRequest.delete(requestId);
   }
 
   /**
@@ -243,6 +261,11 @@ export class AuthManager {
 
   private nextNonceCount(realm: string, nonce: string): string {
     const key = `${realm.length}:${realm}${nonce}`;
+    if (this.nonceCounts.size >= MAX_NONCE_COUNTS && !this.nonceCounts.has(key)) {
+      // Map insertion order is oldest-first; evict it to stay under the cap.
+      const oldest = this.nonceCounts.keys().next().value;
+      if (oldest !== undefined) this.nonceCounts.delete(oldest);
+    }
     const next = (this.nonceCounts.get(key) ?? 0) + 1;
     this.nonceCounts.set(key, next);
     return next.toString().padStart(8, '0');

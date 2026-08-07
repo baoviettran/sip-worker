@@ -94,6 +94,14 @@ export class Registrar {
 
   private redirectCount = 0;
   private redirectTarget: string | undefined;
+  /**
+   * requestIds whose retry budgets are in flight for the current exchange
+   * (each challenged CSeq yields its own `${callId}:${cseq}`). A multi-challenge
+   * exchange (e.g. 401→401→200) accumulates more than one; all are released via
+   * `authManager.settle` once the exchange grants or terminally fails, keeping
+   * `AuthManager.retriesByRequest` bounded across a long-lived UA.
+   */
+  private readonly activeRequestIds: Set<string> = new Set();
 
   private stateValue: RegisterState = 'unregistered';
   private refreshTimer = -1;
@@ -263,8 +271,9 @@ export class Registrar {
       this.fail(new SipError(response.statusCode, `${response.statusCode} received but no credentials configured`));
       return;
     }
+    const requestId = `${this.identity.callId}:${numeric(base.headers) ?? 0}`;
     const result = this.authManager.retry({
-      requestId: `${this.identity.callId}:${numeric(base.headers) ?? 0}`,
+      requestId,
       request: base,
       response,
       credentials: this.credentials,
@@ -273,6 +282,9 @@ export class Registrar {
       this.fail(result.error);
       return;
     }
+    // The retry consumed one budget entry for this requestId; remember it so the
+    // exchange's terminal 2xx or fail can release it via authManager.settle.
+    this.activeRequestIds.add(requestId);
     // Retry is a NEW request on a NEW client transaction (new branch). Re-stamp
     // its CSeq from the single persisted counter so the wire sequence stays
     // strictly increasing on one Call-ID across every outbound REGISTER.
@@ -346,6 +358,14 @@ export class Registrar {
     this.settle();
   }
 
+  /** Release every retry-budget entry accumulated by the active exchange. */
+  private releaseAuthBudget(): void {
+    if (this.activeRequestIds.size > 0 && this.authManager !== undefined) {
+      for (const requestId of this.activeRequestIds) this.authManager.settle(requestId);
+    }
+    this.activeRequestIds.clear();
+  }
+
   private scheduleRefresh(granted: number): void {
     this.cancelRefresh();
     this.refreshMs = this.refreshAfter(granted);
@@ -370,6 +390,7 @@ export class Registrar {
 
   private settle(): void {
     this.teardownExchange();
+    this.releaseAuthBudget();
     const deferred = this.deferred;
     this.deferred = undefined;
     if (deferred !== undefined) deferred.resolve();
@@ -377,6 +398,7 @@ export class Registrar {
 
   private fail(reason: unknown): void {
     this.teardownExchange();
+    this.releaseAuthBudget();
     this.cancelRefresh();
     // Always exit the exchange states: a failed unregister must not leave the
     // registrar stuck in 'unregistering' (later register/unregister calls would
