@@ -15,7 +15,7 @@
 import { Headers, makeRequest } from '../messages/index.js';
 import type { SipRequestMessage, SipResponseMessage } from '../messages/message.js';
 import { SipError } from '../errors.js';
-import { makeBranch } from '../dialogs/header-values.js';
+import { extractUri, makeBranch } from '../dialogs/header-values.js';
 import type { IdGenerator, AuthManager, AuthFailure } from '../auth/manager.js';
 import type { TransactionLayer } from '../transactions/coordinator.js';
 import type { TransactionLayerEvent } from '../transactions/types.js';
@@ -72,6 +72,9 @@ function minExpiresFor(response: SipResponseMessage): number {
   return Number.isFinite(value) ? value : 600;
 }
 
+/** Maximum REGISTER redirect hops before falling through to the generic fail (RFC 3261 10.2). */
+const MAX_REDIRECTS = 5;
+
 /**
  * Tracks registration for a single UA account. Registers/unregisters return
  * promises settling on final 2xx protocol outcomes.
@@ -88,6 +91,9 @@ export class Registrar {
   private readonly refreshAfter: (granted: number) => number;
   private readonly identity: RegistrationIdentity;
   private branchCounter = 0;
+
+  private redirectCount = 0;
+  private redirectTarget: string | undefined;
 
   private stateValue: RegisterState = 'unregistered';
   private refreshTimer = -1;
@@ -132,7 +138,13 @@ export class Registrar {
       return Promise.reject(new SipError(0, 'a registration exchange is already in progress'));
     }
     this.reconnectPending = false;
-    return this.startExchange(this.nextRequest(undefined, this.contact));
+    this.redirectCount = 0;
+    // A 301 (permanent) redirect persists its target for the UA's life: a fresh
+    // registration (initial, refresh, or reconnect) opens against that target
+    // rather than the configured registrar URI. 302 is per-attempt only.
+    const target = this.redirectTarget ?? this.registrarUri;
+    const request = this.nextRequest(undefined, this.contact);
+    return this.startExchange(target === this.registrarUri ? request : { ...request, uri: target });
   }
 
   /**
@@ -239,6 +251,8 @@ export class Registrar {
       this.handleMinExpires(base, response);
     } else if (code >= 200 && code < 300) {
       this.onGranted(response);
+    } else if ((code === 301 || code === 302) && this.redirectCount < MAX_REDIRECTS) {
+      this.handleRedirect(base, response);
     } else if (code >= 300) {
       this.fail(new SipError(code, `REGISTER rejected with ${code}`));
     }
@@ -278,6 +292,47 @@ export class Registrar {
     this.send(request);
   }
 
+  /**
+   * Follow a 301/302 REGISTER redirect (RFC 3261 10.2). The retried REGISTER
+   * reuses the next CSeq on the same Call-ID (so the wire sequence stays
+   * strictly increasing) but targets the redirect Contact URI. 301 persists the
+   * target for the UA's life; 302 is per-attempt. A redirect without a Contact
+   * fails. The hop cap (`MAX_REDIRECTS`) is enforced in `onResponse`, so a
+   * redirect storm falls through to the generic `>= 300` fail rather than loop.
+   */
+  private handleRedirect(base: SipRequestMessage, response: SipResponseMessage): void {
+    const contact = extractUri(response.headers.get('Contact'));
+    if (contact === undefined) {
+      this.fail(new SipError(response.statusCode, 'REGISTER redirect without a Contact'));
+      return;
+    }
+    this.redirectCount += 1;
+    if (response.statusCode === 301) this.redirectTarget = contact;
+    const request = this.nextRequestForTarget(contact, base);
+    // Carry any in-progress authorization (from an earlier 401/407) forward.
+    const authorization = base.headers.get('Authorization');
+    const proxyAuthorization = base.headers.get('Proxy-Authorization');
+    if (authorization !== undefined) request.headers.set('Authorization', authorization);
+    if (proxyAuthorization !== undefined) request.headers.set('Proxy-Authorization', proxyAuthorization);
+    this.send(request);
+  }
+
+  /**
+   * Build the next REGISTER with a redirect target as the request URI. Same
+   * Call-ID, next strictly-increasing CSeq, fresh branch, and the same Contact
+   * header as the base request — only the request URI changes. Reuses
+   * `nextRequest` for all header stamping, then spreads the result to override
+   * the request URI (the field is read-only), so existing `nextRequest` callers
+   * are undisturbed.
+   */
+  private nextRequestForTarget(target: string, base: SipRequestMessage): SipRequestMessage {
+    const contact = base.headers.get('Contact') ?? this.contact;
+    const expires = base.headers.get('Expires');
+    const request = this.nextRequest(expires !== undefined ? Number(expires) : undefined, contact);
+    // `nextRequest` stamped the registrar URI as the request URI; redirect.
+    return { ...request, uri: target };
+  }
+
   private onGranted(response: SipResponseMessage): void {
     if (this.stateValue === 'unregistering') {
       this.settle();
@@ -285,6 +340,7 @@ export class Registrar {
       return;
     }
     this.stateValue = 'registered';
+    this.redirectCount = 0;
     const granted = grantedExpiry(response);
     if (granted !== undefined) this.scheduleRefresh(granted);
     this.settle();

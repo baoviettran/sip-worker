@@ -7,6 +7,7 @@ import { FakeClock } from '../support/fake-clock.js';
 import { FakeTransport } from '../support/fake-transport.js';
 import { AuthManager } from '../../src/auth/manager.js';
 import { Registrar, type RegistrarOptions } from '../../src/ua/registrar.js';
+import { SipError } from '../../src/errors.js';
 
 const REGISTRAR_URI = 'sip:registrar.example.com';
 const REALM = 'example.com';
@@ -367,5 +368,47 @@ describe('Registrar', () => {
     await re;
     expect(h.registrar.state).toBe('registered');
     expect(h.registrar.status().nextCSeq).toBeGreaterThanOrEqual(3);
+  });
+
+  it('follows a 302 redirect Contact to complete registration', async () => {
+    const h = setup();
+    const registration = h.registrar.register();
+    await flush();
+    // First exchange: registrar answers 302 with a redirect target.
+    respond(h, 302, { contact: '<sip:redirect-1.example.com>' });
+    await flush();
+    // The registrar must have sent a NEW REGISTER to the redirect target.
+    expect(h.sent[h.sent.length - 1]!.uri).toBe('sip:redirect-1.example.com');
+    // Second exchange: the redirected REGISTER is granted.
+    respond(h, 200);
+    await registration;
+    expect(h.registrar.state).toBe('registered');
+  });
+
+  it('does not follow a 305 Use Proxy as a REGISTER redirect', async () => {
+    const h = setup();
+    const registration = h.registrar.register();
+    await flush();
+    respond(h, 305, { contact: '<sip:proxy.example.com>' });
+    // 305 is NOT a followable redirect: the registration must fail, not re-REGISTER.
+    await expect(registration).rejects.toThrow(SipError);
+    expect(h.sent).toHaveLength(1); // no second REGISTER
+    expect(h.registrar.state).toBe('failed');
+  });
+
+  it('fails a redirect loop instead of spinning', async () => {
+    const h = setup();
+    const registration = h.registrar.register();
+    await flush();
+    // Chain 5 redirects; the 6th (over MAX_REDIRECTS=5) must fail.
+    for (let i = 0; i < 5; i += 1) {
+      respond(h, 302, { contact: '<sip:hop.example.com>' });
+      await flush();
+    }
+    // Now at the cap: a further 302 must fail rather than resend.
+    respond(h, 302, { contact: '<sip:hop.example.com>' });
+    await expect(registration).rejects.toThrow(SipError);
+    expect(h.sent.length).toBeLessThanOrEqual(6);
+    expect(h.registrar.state).toBe('failed');
   });
 });
