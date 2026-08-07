@@ -14,7 +14,7 @@ describe('md5', () => {
     expect(md5('message digest')).toBe('f96b697d7cb7938d525a2f31aaf161d0');
   });
 
-  it('matches the 448-bit "abcdefghijklmnopqrstuvwxyz" vector', () => {
+  it('matches the single-block "abcdefghijklmnopqrstuvwxyz" vector', () => {
     expect(md5('abcdefghijklmnopqrstuvwxyz')).toBe('c3fcd3d76192e4007dfb496cca67e13b');
   });
 });

@@ -43,8 +43,9 @@ describe('computeDigest', () => {
       uri: '/dir/index.html',
       qop: 'auth',
     };
-    expect(() => computeDigest(params)).toThrow();
-    expect(() => computeDigest({ ...params, nc: '00000001' })).toThrow();
+    expect(() => computeDigest(params)).toThrow(/nc and cnonce/);
+    expect(() => computeDigest({ ...params, nc: '00000001' })).toThrow(/nc and cnonce/);
+    expect(() => computeDigest({ ...params, cnonce: '0a4f113b' })).toThrow(/nc and cnonce/);
   });
 
   it('computes an MD5 auth-int response with entity-body integrity (RFC 2617 3.5)', () => {

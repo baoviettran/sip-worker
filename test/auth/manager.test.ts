@@ -243,6 +243,49 @@ describe('AuthManager.retry', () => {
     expect(nc1).toBe('00000002');
   });
 
+  it('does not let a stale retry consume the ordinary retry budget', () => {
+    const manager = new AuthManager(f.ids());
+    const plain = { username: 'alice', password: SECRET_PASSWORD };
+    // Drive the ordinary budget to its boundary: two non-stale retries first.
+    const first = manager.retry(f.context({ requestId: 'req-b', credentials: plain })) as SipRequestMessage;
+    const second = manager.retry(f.context({ requestId: 'req-b', credentials: plain })) as SipRequestMessage;
+    expect(first.headers.get('Authorization')!.match(/nc=([0-9a-fA-F]{8})/)![1]).toBe('00000001');
+    expect(second.headers.get('Authorization')!.match(/nc=([0-9a-fA-F]{8})/)![1]).toBe('00000002');
+    // A stale retry on the SAME requestId must not consume one of the slots left.
+    const staleHeaders = buildResponseHeaders(REALM, NONCE, true);
+    const staleCtx = f.context({
+      requestId: 'req-b',
+      credentials: plain,
+      response: makeResponse(401, 'Unauthorized', staleHeaders),
+    });
+    const stale = manager.retry(staleCtx);
+    expect(stale).not.toMatchObject({ type: expect.any(String) });
+    const staleRequest = stale as SipRequestMessage;
+    expect(staleRequest.headers.get('Authorization')!.match(/nc=([0-9a-fA-F]{8})/)![1]).toBe('00000003');
+    // The third ordinary retry must still be allowed — the stale one left the
+    // budget at 2, not 3. If stale consumed a slot this would be 'exhausted'.
+    const ordinary = manager.retry(f.context({ requestId: 'req-b', credentials: plain }));
+    expect(ordinary).not.toMatchObject({ type: expect.any(String) });
+  });
+
+  it('resets nc to 00000001 for a genuinely new nonce after a stale retry', () => {
+    const manager = new AuthManager(f.ids());
+    // First a challenge on nonce NONCE (nc → 00000001), then a stale on the SAME
+    // nonce (nc continuation), then a genuinely NEW nonce-2 → nc resets to 1.
+    const first = manager.retry(f.context({ requestId: 'req-c' })) as SipRequestMessage;
+    expect(first.headers.get('Authorization')!.match(/nc=([0-9a-fA-F]{8})/)![1]).toBe('00000001');
+    const staleHeaders = buildResponseHeaders(REALM, NONCE, true);
+    const staleCtx = f.context({ requestId: 'req-c', response: makeResponse(401, 'Unauthorized', staleHeaders) });
+    const stale = manager.retry(staleCtx) as SipRequestMessage;
+    // Same nonce → nc continues to 02.
+    expect(stale.headers.get('Authorization')!.match(/nc=([0-9a-fA-F]{8})/)![1]).toBe('00000002');
+    // Genuinely NEW nonce → the counter resets to 01.
+    const newNonceHeaders = buildResponseHeaders(REALM, 'nonce-2');
+    const newCtx = f.context({ requestId: 'req-c', response: makeResponse(401, 'Unauthorized', newNonceHeaders) });
+    const newRetry = manager.retry(newCtx) as SipRequestMessage;
+    expect(newRetry.headers.get('Authorization')!.match(/nc=([0-9a-fA-F]{8})/)![1]).toBe('00000001');
+  });
+
   it('preserves every Via param except branch on auth retry', () => {
     const f = fixture();
     // Original Via with params current nextVia drops.

@@ -71,10 +71,14 @@ describe('parseDigestChallenges', () => {
   });
 
   it('returns a ParseError on a malformed escape', () => {
-    const parsed = parseDigestChallenges(['Digest realm="a\\', 'nonce="n1"']);
+    // A single challenge whose quoted value is a dangling trailing backslash at
+    // end of input reaches the escape-resolution path with no valid escape to
+    // apply → 'malformed escape at end of input'.
+    const parsed = parseDigestChallenges(['Digest realm="a\\']);
     expect(parsed.ok).toBe(false);
     if (parsed.ok) return;
     expect(parsed.error).toBeInstanceOf(ParseError);
+    expect(parsed.error.message).toMatch(/escape/);
     expect(typeof parsed.error.offset).toBe('number');
   });
 
