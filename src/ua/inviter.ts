@@ -11,7 +11,7 @@
  * repeated 2xx responses for the same dialog.
  */
 
-import { Headers, makeRequest, bodyText, serializeMessage } from '../messages/index.js';
+import { Headers, makeRequest, bodyText } from '../messages/index.js';
 import type { SipRequestMessage, SipResponseMessage } from '../messages/message.js';
 import { SipError } from '../errors.js';
 import { makeBranch, extractTag } from '../dialogs/header-values.js';
@@ -22,6 +22,7 @@ import type { Clock } from '../transport/index.js';
 import type { AuthManager, AuthFailure } from '../auth/manager.js';
 import type { WorkerMediaController } from '../media/worker-controller.js';
 import { Session } from './session.js';
+import { DialogSet } from './dialog-set.js';
 
 export interface InviterOptions {
   readonly to: string;
@@ -65,8 +66,7 @@ export class Inviter {
   private inviteDeferred: { resolve: () => void; reject: (reason: unknown) => void } | undefined;
   private currentRequest: SipRequestMessage | undefined;
   private unsubscribe: (() => void) | undefined;
-  private dialog: Dialog | undefined;
-  private cachedAckBytes: Uint8Array | undefined;
+  private dialogSet: DialogSet | undefined;
   private hangingUp = false;
   private hangupDeferred: { resolve: () => void; reject: (reason: unknown) => void } | undefined;
 
@@ -123,8 +123,13 @@ export class Inviter {
 
     return new Promise<void>((resolve, reject) => {
       this.hangupDeferred = { resolve, reject };
-      this.sendBye();
+      this.sendBye(this.dialog!);
     });
+  }
+
+  /** The selected (application) dialog from the first 2xx response. */
+  get dialog(): Dialog | undefined {
+    return this.dialogSet?.selectedDialog;
   }
 
   private async startInvite(): Promise<void> {
@@ -173,19 +178,16 @@ export class Inviter {
       if (event.type === 'response') {
         this.onResponse(request, event.response);
       } else if (event.type === 'statelessResponse') {
-        // Handle repeated 2xx responses that don't match the transaction
-        if (this.dialog !== undefined && this.cachedAckBytes !== undefined) {
-          const response = event.response;
-          if (cseqNumber(response) === cseqNumber(request) && response.statusCode >= 200 && response.statusCode < 300) {
-            // Verify this is for the same dialog
-            const callId = response.headers.get('Call-ID');
-            const fromTag = extractTag(response.headers.get('From'));
-            const toTag = extractTag(response.headers.get('To'));
-            if (callId === this.dialog.callId && fromTag === this.dialog.localTag && toTag === this.dialog.remoteTag) {
-              // Resend cached ACK, no state change
-              const transport = this.layer.getTransport();
-              void transport.send(this.cachedAckBytes);
-            }
+        // Repeated or forked 2xx arrive after the INVITE client transaction
+        // has terminated. Route them through the same 2xx handler so the
+        // DialogSet resends the right per-dialog ACK or cleans up a fork.
+        const response = event.response;
+        if (cseqNumber(response) === cseqNumber(request) && response.statusCode >= 200 && response.statusCode < 300) {
+          // Only handle if this matches our INVITE (Call-ID + From tag)
+          const callId = response.headers.get('Call-ID');
+          const fromTag = extractTag(response.headers.get('From'));
+          if (callId === this.callId && fromTag === this.fromTag) {
+            void this.onSuccess(response);
           }
         }
       } else if (event.type === 'timeout' || event.type === 'transportError') {
@@ -233,35 +235,39 @@ export class Inviter {
     this.fail(new SipError(code, `INVITE rejected with ${code}`));
   }
 
-  private onSuccess(response: SipResponseMessage): void {
-    // Check if this is a repeated 2xx for the same dialog
-    if (this.dialog !== undefined && this.cachedAckBytes !== undefined) {
-      // Resend cached ACK, no state change
-      const transport = this.layer.getTransport();
-      void transport.send(this.cachedAckBytes);
+  private async onSuccess(response: SipResponseMessage): Promise<void> {
+    // Lazily create the DialogSet on the first 2xx
+    if (this.dialogSet === undefined) {
+      this.dialogSet = new DialogSet(
+        this.currentRequest!,
+        this.idGenerator,
+        this.layer.getTransport(),
+        (dialog) => this.sendByeForDialog(dialog),
+      );
+    }
+
+    try {
+      await this.dialogSet.handleSuccess(response);
+    } catch (err) {
+      // Malformed 2xx (missing To tag/Contact) - fail the invite if still pending
+      this.fail(err);
       return;
     }
 
-    // First 2xx: build dialog, set remote SDP, create and cache ACK
-    const originalRequest = this.currentRequest!;
-    this.dialog = Dialog.fromUac(originalRequest, response, this.idGenerator);
-
-    const sdp = bodyText(response);
+    // Set remote SDP from every 2xx (the selected dialog's answer)
+    const sdp = DialogSet.sdpFromBody(response);
     if (sdp.length > 0) {
       void this.controller.setRemote(this.sessionId, sdp);
     }
 
-    const ack = this.dialog.createAck(response);
-    this.cachedAckBytes = serializeMessage(ack);
-
-    const transport = this.layer.getTransport();
-    void transport.send(this.cachedAckBytes);
-
-    this.session.transition('confirmed');
-    // Don't teardown yet - keep listener attached for repeated 200s
-    const deferred = this.inviteDeferred;
-    this.inviteDeferred = undefined;
-    if (deferred !== undefined) deferred.resolve();
+    // Transition to confirmed and resolve the invite promise once, on the
+    // first (selected) dialog. Repeated/forked 2xx produce no state change.
+    if (this.session.state !== 'confirmed' && this.dialogSet.hasSelection) {
+      this.session.transition('confirmed');
+      const deferred = this.inviteDeferred;
+      this.inviteDeferred = undefined;
+      if (deferred !== undefined) deferred.resolve();
+    }
   }
 
   private handleAuth(base: SipRequestMessage, response: SipResponseMessage): void {
@@ -288,13 +294,13 @@ export class Inviter {
     this.sendAttempt(result);
   }
 
-  private sendBye(): void {
-    if (this.dialog === undefined) {
-      this.failHangup(new SipError(0, 'no dialog for BYE'));
-      return;
-    }
-
-    const bye = this.dialog.createRequest('BYE');
+  /**
+   * Send a BYE for the selected (application) dialog from hangup(). Replaces
+   * the INVITE listener with a BYE listener, transitions to terminated on a
+   * 2xx, and settles the hangup promise.
+   */
+  private sendBye(dialog: Dialog): void {
+    const bye = dialog.createRequest('BYE');
 
     try {
       this.attachByeListener(bye);
@@ -302,6 +308,41 @@ export class Inviter {
     } catch (err) {
       this.failHangup(err);
     }
+  }
+
+  /**
+   * Send a BYE for an extra (forked) dialog from the DialogSet. Self-contained:
+   * uses a temporary subscription that does not disturb the main INVITE
+   * listener or session state. Resolves on a 2xx (or rejects on a non-2xx
+   * final / timeout / transport error), then unsubscribes.
+   */
+  private sendByeForDialog(dialog: Dialog): Promise<void> {
+    const bye = dialog.createRequest('BYE');
+    return new Promise<void>((resolve, reject) => {
+      const unsubscribe = this.layer.subscribe((event: TransactionLayerEvent) => {
+        if (event.type === 'response') {
+          if (cseqNumber(event.response) === cseqNumber(bye)) {
+            const code = event.response.statusCode;
+            if (code >= 200 && code < 300) {
+              unsubscribe();
+              resolve();
+            } else if (code >= 300) {
+              unsubscribe();
+              reject(new SipError(code, `BYE rejected with ${code}`));
+            }
+          }
+        } else if (event.type === 'timeout' || event.type === 'transportError') {
+          unsubscribe();
+          reject(new SipError(0, `BYE ${event.type}`));
+        }
+      });
+      try {
+        this.layer.sendRequest(bye);
+      } catch (err) {
+        unsubscribe();
+        reject(err);
+      }
+    });
   }
 
   private attachByeListener(request: SipRequestMessage): void {

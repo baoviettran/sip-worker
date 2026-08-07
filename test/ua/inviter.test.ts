@@ -174,6 +174,10 @@ function respond(
   headers.set('Call-ID', request.headers.get('Call-ID') ?? 'call@example.com');
   headers.set('CSeq', request.headers.get('CSeq') ?? '1 INVITE');
   headers.set('Max-Forwards', '70');
+  // A 2xx INVITE response must carry a Contact header (RFC 3261 12.1.1)
+  if (statusCode >= 200 && statusCode < 300) {
+    headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
+  }
   if (over.challenge === true) {
     headers.set('WWW-Authenticate', `Digest realm="${REALM}", nonce="${NOAUTH_NONCE}", qop="auth", algorithm=SHA-256`);
   }

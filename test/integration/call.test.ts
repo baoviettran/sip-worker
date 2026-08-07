@@ -5,6 +5,7 @@ import { FakeClock } from '../support/fake-clock.js';
 import { MockRegistrar } from '../support/mock-registrar.js';
 import { Headers } from '../../src/messages/headers.js';
 import { makeRequest, makeResponse } from '../../src/messages/message.js';
+import type { SipRequestMessage } from '../../src/messages/message.js';
 import { parseMessage } from '../../src/messages/parser.js';
 import { serializeMessage } from '../../src/messages/serializer.js';
 import { AuthManager } from '../../src/auth/manager.js';
@@ -78,6 +79,64 @@ describe('Full Call Integration', () => {
     await byePromise;
 
     expect(states).toEqual(['registered', 'inviting', 'ringing', 'confirmed', 'terminating', 'terminated']);
+  });
+
+  it('handles forked 2xx: first dialog selected, extra dialog ACKed with correct To tag then BYEd', async () => {
+    const states: string[] = [];
+    ua.on('stateChanged', (event: any) => {
+      states.push(event.state);
+    });
+
+    await ua.connect();
+    registrar.start();
+    await ua.register();
+
+    // Initiate outgoing call
+    const invitePromise = ua.invite('sip:bob@example.com');
+    await waitForSentMessage(transport, 'INVITE');
+
+    // First fork sends 200 OK with To tag fork-a (becomes the selected dialog)
+    await send200OkWithTag(transport, 'fork-a');
+    await invitePromise;
+    expect(ua.callState).toBe('confirmed');
+
+    // Count ACKs/BYEs so far
+    const acksBefore = countRequests(transport, 'ACK');
+    const byesBefore = countRequests(transport, 'BYE');
+
+    // Second fork sends 200 OK with a different To tag fork-b. This arrives
+    // after the INVITE client transaction terminated, so it is a stateless
+    // response routed through the DialogSet.
+    await send200OkWithTag(transport, 'fork-b');
+    // Allow the async onSuccess/handleSuccess + sendByeForDialog to run
+    await waitForSentMessage(transport, 'BYE');
+    await flush();
+
+    // An ACK for fork-b was sent with the matching To tag
+    const newAcks = sentRequests(transport, 'ACK').slice(acksBefore);
+    expect(newAcks.length).toBe(1);
+    expect(toTagOf(newAcks[0]!)).toBe('fork-b');
+
+    // A BYE for fork-b was sent with the matching To tag
+    const newByes = sentRequests(transport, 'BYE').slice(byesBefore);
+    expect(newByes.length).toBe(1);
+    expect(toTagOf(newByes[0]!)).toBe('fork-b');
+
+    // Respond to the fork-b BYE with 200 so the cleanup completes
+    await sendBye200For(transport, newByes[0]!);
+    await flush();
+
+    // The application dialog is still fork-a. Hang it up.
+    const byePromise = ua.bye();
+    await waitForSentMessage(transport, 'BYE');
+    // The hangup BYE targets fork-a
+    const hangupBye = sentRequests(transport, 'BYE').slice(-1)[0]!;
+    expect(toTagOf(hangupBye)).toBe('fork-a');
+    await sendBye200For(transport, hangupBye);
+    await byePromise;
+    // Session reached terminated (ua.bye() clears the active inviter, so
+    // callState returns 'idle'; verify via the emitted state trace).
+    expect(states).toContain('terminated');
   });
 
   it('should handle incoming call flow: invite → answer → bye', async () => {
@@ -250,4 +309,76 @@ function createByeRequest(dialog: any) {
   headers.set('To', `<sip:alice@example.com>;tag=${dialog.localTag}`);
   headers.set('CSeq', '2 BYE');
   return makeRequest('BYE', dialog.remoteTarget, headers);
+}
+
+/** Resolve pending microtasks/timers. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** All sent requests of a given method, parsed. */
+function sentRequests(transport: FakeTransport, method: string): SipRequestMessage[] {
+  const out: SipRequestMessage[] = [];
+  for (const bytes of transport.sent) {
+    const parsed = parseMessage(bytes);
+    if (parsed.ok && parsed.value.kind === 'request' && parsed.value.method === method) {
+      out.push(parsed.value);
+    }
+  }
+  return out;
+}
+
+/** Count sent requests of a given method. */
+function countRequests(transport: FakeTransport, method: string): number {
+  return sentRequests(transport, method).length;
+}
+
+/** Extract the To-tag from a request. */
+function toTagOf(request: SipRequestMessage): string | undefined {
+  const to = request.headers.get('To');
+  if (!to) return undefined;
+  const match = to.match(/;tag=([^;,\s]+)/);
+  return match?.[1];
+}
+
+/**
+ * Deliver a 200 OK to the INVITE with a specific To tag (for fork scenarios).
+ * Reuses the sent INVITE's headers so the transaction layer matches the Via.
+ */
+async function send200OkWithTag(transport: FakeTransport, toTag: string): Promise<void> {
+  const inviteBytes = transport.sent.find(bytes => {
+    const parsed = parseMessage(bytes);
+    return parsed.ok && parsed.value.kind === 'request' && parsed.value.method === 'INVITE';
+  });
+  if (!inviteBytes) throw new Error('No INVITE found');
+  const invite = parseMessage(inviteBytes);
+  if (!invite.ok || invite.value.kind !== 'request') throw new Error('Invalid INVITE');
+
+  const headers = new Headers();
+  headers.set('Via', invite.value.headers.get('Via') ?? '');
+  headers.set('From', invite.value.headers.get('From') ?? '');
+  headers.set('To', (invite.value.headers.get('To') ?? '') + `;tag=${toTag}`);
+  headers.set('Call-ID', invite.value.headers.get('Call-ID') ?? '');
+  headers.set('CSeq', invite.value.headers.get('CSeq') ?? '');
+  headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
+  headers.set('Content-Type', 'application/sdp');
+
+  const body = new TextEncoder().encode('v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n');
+  const response = makeResponse(200, 'OK', headers, body);
+  transport.emitData(serializeMessage(response));
+}
+
+/**
+ * Respond 200 OK to a specific BYE request (identified by its Via/CSeq/Call-ID).
+ */
+async function sendBye200For(transport: FakeTransport, bye: SipRequestMessage): Promise<void> {
+  const headers = new Headers();
+  headers.set('Via', bye.headers.get('Via') ?? '');
+  headers.set('From', bye.headers.get('From') ?? '');
+  headers.set('To', bye.headers.get('To') ?? '');
+  headers.set('Call-ID', bye.headers.get('Call-ID') ?? '');
+  headers.set('CSeq', bye.headers.get('CSeq') ?? '');
+
+  const response = makeResponse(200, 'OK', headers);
+  transport.emitData(serializeMessage(response));
 }
