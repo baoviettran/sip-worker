@@ -14,6 +14,8 @@ export interface DigestParams {
   readonly qop?: 'auth' | 'auth-int';
   readonly nc?: string;
   readonly cnonce?: string;
+  /** Entity body bytes; required when qop is 'auth-int'. */
+  readonly body?: Uint8Array;
 }
 
 /**
@@ -29,14 +31,19 @@ export interface DigestParams {
  * Throws a `TypeError` when `qop` is set but `nc` or `cnonce` is missing.
  */
 export function computeDigest(params: DigestParams): string {
-  const { algorithm, username, password, realm, nonce, method, uri, qop, nc, cnonce } = params;
+  const { algorithm, username, password, realm, nonce, method, uri, qop, nc, cnonce, body } = params;
   if (qop !== undefined && (nc === undefined || cnonce === undefined)) {
     throw new TypeError('computeDigest: nc and cnonce are required when qop is set');
+  }
+  if (qop === 'auth-int' && body === undefined) {
+    throw new TypeError('computeDigest: body is required when qop is auth-int');
   }
 
   const h: (input: string) => string = algorithm === 'MD5' ? md5 : sha256;
   const ha1 = h(`${username}:${realm}:${password}`);
-  const ha2 = h(`${method}:${uri}`);
+  const ha2 = qop === 'auth-int'
+    ? h(`${method}:${uri}:${h(new TextDecoder().decode(body))}`)
+    : h(`${method}:${uri}`);
   const data = qop !== undefined && nc !== undefined && cnonce !== undefined
     ? `${ha1}:${nonce}:${nc}:${cnonce}:${qop}:${ha2}`
     : `${ha1}:${nonce}:${ha2}`;
