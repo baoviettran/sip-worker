@@ -64,6 +64,13 @@ describe('Dialog.fromUac', () => {
     expect(dialog.remoteTarget).toBe('sip:bob@192.0.2.5:5060');
   });
 
+  it('excludes Contact parameters from a bare Contact URI', () => {
+    const response = make2xx();
+    response.headers.set('Contact', 'sip:bob@host;expires=60');
+    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator());
+    expect(dialog.remoteTarget).toBe('sip:bob@host');
+  });
+
   it('falls back to the request URI when Contact is absent', () => {
     const headers = new Headers();
     headers.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-invite');
