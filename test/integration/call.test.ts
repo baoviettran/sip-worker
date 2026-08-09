@@ -188,6 +188,126 @@ describe('Full Call Integration', () => {
 
     expect(invitation.session.state).toBe('terminated');
   });
+
+  it('routes a BYE to its incoming dialog while an outgoing dialog remains active', async () => {
+    const incomingCalls: any[] = [];
+    ua.on('incomingCall', (invitation: any) => {
+      incomingCalls.push(invitation);
+    });
+
+    await ua.connect();
+
+    const outgoing = ua.invite('sip:carol@example.com');
+    await waitForSentMessage(transport, 'INVITE');
+    await send200Ok(transport);
+    await outgoing;
+
+    transport.emitData(serializeMessage(createInviteRequest()));
+    await flush();
+    expect(incomingCalls).toHaveLength(1);
+
+    const invitation = incomingCalls[0]!;
+    const answer = invitation.answer('v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n');
+    await flush();
+    transport.emitData(serializeMessage(createAckRequest(invitation.dialog.localTag)));
+    await answer;
+
+    const bye = createByeRequest(invitation.dialog);
+    transport.emitData(serializeMessage(bye));
+    await flush();
+
+    const statuses = transport.sent
+      .map((bytes) => parseMessage(bytes))
+      .filter((parsed) => parsed.ok && parsed.value.kind === 'response' && parsed.value.headers.get('CSeq') === '2 BYE')
+      .map((parsed) => parsed.ok && parsed.value.kind === 'response' ? parsed.value.statusCode : 0);
+    expect(statuses).toEqual([200]);
+    expect(invitation.session.state).toBe('terminated');
+    expect(ua.callState).toBe('confirmed');
+  });
+
+  it('accepts a matching CANCEL and terminates the pending incoming invitation', async () => {
+    const incomingCalls: any[] = [];
+    ua.on('incomingCall', (invitation: any) => {
+      incomingCalls.push(invitation);
+    });
+
+    await ua.connect();
+    transport.emitData(serializeMessage(createInviteRequest()));
+    await flush();
+    expect(incomingCalls).toHaveLength(1);
+
+    transport.emitData(serializeMessage(createCancelRequest()));
+    await flush();
+
+    const responses = transport.sent
+      .map((bytes) => parseMessage(bytes))
+      .filter((parsed) => parsed.ok && parsed.value.kind === 'response')
+      .map((parsed) => parsed.ok && parsed.value.kind === 'response'
+        ? [parsed.value.statusCode, parsed.value.headers.get('CSeq')]
+        : [0, undefined]);
+    expect(responses).toContainEqual([200, '1 CANCEL']);
+    expect(responses).toContainEqual([487, '1 INVITE']);
+    expect(incomingCalls[0]!.session.state).toBe('terminated');
+  });
+
+  it('reuses an accepted Invitation for a duplicate INVITE on a new transaction', async () => {
+    const incomingCalls: any[] = [];
+    ua.on('incomingCall', (invitation: any) => {
+      incomingCalls.push(invitation);
+    });
+
+    await ua.connect();
+    transport.emitData(serializeMessage(createInviteRequest()));
+    await flush();
+    const invitation = incomingCalls[0]!;
+    const answer = invitation.answer('v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n');
+    await flush();
+
+    transport.emitData(serializeMessage(createInviteRequest('incoming-duplicate')));
+    await flush();
+
+    const accepted = transport.sent
+      .map((bytes) => parseMessage(bytes))
+      .filter((parsed) => parsed.ok
+        && parsed.value.kind === 'response'
+        && parsed.value.statusCode === 200
+        && parsed.value.headers.get('CSeq') === '1 INVITE');
+    expect(incomingCalls).toHaveLength(1);
+    expect(accepted).toHaveLength(2);
+    expect(accepted[1]!.ok && accepted[1]!.value.kind === 'response'
+      ? accepted[1]!.value.headers.get('To')
+      : undefined).toContain(`tag=${invitation.toTag}`);
+
+    transport.emitData(serializeMessage(createAckRequest(invitation.toTag)));
+    await answer;
+  });
+
+  it('rejects wrong-tag and replayed BYEs around a valid outgoing-dialog BYE', async () => {
+    await ua.connect();
+    const outgoing = ua.invite('sip:bob@example.com');
+    await waitForSentMessage(transport, 'INVITE');
+    await send200Ok(transport);
+    await outgoing;
+
+    transport.emitData(serializeMessage(createOutgoingBye(transport, 'wrong-tag', 'mallory')));
+    await flush();
+    expect(ua.callState).toBe('confirmed');
+
+    transport.emitData(serializeMessage(createOutgoingBye(transport, 'valid')));
+    await flush();
+    expect(ua.callState).toBe('idle');
+
+    transport.emitData(serializeMessage(createOutgoingBye(transport, 'replay')));
+    await flush();
+
+    const statuses = transport.sent
+      .map((bytes) => parseMessage(bytes))
+      .filter((parsed) => parsed.ok
+        && parsed.value.kind === 'response'
+        && parsed.value.headers.get('CSeq') === '1 BYE')
+      .map((parsed) => parsed.ok && parsed.value.kind === 'response' ? parsed.value.statusCode : 0);
+    expect(statuses).toEqual([481, 200, 481]);
+  });
 });
 
 async function waitForSentMessage(transport: FakeTransport, method: string): Promise<void> {
@@ -281,9 +401,9 @@ async function sendBye200(transport: FakeTransport): Promise<void> {
   transport.emitData(serializeMessage(response));
 }
 
-function createInviteRequest() {
+function createInviteRequest(branch = 'incoming') {
   const headers = new Headers();
-  headers.set('Via', 'SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-incoming');
+  headers.set('Via', `SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-${branch}`);
   headers.set('Call-ID', 'incoming-call-1');
   headers.set('From', '<sip:bob@example.com>;tag=remote-tag');
   headers.set('To', '<sip:alice@example.com>');
@@ -302,6 +422,27 @@ function createAckRequest(remoteTag: string) {
   headers.set('To', `<sip:alice@example.com>;tag=${remoteTag}`);
   headers.set('CSeq', '1 ACK');
   return makeRequest('ACK', 'sip:alice@example.com', headers);
+}
+
+function createCancelRequest() {
+  const headers = new Headers();
+  headers.set('Via', 'SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-incoming');
+  headers.set('Call-ID', 'incoming-call-1');
+  headers.set('From', '<sip:bob@example.com>;tag=remote-tag');
+  headers.set('To', '<sip:alice@example.com>');
+  headers.set('CSeq', '1 CANCEL');
+  return makeRequest('CANCEL', 'sip:alice@example.com', headers);
+}
+
+function createOutgoingBye(transport: FakeTransport, branch: string, remoteTag = 'remote-tag') {
+  const invite = sentRequests(transport, 'INVITE')[0]!;
+  const headers = new Headers();
+  headers.set('Via', `SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-${branch}`);
+  headers.set('Call-ID', invite.headers.get('Call-ID') ?? '');
+  headers.set('From', `${invite.headers.get('To') ?? '<sip:bob@example.com>'};tag=${remoteTag}`);
+  headers.set('To', invite.headers.get('From') ?? '');
+  headers.set('CSeq', '1 BYE');
+  return makeRequest('BYE', 'sip:alice@example.com', headers);
 }
 
 function createByeRequest(dialog: any) {

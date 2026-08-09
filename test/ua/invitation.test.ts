@@ -141,6 +141,18 @@ function setup(): Harness {
   return { clock, transport, layer, events, sent, media, controller, invitation, recorded, idGenerator };
 }
 
+function routeRequest(h: Harness, request: SipRequestMessage): void {
+  const before = h.events.length;
+  h.layer.receive(request);
+  for (const event of h.events.slice(before)) {
+    if (event.type === 'request') {
+      h.invitation.handleIncomingRequest(event.transaction, event.request);
+    } else if (event.type === 'statelessRequest') {
+      h.invitation.handleStatelessRequest(event.request);
+    }
+  }
+}
+
 function flush(): Promise<void> { return new Promise((resolve) => setTimeout(resolve, 0)); }
 
 /** Extract 200 OK responses from sent bytes. */
@@ -189,7 +201,7 @@ describe('Invitation (incoming SIP call session)', () => {
 
     const ack = makeRequest('ACK', REMOTE_URI, ackHeaders);
 
-    h.layer.receive(ack);
+    routeRequest(h, ack);
     await flush();
 
     // Answer promise resolves
@@ -251,7 +263,7 @@ describe('Invitation (incoming SIP call session)', () => {
     ackHeaders.set('CSeq', '1 ACK');
 
     const ack = makeRequest('ACK', REMOTE_URI, ackHeaders);
-    h.layer.receive(ack);
+    routeRequest(h, ack);
     await flush();
 
     // Advance time - no more retransmissions
@@ -297,6 +309,40 @@ describe('Invitation (incoming SIP call session)', () => {
     expect((h.invitation as any).retransmitter).toBeUndefined();
   });
 
+  it('sends only the first rejection when reject is called twice', async () => {
+    const h = setup();
+
+    h.invitation.reject(486, 'Busy Here');
+    h.invitation.reject(603, 'Decline');
+    await flush();
+
+    const finalStatuses = h.sent
+      .map((bytes) => parseMessage(bytes))
+      .filter((parsed) => parsed.ok && parsed.value.kind === 'response' && parsed.value.statusCode >= 200)
+      .map((parsed) => parsed.ok && parsed.value.kind === 'response' ? parsed.value.statusCode : 0);
+    expect(finalStatuses).toEqual([486]);
+    expect(h.recorded.filter((event) => event.state === 'failed')).toHaveLength(1);
+    const lateAnswer = h.invitation.answer(STUB_SDP);
+    const outcome = await Promise.race([
+      lateAnswer.then(() => 'resolved', (error: Error) => error.message),
+      flush().then(() => 'pending'),
+    ]);
+    expect(outcome).toBe('answer() already called');
+    void lateAnswer.catch(() => undefined);
+  });
+
+
+  it('rejects a second answer while the first answer is pending', async () => {
+    const h = setup();
+    const first = h.invitation.answer(STUB_SDP);
+
+    await expect(h.invitation.answer(STUB_SDP)).rejects.toThrow('answer() already called');
+    await flush();
+
+    expect(okResponses(h.sent)).toHaveLength(1);
+    void first.catch(() => undefined);
+  });
+
   it('after confirmed, receives BYE, sends 200 OK → terminated', async () => {
     const h = setup();
 
@@ -313,9 +359,30 @@ describe('Invitation (incoming SIP call session)', () => {
     ackHeaders.set('CSeq', '1 ACK');
 
     const ack = makeRequest('ACK', REMOTE_URI, ackHeaders);
-    h.layer.receive(ack);
+    routeRequest(h, ack);
     await flush();
 
+    expect(h.invitation.session.state).toBe('confirmed');
+
+    // A BYE cannot reuse the INVITE's remote CSeq.
+    const replayHeaders = new Headers();
+    replayHeaders.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-bye-replay');
+    replayHeaders.set('Max-Forwards', '70');
+    replayHeaders.set('From', `<${REMOTE_URI}>;tag=alice-1`);
+    replayHeaders.set('To', `<${LOCAL_URI}>;tag=${h.invitation.toTag}`);
+    replayHeaders.set('Call-ID', 'call-123@example.com');
+    replayHeaders.set('CSeq', '1 BYE');
+    routeRequest(h, makeRequest('BYE', LOCAL_URI, replayHeaders));
+    await flush();
+
+    const replayResponse = h.sent
+      .map((bytes) => parseMessage(bytes))
+      .find((parsed) => parsed.ok
+        && parsed.value.kind === 'response'
+        && parsed.value.headers.get('CSeq') === '1 BYE');
+    expect(replayResponse?.ok && replayResponse.value.kind === 'response'
+      ? replayResponse.value.statusCode
+      : undefined).toBe(481);
     expect(h.invitation.session.state).toBe('confirmed');
 
     // Receive BYE
@@ -323,12 +390,12 @@ describe('Invitation (incoming SIP call session)', () => {
     byeHeaders.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-bye-1');
     byeHeaders.set('Max-Forwards', '70');
     byeHeaders.set('From', `<${REMOTE_URI}>;tag=alice-1`);
-    byeHeaders.set('To', `<${LOCAL_URI}>;tag=bob-1`);
+    byeHeaders.set("To", `<${LOCAL_URI}>;tag=${h.invitation.toTag}`);
     byeHeaders.set('Call-ID', 'call-123@example.com');
     byeHeaders.set('CSeq', '2 BYE');
 
     const bye = makeRequest('BYE', LOCAL_URI, byeHeaders);
-    h.layer.receive(bye);
+    routeRequest(h, bye);
     await flush();
 
     // 200 OK for BYE was sent

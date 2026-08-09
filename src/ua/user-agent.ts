@@ -32,11 +32,26 @@ import { Invitation } from './invitation.js';
 import type { WorkerMediaController } from '../media/worker-controller.js';
 import type { LivenessStrategy } from '../reliability/index.js';
 import { OptionsLiveness } from '../reliability/index.js';
-import { Headers, makeRequest } from '../messages/index.js';
-import { makeBranch } from '../dialogs/header-values.js';
+import { Headers, makeRequest, makeResponse } from '../messages/index.js';
+import type { SipRequestMessage, SipResponseMessage } from '../messages/message.js';
+import { extractTag, makeBranch } from '../dialogs/header-values.js';
+import { requestDialogId } from '../dialogs/dialog.js';
 
 /** Default SIP OPTIONS probe cadence for the built-in browser-safe strategy. */
 const OPTIONS_PROBE_INTERVAL_MS = 30000;
+
+type DialogOwner = Inviter | Invitation;
+
+function initialInviteId(request: SipRequestMessage): string | undefined {
+  if (request.method !== 'INVITE' && request.method !== 'CANCEL') return undefined;
+  const cseq = request.headers.get('CSeq')?.trim().match(/^(\d+)\s+(\S+)$/);
+  const callId = request.headers.get('Call-ID');
+  const remoteTag = extractTag(request.headers.get('From'));
+  const localTag = extractTag(request.headers.get('To'));
+  if (cseq === undefined || cseq === null || cseq[2] !== request.method) return undefined;
+  if (callId === undefined || callId === '' || remoteTag === undefined) return undefined;
+  return JSON.stringify([callId, remoteTag, localTag ?? '', cseq[1]]);
+}
 
 
 export interface UserAgentOptions {
@@ -74,6 +89,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
   private disconnected = false;
   private activeInviter?: Inviter;
   private activeInvitations = new Map<string, Invitation>();
+  private dialogOwners = new Map<string, DialogOwner>();
   private liveness?: LivenessStrategy;
 
   constructor(options: UserAgentOptions) {
@@ -257,6 +273,17 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
         state: event.state,
         identity: this.identity!,
       });
+      const dialog = inviter.dialog;
+      if (event.state === 'confirmed' && dialog !== undefined) {
+        this.dialogOwners.set(dialog.id, inviter);
+      }
+      if ((event.state === 'terminated' || event.state === 'failed') && this.activeInviter === inviter) {
+        this.activeInviter = undefined;
+      }
+      if ((event.state === 'terminated' || event.state === 'failed')
+        && dialog !== undefined && this.dialogOwners.get(dialog.id) === inviter) {
+        this.dialogOwners.delete(dialog.id);
+      }
     });
 
     this.activeInviter = inviter;
@@ -354,9 +381,53 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
 
   /** Forward transaction layer events (for future dialog/invite handling). */
   private handleTransactionEvent(event: TransactionLayerEvent): void {
-    if (event.type === 'request' && event.request.method === 'INVITE') {
-      this.handleIncomingInvite(event.request, event.transaction);
+    if (event.type === 'statelessRequest') {
+      const ownerId = requestDialogId(event.request);
+      const owner = ownerId === undefined ? undefined : this.dialogOwners.get(ownerId);
+      if (owner instanceof Invitation) owner.handleStatelessRequest(event.request);
+      return;
     }
+    if (event.type !== 'request') return;
+    if (event.request.method === 'INVITE') {
+      this.handleIncomingInvite(event.request, event.transaction);
+      return;
+    }
+    if (event.request.method === 'CANCEL') {
+      const inviteId = initialInviteId(event.request);
+      const invitation = inviteId === undefined ? undefined : this.activeInvitations.get(inviteId);
+      if (invitation !== undefined) {
+        invitation.handleIncomingRequest(event.transaction, event.request);
+        return;
+      }
+      this.layer?.sendResponse(
+        event.transaction.key,
+        this.requestResponse(event.request, 481, 'Call/Transaction Does Not Exist'),
+      );
+      return;
+    }
+
+    const ownerId = requestDialogId(event.request);
+    const owner = ownerId === undefined ? undefined : this.dialogOwners.get(ownerId);
+    if (owner !== undefined) {
+      owner.handleIncomingRequest(event.transaction, event.request);
+      return;
+    }
+    if (event.request.method === 'BYE') {
+      this.layer?.sendResponse(
+        event.transaction.key,
+        this.requestResponse(event.request, 481, 'Call/Transaction Does Not Exist'),
+      );
+    }
+  }
+
+  private requestResponse(request: SipRequestMessage, statusCode: number, reason: string): SipResponseMessage {
+    const headers = new Headers();
+    headers.set('Via', request.headers.get('Via') ?? '');
+    headers.set('From', request.headers.get('From') ?? '');
+    headers.set('To', request.headers.get('To') ?? '');
+    headers.set('Call-ID', request.headers.get('Call-ID') ?? '');
+    headers.set('CSeq', request.headers.get('CSeq') ?? '');
+    return makeResponse(statusCode, reason, headers);
   }
 
   /** Handle an incoming INVITE request. */
@@ -364,13 +435,24 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     request: import('../messages/message.js').SipRequestMessage,
     transaction: import('../transactions/types.js').ServerTransaction
   ): void {
+    const inviteId = initialInviteId(request);
+    if (inviteId === undefined) {
+      this.layer?.sendResponse(transaction.key, this.requestResponse(request, 400, 'Bad Request'));
+      return;
+    }
+    const existing = this.activeInvitations.get(inviteId);
+    if (existing !== undefined) {
+      existing.handleDuplicateInvite(transaction, request);
+      return;
+    }
     const mediaController = this.options.mediaController;
     if (mediaController === undefined) {
       console.warn('Media controller not configured, rejecting incoming call');
       return;
     }
 
-    const invitation = new Invitation({
+    let invitation!: Invitation;
+    invitation = new Invitation({
       request,
       transaction,
       contact: this.options.contact,
@@ -381,10 +463,9 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       controller: mediaController,
       T1: 500,
       T2: 4000,
+      onDialogCreated: (dialog) => this.dialogOwners.set(dialog.id, invitation),
     });
-
-    const callId = request.headers.get('Call-ID') ?? '';
-    this.activeInvitations.set(callId, invitation);
+    this.activeInvitations.set(inviteId, invitation);
 
     // Listen to session state changes
     invitation.session.on((event) => {
@@ -396,7 +477,13 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
 
       // Clean up when terminated
       if (event.state === 'terminated' || event.state === 'failed') {
-        this.activeInvitations.delete(callId);
+        if (this.activeInvitations.get(inviteId) === invitation) {
+          this.activeInvitations.delete(inviteId);
+        }
+        const dialog = invitation.dialog;
+        if (dialog !== undefined && this.dialogOwners.get(dialog.id) === invitation) {
+          this.dialogOwners.delete(dialog.id);
+        }
       }
     });
 

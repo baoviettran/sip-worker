@@ -11,13 +11,13 @@
  * repeated 2xx responses for the same dialog.
  */
 
-import { Headers, makeRequest, bodyText } from '../messages/index.js';
+import { Headers, makeRequest, makeResponse, bodyText } from '../messages/index.js';
 import type { SipRequestMessage, SipResponseMessage } from '../messages/message.js';
 import { SipError } from '../errors.js';
 import { makeBranch, extractTag } from '../dialogs/header-values.js';
 import { Dialog, type IdGenerator } from '../dialogs/dialog.js';
 import { clientKey, type TransactionLayer } from '../transactions/coordinator.js';
-import type { TransactionKey, TransactionLayerEvent } from '../transactions/types.js';
+import type { TransactionKey, TransactionLayerEvent, ServerTransaction } from '../transactions/types.js';
 import { sendOwnedRequest } from '../transactions/request-ownership.js';
 import type { Clock } from '../transport/index.js';
 import type { AuthManager, AuthFailure } from '../auth/manager.js';
@@ -393,6 +393,29 @@ export class Inviter {
         }
       },
     );
+  }
+
+  /** Handle a request addressed to the confirmed dialog. */
+  handleIncomingRequest(transaction: ServerTransaction, request: SipRequestMessage): void {
+    const dialog = this.dialog;
+    if (dialog === undefined || request.method !== 'BYE' || !dialog.matchesRequest(request) || !dialog.receiveRequest(request)) {
+      this.layer.sendResponse(transaction.key, this.requestResponse(request, 481, 'Call/Transaction Does Not Exist'));
+      return;
+    }
+    this.layer.sendResponse(transaction.key, this.requestResponse(request, 200, 'OK'));
+    this.teardown();
+    this.session.transition('terminated');
+    this.settleHangup();
+  }
+
+  private requestResponse(request: SipRequestMessage, statusCode: number, reason: string): SipResponseMessage {
+    const headers = new Headers();
+    headers.set('Via', request.headers.get('Via') ?? '');
+    headers.set('From', request.headers.get('From') ?? '');
+    headers.set('To', request.headers.get('To') ?? '');
+    headers.set('Call-ID', request.headers.get('Call-ID') ?? '');
+    headers.set('CSeq', request.headers.get('CSeq') ?? '');
+    return makeResponse(statusCode, reason, headers);
   }
 
   private fail(reason: unknown): void {

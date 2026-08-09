@@ -14,7 +14,7 @@ import { SipError } from '../errors.js';
 import { extractTag } from '../dialogs/header-values.js';
 import { Dialog, type IdGenerator } from '../dialogs/dialog.js';
 import type { TransactionLayer } from '../transactions/coordinator.js';
-import type { TransactionLayerEvent, ServerTransaction } from '../transactions/types.js';
+import type { ServerTransaction } from '../transactions/types.js';
 import type { Clock } from '../transport/transport.js';
 import type { WorkerMediaController } from '../media/worker-controller.js';
 import { Session } from './session.js';
@@ -31,6 +31,7 @@ export interface InvitationOptions {
   readonly controller: WorkerMediaController;
   readonly T1: number;
   readonly T2: number;
+  readonly onDialogCreated?: (dialog: Dialog) => void;
 }
 
 export class Invitation {
@@ -45,16 +46,21 @@ export class Invitation {
   private readonly controller: WorkerMediaController;
   private readonly T1: number;
   private readonly T2: number;
+  private readonly onDialogCreated: ((dialog: Dialog) => void) | undefined;
 
+  private state: 'pending' | 'answering' | 'accepted' | 'rejected' | 'cancelled' = 'pending';
   private readonly sessionId: string;
   private readonly remoteSdp: string;
 
   private answerDeferred: { resolve: () => void; reject: (reason: unknown) => void } | undefined;
-  private unsubscribe: (() => void) | undefined;
-  private dialog: Dialog | undefined;
+  private dialogValue: Dialog | undefined;
+  private acceptedResponse: SipResponseMessage | undefined;
   private retransmitter: InviteResponseRetransmitter | undefined;
   readonly toTag: string;
 
+  get dialog(): Dialog | undefined {
+    return this.dialogValue;
+  }
   constructor(options: InvitationOptions) {
     this.session = new Session();
     this.request = options.request;
@@ -67,6 +73,7 @@ export class Invitation {
     this.controller = options.controller;
     this.T1 = options.T1;
     this.T2 = options.T2;
+    this.onDialogCreated = options.onDialogCreated;
 
     this.sessionId = options.idGenerator.branch();
     this.remoteSdp = bodyText(options.request);
@@ -79,6 +86,10 @@ export class Invitation {
    * Rejects on ACK timeout (64*T1) or transport error.
    */
   answer(localSdp: string): Promise<void> {
+    if (this.state !== 'pending') {
+      return Promise.reject(new SipError(0, 'answer() already called'));
+    }
+    this.state = 'answering';
     return new Promise<void>((resolve, reject) => {
       this.answerDeferred = { resolve, reject };
       this.doAnswer(localSdp);
@@ -89,18 +100,22 @@ export class Invitation {
     try {
       // Set remote SDP
       await this.controller.setRemote(this.sessionId, this.remoteSdp);
+      if (this.state !== 'answering') return;
 
       // Build 200 OK response
       const response = this.build200Ok(localSdp);
+      this.acceptedResponse = response;
+
+      // Create the dialog and claim acceptance before external I/O.
+      this.dialogValue = Dialog.fromUas(this.request, response, this.idGenerator);
+      this.state = 'accepted';
+      this.onDialogCreated?.(this.dialogValue);
 
       // Send via transaction layer
       this.layer.sendResponse(this.transaction.key, response);
 
-      // Create dialog from UAS perspective
-      this.dialog = Dialog.fromUas(this.request, response, this.idGenerator);
-
-      // Start 2xx retransmission and listen for ACK/BYE
-      this.startListening(response);
+      // Start TU-owned 2xx retransmission; the UA routes dialog requests.
+      this.startRetransmission(response);
     } catch (err) {
       this.fail(err);
     }
@@ -110,9 +125,15 @@ export class Invitation {
    * Reject the INVITE with a 4xx/5xx/6xx response. No retransmission.
    */
   reject(statusCode: number, reason?: string): void {
+    if (this.state !== 'pending') return;
+    this.state = 'rejected';
+    const error = new SipError(statusCode, `INVITE rejected with ${statusCode}`);
     const response = this.buildErrorResponse(statusCode, reason ?? 'Rejected');
-    this.layer.sendResponse(this.transaction.key, response);
-    this.fail(new SipError(statusCode, `INVITE rejected with ${statusCode}`));
+    try {
+      this.layer.sendResponse(this.transaction.key, response);
+    } finally {
+      this.fail(error);
+    }
   }
 
   private build200Ok(localSdp: string): SipResponseMessage {
@@ -142,7 +163,7 @@ export class Invitation {
     return makeResponse(statusCode, reason, headers);
   }
 
-  private startListening(response: SipResponseMessage): void {
+  private startRetransmission(response: SipResponseMessage): void {
     const transport = this.layer.getTransport();
 
     this.retransmitter = new InviteResponseRetransmitter({
@@ -155,76 +176,138 @@ export class Invitation {
     });
 
     this.retransmitter.start();
-
-    // Listen for ACK (both stateless and matched to INVITE transaction) and BYE
-    this.unsubscribe = this.layer.subscribe((event: TransactionLayerEvent) => {
-      if (event.type === 'statelessRequest') {
-        this.onStatelessRequest(event.request);
-      } else if (event.type === 'request') {
-        // ACK can arrive as a regular request if it matches the INVITE transaction
-        if (event.request.method === 'ACK') {
-          this.onAckRequest(event.request);
-        } else {
-          this.onInDialogRequest(event.transaction, event.request);
-        }
-      }
-    });
   }
 
   private onAckRequest(request: SipRequestMessage): void {
-    if (this.dialog === undefined) return;
+    if (this.dialogValue === undefined) return;
 
     const callId = request.headers.get('Call-ID');
     const fromTag = extractTag(request.headers.get('From'));
     const toTag = extractTag(request.headers.get('To'));
 
-    if (callId !== this.dialog.callId) return;
-    if (fromTag !== this.dialog.remoteTag) return;
-    if (toTag !== this.dialog.localTag) return;
+    if (callId !== this.dialogValue.callId) return;
+    if (fromTag !== this.dialogValue.remoteTag) return;
+    if (toTag !== this.dialogValue.localTag) return;
+    if (!this.dialogValue.matchesRequest(request)) return;
 
     // ACK matches, stop retransmission and resolve
     this.onAck();
   }
 
-  private onStatelessRequest(request: SipRequestMessage): void {
+  /** Handle an ACK that has no matching transaction. */
+  handleStatelessRequest(request: SipRequestMessage): void {
     if (request.method !== 'ACK') return;
-    if (this.dialog === undefined) return;
+    if (this.dialogValue === undefined) return;
 
     const callId = request.headers.get('Call-ID');
     const fromTag = extractTag(request.headers.get('From'));
     const toTag = extractTag(request.headers.get('To'));
 
-    if (callId !== this.dialog.callId) return;
-    if (fromTag !== this.dialog.remoteTag) return;
-    if (toTag !== this.dialog.localTag) return;
+    if (callId !== this.dialogValue.callId) return;
+    if (fromTag !== this.dialogValue.remoteTag) return;
+    if (toTag !== this.dialogValue.localTag) return;
+    if (!this.dialogValue.matchesRequest(request)) return;
 
     // ACK matches, stop retransmission and resolve
     this.onAck();
   }
 
-  private onInDialogRequest(transaction: ServerTransaction, request: SipRequestMessage): void {
-    if (this.dialog === undefined) return;
 
-    const callId = request.headers.get('Call-ID');
-    if (callId !== this.dialog.callId) return;
-
-    if (request.method === 'BYE') {
-      // Send 200 OK for BYE
-      const response = this.buildByeResponse(request);
-      this.layer.sendResponse(transaction.key, response);
-      this.settleHangup();
-    }
+  /** Whether a new server transaction is the same initial INVITE identity. */
+  matchesInvite(request: SipRequestMessage): boolean {
+    return this.matchesInitialRequest(request, 'INVITE');
   }
 
-  private buildByeResponse(request: SipRequestMessage): SipResponseMessage {
+  /** Resend the accepted response without creating a second Invitation. */
+  handleDuplicateInvite(transaction: ServerTransaction, request: SipRequestMessage): void {
+    if (!this.matchesInvite(request)) {
+      this.layer.sendResponse(transaction.key, this.buildRequestResponse(request, 481, 'Call/Transaction Does Not Exist'));
+      return;
+    }
+    const response = this.acceptedResponse;
+    if (this.state !== 'accepted' || response === undefined) return;
+    const headers = response.headers.clone();
+    headers.set('Via', request.headers.get('Via') ?? '');
+    this.layer.sendResponse(
+      transaction.key,
+      makeResponse(response.statusCode, response.reasonPhrase, headers, response.body),
+    );
+  }
+
+  handleIncomingRequest(transaction: ServerTransaction, request: SipRequestMessage): void {
+    if (request.method === 'ACK') {
+      this.onAckRequest(request);
+      return;
+    }
+    if (request.method === 'CANCEL') {
+      if (!this.matchesCancel(request)) {
+        this.layer.sendResponse(transaction.key, this.buildRequestResponse(request, 481, 'Call/Transaction Does Not Exist'));
+        return;
+      }
+      this.layer.sendResponse(transaction.key, this.buildRequestResponse(request, 200, 'OK'));
+      this.cancel();
+      return;
+    }
+    if (this.dialogValue === undefined) return;
+    if (request.method !== 'BYE') {
+      this.layer.sendResponse(transaction.key, this.buildRequestResponse(request, 405, 'Method Not Allowed'));
+      return;
+    }
+    if (!this.dialogValue.matchesRequest(request) || !this.dialogValue.receiveRequest(request)) {
+      this.layer.sendResponse(transaction.key, this.buildRequestResponse(request, 481, 'Call/Transaction Does Not Exist'));
+      return;
+    }
+    this.layer.sendResponse(transaction.key, this.buildRequestResponse(request, 200, 'OK'));
+    this.settleHangup();
+  }
+
+  private buildRequestResponse(request: SipRequestMessage, statusCode: number, reason: string): SipResponseMessage {
     const headers = new Headers();
     headers.set('Via', request.headers.get('Via') ?? '');
     headers.set('From', request.headers.get('From') ?? '');
     headers.set('To', request.headers.get('To') ?? '');
     headers.set('Call-ID', request.headers.get('Call-ID') ?? '');
     headers.set('CSeq', request.headers.get('CSeq') ?? '');
+    return makeResponse(statusCode, reason, headers);
+  }
 
-    return makeResponse(200, 'OK', headers);
+  private matchesCancel(request: SipRequestMessage): boolean {
+    return this.matchesInitialRequest(request, 'CANCEL');
+  }
+
+  private matchesInitialRequest(request: SipRequestMessage, method: 'INVITE' | 'CANCEL'): boolean {
+    if (request.method !== method) return false;
+    const requestCSeq = request.headers.get('CSeq')?.trim().match(/^(\d+)\s+(\S+)$/);
+    const inviteCSeq = this.request.headers.get('CSeq')?.trim().match(/^(\d+)\s+(\S+)$/);
+    const callId = request.headers.get('Call-ID');
+    const fromTag = extractTag(request.headers.get('From'));
+    return requestCSeq !== undefined
+      && requestCSeq !== null
+      && inviteCSeq !== undefined
+      && inviteCSeq !== null
+      && requestCSeq[2] === method
+      && inviteCSeq[2] === 'INVITE'
+      && requestCSeq[1] === inviteCSeq[1]
+      && callId !== undefined
+      && callId === this.request.headers.get('Call-ID')
+      && fromTag !== undefined
+      && fromTag === extractTag(this.request.headers.get('From'))
+      && extractTag(request.headers.get('To')) === extractTag(this.request.headers.get('To'));
+  }
+
+  private cancel(): void {
+    if (this.state !== 'pending' && this.state !== 'answering') return;
+    this.state = 'cancelled';
+    const error = new SipError(487, 'INVITE cancelled');
+    try {
+      this.layer.sendResponse(this.transaction.key, this.buildErrorResponse(487, 'Request Terminated'));
+    } finally {
+      this.teardown();
+      this.session.transition('terminated');
+      const deferred = this.answerDeferred;
+      this.answerDeferred = undefined;
+      if (deferred !== undefined) deferred.reject(error);
+    }
   }
 
   private onAck(): void {
@@ -260,10 +343,6 @@ export class Invitation {
     if (this.retransmitter !== undefined) {
       this.retransmitter.stop();
       this.retransmitter = undefined;
-    }
-    if (this.unsubscribe !== undefined) {
-      this.unsubscribe();
-      this.unsubscribe = undefined;
     }
   }
 }

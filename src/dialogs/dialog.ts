@@ -37,6 +37,19 @@ function contactUri(headers: Headers): string | undefined {
   return extractUri(headers.get('Contact'));
 }
 
+function dialogId(callId: string, localTag: string, remoteTag: string): string {
+  return JSON.stringify([callId, localTag, remoteTag]);
+}
+
+/** Canonical dialog identity for an incoming in-dialog request. */
+export function requestDialogId(request: SipRequestMessage): string | undefined {
+  const callId = request.headers.get('Call-ID');
+  const localTag = extractTag(request.headers.get('To'));
+  const remoteTag = extractTag(request.headers.get('From'));
+  if (callId === undefined || callId === '' || localTag === undefined || remoteTag === undefined) return undefined;
+  return dialogId(callId, localTag, remoteTag);
+}
+
 /**
  * Represents a SIP dialog as seen by the UAC that sent the INVITE
  * (RFC 3261 12.1.1). Owns the 2xx ACK and in-dialog request construction
@@ -115,7 +128,7 @@ export class Dialog {
   ): Dialog {
     const recordRoutes = parseRecordRoutes(request.headers);
     // UAS: local=To (response), remote=From (request)
-    return new Dialog(
+    const dialog = new Dialog(
       idGenerator,
       cseqNumber(request.headers),
       contactUri(request.headers) ?? request.uri,
@@ -126,6 +139,8 @@ export class Dialog {
       request.headers.get('Call-ID') ?? '',
       request.headers.get('Max-Forwards') ?? DEFAULT_MAX_FORWARDS,
     );
+    dialog.remoteCSeq = cseqNumber(request.headers);
+    return dialog;
   }
 
   get remoteTag(): string {
@@ -147,6 +162,10 @@ export class Dialog {
 
   get callId(): string {
     return this.callIdValue;
+  }
+
+  get id(): string {
+    return dialogId(this.callIdValue, this.localTag, this.remoteTag);
   }
 
   getLocalCSeq(): number {
@@ -191,10 +210,16 @@ export class Dialog {
     return makeRequest(method, this.requestTarget(), headers, new Uint8Array());
   }
 
-  /**
-   * Accept an in-dialog request from the remote peer. Rejects lower/equal
-   * remote CSeq values except for ACK and CANCEL, then records the new value.
-   */
+  /** Validate dialog identity, request method, and a syntactically valid CSeq. */
+  matchesRequest(request: SipRequestMessage): boolean {
+    const cseq = request.headers.get('CSeq')?.trim().match(/^(\d+)\s+(\S+)$/);
+    return requestDialogId(request) === this.id
+      && cseq !== undefined
+      && cseq !== null
+      && cseq[2] === request.method;
+  }
+
+  /** Accept an already identity-validated in-dialog request by remote CSeq. */
   receiveRequest(request: SipRequestMessage): boolean {
     if (request.method === 'ACK' || request.method === 'CANCEL') return true;
     const number = cseqNumber(request.headers);
