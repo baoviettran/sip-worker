@@ -204,6 +204,17 @@ function unrelatedRequest(cseq: number, suffix: string): SipRequestMessage {
   return makeRequest('OPTIONS', REMOTE_URI, headers);
 }
 
+/** A separate OPTIONS transaction that deliberately shares the INVITE dialog identity. */
+function sameDialogOptionsRequest(invite: SipRequestMessage): SipRequestMessage {
+  const headers = new Headers();
+  headers.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-late-options');
+  headers.set('From', invite.headers.get('From')!);
+  headers.set('To', invite.headers.get('To')!);
+  headers.set('Call-ID', invite.headers.get('Call-ID')!);
+  headers.set('CSeq', `${finalCSeq(invite)} OPTIONS`);
+  return makeRequest('OPTIONS', REMOTE_URI, headers);
+}
+
 function responseFor(
   request: SipRequestMessage,
   over: { statusCode?: number; sdp?: string; toTag?: string } = {},
@@ -258,6 +269,30 @@ function observeForkCleanups(h: Harness): Promise<void>[] {
 }
 
 describe('Inviter (outgoing SIP call session)', () => {
+  it('ignores a keyless late OPTIONS 2xx with the INVITE dialog identity', async () => {
+    const h = setup();
+    const invitation = h.inviter.invite();
+    await drainMicrotasks();
+    const invite = h.sent.find((request) => request.method === 'INVITE')!;
+    const options = sameDialogOptionsRequest(invite);
+
+    const optionsTransaction = h.layer.sendRequest(options);
+    receive(h, options);
+    h.clock.advance(0);
+    expect(optionsTransaction.state).toBe('Terminated');
+
+    h.layer.receive(responseFor(options, { toTag: 'bob-options' }));
+    expect(h.events.at(-1)).toEqual(expect.objectContaining({ type: 'statelessResponse' }));
+    await drainMicrotasks();
+
+    await expectPending(invitation);
+    expect(h.inviter.session.state).toBe('inviting');
+
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-1' });
+    await invitation;
+    expect(h.inviter.session.state).toBe('confirmed');
+  });
+
   it('ignores a same-CSeq response owned by another operation while inviting', async () => {
     const h = setup();
     const invitation = h.inviter.invite();
@@ -498,7 +533,7 @@ describe('Inviter (outgoing SIP call session)', () => {
     expect(acks(h).length).toBe(1);
     const firstAck = acks(h)[0]!.bytes;
 
-    respond(h, 200, { sdp: STUB_SDP, toTag: 'bob-1' });
+    receive(h, h.sent.find((request) => request.method === 'INVITE')!, { sdp: STUB_SDP, toTag: 'bob-1' });
     await flush();
 
     expect(acks(h).length).toBe(2);

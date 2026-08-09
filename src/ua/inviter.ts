@@ -182,6 +182,7 @@ export class Inviter {
       const response = event.response;
       if (
         cseqNumber(response) === cseqNumber(request)
+        && response.headers.get('CSeq')?.trim().split(/\s+/)[1] === 'INVITE'
         && response.statusCode >= 200
         && response.statusCode < 300
       ) {
