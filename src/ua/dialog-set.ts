@@ -55,6 +55,7 @@ export class DialogSet {
     private readonly idGenerator: IdGenerator,
     private readonly transport: DialogSetTransport,
     private readonly sendByeFn: SendByeFn,
+    private readonly onDialogSelected: (dialog: Dialog) => void = () => {},
   ) {}
 
   /**
@@ -95,18 +96,20 @@ export class DialogSet {
     const dialog = Dialog.fromUac(this.request, response, this.idGenerator);
     const ack = dialog.createAck(response);
     const ackBytes = serializeMessage(ack);
-
-    // Send the dialog-specific ACK
-    await this.transport.send(ackBytes);
-
     const record: DialogRecord = { dialog, ackBytes, cleanupStarted: false };
-    this.dialogs.set(remoteTag, record);
 
-    // First dialog selects the application dialog
+    // Publish the first dialog before sending its ACK so a remote request that
+    // arrives synchronously from the send path can be routed to its owner.
     if (this.selectedTag === undefined) {
+      this.dialogs.set(remoteTag, record);
       this.selectedTag = remoteTag;
+      this.onDialogSelected(dialog);
+      await this.transport.send(ackBytes);
       return;
     }
+
+    await this.transport.send(ackBytes);
+    this.dialogs.set(remoteTag, record);
 
     // Additional forked dialog - clean it up with BYE (but only once)
     if (!record.cleanupStarted) {

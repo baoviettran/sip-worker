@@ -216,7 +216,8 @@ export class Dialog {
     return requestDialogId(request) === this.id
       && cseq !== undefined
       && cseq !== null
-      && cseq[2] === request.method;
+      && cseq[2] === request.method
+      && (request.method !== 'ACK' || Number.parseInt(cseq[1]!, 10) === this.invCSeq);
   }
 
   /** Accept an already identity-validated in-dialog request by remote CSeq. */

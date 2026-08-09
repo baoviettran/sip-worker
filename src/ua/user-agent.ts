@@ -264,6 +264,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       controller: mediaController,
       authManager: this.options.authManager,
       credentials: this.options.credentials,
+      onDialogCreated: (dialog) => this.dialogOwners.set(dialog.id, inviter),
     });
 
     // Listen to session state changes
@@ -273,13 +274,10 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
         state: event.state,
         identity: this.identity!,
       });
-      const dialog = inviter.dialog;
-      if (event.state === 'confirmed' && dialog !== undefined) {
-        this.dialogOwners.set(dialog.id, inviter);
-      }
       if ((event.state === 'terminated' || event.state === 'failed') && this.activeInviter === inviter) {
         this.activeInviter = undefined;
       }
+      const dialog = inviter.dialog;
       if ((event.state === 'terminated' || event.state === 'failed')
         && dialog !== undefined && this.dialogOwners.get(dialog.id) === inviter) {
         this.dialogOwners.delete(dialog.id);
@@ -388,7 +386,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       return;
     }
     if (event.type !== 'request') return;
-    if (event.request.method === 'INVITE') {
+    if (event.request.method === 'INVITE' && extractTag(event.request.headers.get('To')) === undefined) {
       this.handleIncomingInvite(event.request, event.transaction);
       return;
     }
@@ -412,7 +410,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       owner.handleIncomingRequest(event.transaction, event.request);
       return;
     }
-    if (event.request.method === 'BYE') {
+    if (extractTag(event.request.headers.get('To')) !== undefined) {
       this.layer?.sendResponse(
         event.transaction.key,
         this.requestResponse(event.request, 481, 'Call/Transaction Does Not Exist'),

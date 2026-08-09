@@ -48,7 +48,7 @@ export class Invitation {
   private readonly T2: number;
   private readonly onDialogCreated: ((dialog: Dialog) => void) | undefined;
 
-  private state: 'pending' | 'answering' | 'accepted' | 'rejected' | 'cancelled' = 'pending';
+  private state: 'pending' | 'answering' | 'accepted' | 'rejected' | 'cancelled' | 'terminated' = 'pending';
   private readonly sessionId: string;
   private readonly remoteSdp: string;
 
@@ -113,10 +113,12 @@ export class Invitation {
 
       // Send via transaction layer
       this.layer.sendResponse(this.transaction.key, response);
+      if (this.state !== 'accepted') return;
 
       // Start TU-owned 2xx retransmission; the UA routes dialog requests.
       this.startRetransmission(response);
     } catch (err) {
+      if (this.state === 'cancelled') return;
       this.fail(err);
     }
   }
@@ -335,8 +337,14 @@ export class Invitation {
   }
 
   private settleHangup(): void {
+    this.state = 'terminated';
     this.teardown();
+    const deferred = this.answerDeferred;
+    this.answerDeferred = undefined;
     this.session.transition('terminated');
+    if (deferred !== undefined) {
+      deferred.reject(new SipError(0, 'BYE received before ACK'));
+    }
   }
 
   private teardown(): void {

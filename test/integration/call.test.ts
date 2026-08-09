@@ -282,6 +282,56 @@ describe('Full Call Integration', () => {
     await answer;
   });
 
+  it('routes an immediate remote BYE sent while the outgoing ACK is completing', async () => {
+    const states: string[] = [];
+    ua.on('stateChanged', (event: any) => states.push(event.state));
+
+    await ua.connect();
+    const outgoing = ua.invite('sip:bob@example.com');
+    await waitForSentMessage(transport, 'INVITE');
+
+    let sentImmediateBye = false;
+    transport.onSend = (bytes) => {
+      const parsed = parseMessage(bytes);
+      if (sentImmediateBye || !parsed.ok || parsed.value.kind !== 'request' || parsed.value.method !== 'ACK') return;
+      sentImmediateBye = true;
+      transport.emitData(serializeMessage(createOutgoingBye(transport, 'during-ack')));
+    };
+
+    await send200Ok(transport);
+    await outgoing;
+    await flush();
+
+    const statuses = transport.sent
+      .map((bytes) => parseMessage(bytes))
+      .filter((parsed) => parsed.ok
+        && parsed.value.kind === 'response'
+        && parsed.value.headers.get('CSeq') === '1 BYE')
+      .map((parsed) => parsed.ok && parsed.value.kind === 'response' ? parsed.value.statusCode : 0);
+    expect(statuses).toEqual([200]);
+    expect(states).toContain('terminated');
+    expect(ua.callState).toBe('idle');
+  });
+
+  it('rejects ownerless in-dialog methods without misclassifying out-of-dialog traffic', async () => {
+    await ua.connect();
+
+    transport.emitData(serializeMessage(createOwnerlessRequest('INFO', 1, 'missing-dialog')));
+    transport.emitData(serializeMessage(createOwnerlessRequest('UPDATE', 2, 'missing-dialog')));
+    transport.emitData(serializeMessage(createOwnerlessRequest('OPTIONS', 3)));
+    await flush();
+
+    const responses = transport.sent
+      .map((bytes) => parseMessage(bytes))
+      .filter((parsed) => parsed.ok && parsed.value.kind === 'response')
+      .map((parsed) => parsed.ok && parsed.value.kind === 'response'
+        ? [parsed.value.headers.get('CSeq'), parsed.value.statusCode]
+        : [undefined, 0]);
+    expect(responses).toContainEqual(['1 INFO', 481]);
+    expect(responses).toContainEqual(['2 UPDATE', 481]);
+    expect(responses.some(([cseq]) => cseq === '3 OPTIONS')).toBe(false);
+  });
+
   it('rejects wrong-tag and replayed BYEs around a valid outgoing-dialog BYE', async () => {
     await ua.connect();
     const outgoing = ua.invite('sip:bob@example.com');
@@ -443,6 +493,18 @@ function createOutgoingBye(transport: FakeTransport, branch: string, remoteTag =
   headers.set('To', invite.headers.get('From') ?? '');
   headers.set('CSeq', '1 BYE');
   return makeRequest('BYE', 'sip:alice@example.com', headers);
+}
+
+function createOwnerlessRequest(method: string, cseq: number, localTag?: string): SipRequestMessage {
+  const headers = new Headers();
+  headers.set('Via', `SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-ownerless-${method.toLowerCase()}`);
+  headers.set('Call-ID', 'ownerless-call');
+  headers.set('From', '<sip:bob@example.com>;tag=remote-tag');
+  headers.set('To', localTag === undefined
+    ? '<sip:alice@example.com>'
+    : `<sip:alice@example.com>;tag=${localTag}`);
+  headers.set('CSeq', `${cseq} ${method}`);
+  return makeRequest(method, 'sip:alice@example.com', headers);
 }
 
 function createByeRequest(dialog: any) {

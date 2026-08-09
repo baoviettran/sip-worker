@@ -36,6 +36,7 @@ export interface InviterOptions {
   readonly controller: WorkerMediaController;
   readonly authManager?: AuthManager;
   readonly credentials?: { readonly username: string; readonly password: string };
+  readonly onDialogCreated?: (dialog: Dialog) => void;
 }
 
 /** Extract the numeric CSeq from a message. */
@@ -56,6 +57,7 @@ export class Inviter {
   private readonly controller: WorkerMediaController;
   private readonly authManager?: AuthManager;
   private readonly credentials?: { readonly username: string; readonly password: string };
+  private readonly onDialogCreated: ((dialog: Dialog) => void) | undefined;
 
   private readonly sessionId: string;
   private readonly callId: string;
@@ -81,6 +83,7 @@ export class Inviter {
     this.controller = options.controller;
     this.authManager = options.authManager;
     this.credentials = options.credentials;
+    this.onDialogCreated = options.onDialogCreated;
 
     // Stable per-session identifiers
     this.sessionId = options.idGenerator.branch();
@@ -263,6 +266,7 @@ export class Inviter {
         this.idGenerator,
         this.layer.getTransport(),
         (dialog) => this.sendByeForDialog(dialog),
+        (dialog) => this.onDialogCreated?.(dialog),
       );
     }
 
@@ -282,11 +286,11 @@ export class Inviter {
 
     // Transition to confirmed and resolve the invite promise once, on the
     // first (selected) dialog. Repeated/forked 2xx produce no state change.
-    if (this.session.state !== 'confirmed' && this.dialogSet.hasSelection) {
+    if (this.inviteDeferred !== undefined && this.dialogSet.hasSelection) {
       this.session.transition('confirmed');
       const deferred = this.inviteDeferred;
       this.inviteDeferred = undefined;
-      if (deferred !== undefined) deferred.resolve();
+      deferred.resolve();
     }
   }
 
@@ -404,6 +408,12 @@ export class Inviter {
     }
     this.layer.sendResponse(transaction.key, this.requestResponse(request, 200, 'OK'));
     this.teardown();
+    const inviteDeferred = this.inviteDeferred;
+    this.inviteDeferred = undefined;
+    if (inviteDeferred !== undefined) {
+      this.session.transition('confirmed');
+      inviteDeferred.resolve();
+    }
     this.session.transition('terminated');
     this.settleHangup();
   }

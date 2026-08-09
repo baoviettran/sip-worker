@@ -33,6 +33,7 @@ function makeIdGenerator(): { branch: () => string } {
  */
 class FakeMediaPort {
   commands: MediaCommand[] = [];
+  autoReplySetRemote = true;
   private listeners = new Set<(message: MediaMessage) => void>();
 
   postMessage(message: MediaMessage): void {
@@ -41,7 +42,7 @@ class FakeMediaPort {
     }
     this.commands.push(message);
     if (message.type === 'setRemote') {
-      queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId }));
+      if (this.autoReplySetRemote) queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId }));
       return;
     }
     queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId, sdp: STUB_SDP }));
@@ -58,6 +59,14 @@ class FakeMediaPort {
     return this.commands
       .filter((c) => c.type === 'setRemote')
       .map((c) => (c.type === 'setRemote' ? c.remoteSdp : ''));
+  }
+
+  rejectPendingSetRemote(message: string): void {
+    const command = [...this.commands].reverse().find((candidate) => candidate.type === 'setRemote');
+    if (command?.type !== 'setRemote') throw new Error('no pending setRemote command');
+    this.deliver({
+      type: 'mediaError', requestId: command.requestId, sessionId: command.sessionId, message,
+    });
   }
 
   private deliver(message: MediaMessage): void {
@@ -209,6 +218,34 @@ describe('Invitation (incoming SIP call session)', () => {
     expect(h.invitation.session.state).toBe('confirmed');
   });
 
+  it('ignores an ACK whose numeric CSeq differs from the accepted INVITE', async () => {
+    const h = setup();
+    const answer = h.invitation.answer(STUB_SDP);
+    await flush();
+
+    const ackHeaders = new Headers();
+    ackHeaders.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-wrong-cseq');
+    ackHeaders.set('Max-Forwards', '70');
+    ackHeaders.set('From', `<${REMOTE_URI}>;tag=alice-1`);
+    ackHeaders.set('To', `<${LOCAL_URI}>;tag=${h.invitation.toTag}`);
+    ackHeaders.set('Call-ID', 'call-123@example.com');
+    ackHeaders.set('CSeq', '2 ACK');
+    routeRequest(h, makeRequest('ACK', REMOTE_URI, ackHeaders));
+
+    expect(h.invitation.session.state).not.toBe('confirmed');
+    h.clock.advance(500);
+    await flush();
+    expect(okResponses(h.sent)).toHaveLength(2);
+
+    const validAckHeaders = ackHeaders.clone();
+    validAckHeaders.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-valid-cseq');
+    validAckHeaders.set('CSeq', '1 ACK');
+    routeRequest(h, makeRequest('ACK', REMOTE_URI, validAckHeaders));
+
+    await answer;
+    expect(h.invitation.session.state).toBe('confirmed');
+  });
+
   it('retransmits 200 OK at T1, 2*T1, 4*T1 intervals', async () => {
     const h = setup();
 
@@ -341,6 +378,95 @@ describe('Invitation (incoming SIP call session)', () => {
 
     expect(okResponses(h.sent)).toHaveLength(1);
     void first.catch(() => undefined);
+  });
+
+  it('keeps cancellation first-wins when pending media setup later rejects', async () => {
+    const h = setup();
+    h.media.autoReplySetRemote = false;
+    const answer = h.invitation.answer(STUB_SDP);
+
+    const cancelHeaders = new Headers();
+    cancelHeaders.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-inv-1');
+    cancelHeaders.set('Max-Forwards', '70');
+    cancelHeaders.set('From', `<${REMOTE_URI}>;tag=alice-1`);
+    cancelHeaders.set('To', `<${LOCAL_URI}>`);
+    cancelHeaders.set('Call-ID', 'call-123@example.com');
+    cancelHeaders.set('CSeq', '1 CANCEL');
+    routeRequest(h, makeRequest('CANCEL', LOCAL_URI, cancelHeaders));
+
+    await expect(answer).rejects.toMatchObject({ statusCode: 487 });
+    expect(h.invitation.session.state).toBe('terminated');
+
+    h.media.rejectPendingSetRemote('late media failure');
+    await flush();
+
+    expect(h.invitation.session.state).toBe('terminated');
+    expect(h.recorded.filter((event) => event.state === 'terminated')).toHaveLength(1);
+    expect(h.recorded.some((event) => event.state === 'failed')).toBe(false);
+  });
+
+  it('rejects answer once when a valid BYE arrives before ACK', async () => {
+    const h = setup();
+    const answer = h.invitation.answer(STUB_SDP);
+    await flush();
+
+    const byeHeaders = new Headers();
+    byeHeaders.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-bye-before-ack');
+    byeHeaders.set('Max-Forwards', '70');
+    byeHeaders.set('From', `<${REMOTE_URI}>;tag=alice-1`);
+    byeHeaders.set('To', `<${LOCAL_URI}>;tag=${h.invitation.toTag}`);
+    byeHeaders.set('Call-ID', 'call-123@example.com');
+    byeHeaders.set('CSeq', '2 BYE');
+    routeRequest(h, makeRequest('BYE', LOCAL_URI, byeHeaders));
+
+    await expect(answer).rejects.toThrow('BYE received before ACK');
+    expect(h.invitation.session.state).toBe('terminated');
+
+    h.clock.advance(32000);
+    expect(h.recorded.filter((event) => event.state === 'terminated')).toHaveLength(1);
+    expect(h.recorded.some((event) => event.state === 'failed')).toBe(false);
+  });
+
+  it('does not restart retransmission after a re-entrant BYE during the initial 200 send', async () => {
+    const h = setup();
+    const captureSend = h.transport.onSend;
+    let sentBye = false;
+    h.transport.onSend = (bytes) => {
+      captureSend?.(bytes);
+      const parsed = parseMessage(bytes);
+      if (sentBye
+        || !parsed.ok
+        || parsed.value.kind !== 'response'
+        || parsed.value.statusCode !== 200
+        || parsed.value.headers.get('CSeq') !== '1 INVITE') return;
+      sentBye = true;
+
+      const byeHeaders = new Headers();
+      byeHeaders.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-bye-during-200');
+      byeHeaders.set('Max-Forwards', '70');
+      byeHeaders.set('From', `<${REMOTE_URI}>;tag=alice-1`);
+      byeHeaders.set('To', `<${LOCAL_URI}>;tag=${h.invitation.toTag}`);
+      byeHeaders.set('Call-ID', 'call-123@example.com');
+      byeHeaders.set('CSeq', '2 BYE');
+      routeRequest(h, makeRequest('BYE', LOCAL_URI, byeHeaders));
+    };
+
+    const answer = h.invitation.answer(STUB_SDP);
+    await expect(answer).rejects.toThrow('BYE received before ACK');
+    expect(h.invitation.session.state).toBe('terminated');
+
+    h.clock.advance(32000);
+    await flush();
+
+    const inviteAcceptances = h.sent
+      .map((bytes) => parseMessage(bytes))
+      .filter((parsed) => parsed.ok
+        && parsed.value.kind === 'response'
+        && parsed.value.statusCode === 200
+        && parsed.value.headers.get('CSeq') === '1 INVITE');
+    expect(inviteAcceptances).toHaveLength(1);
+    expect(h.invitation.session.state).toBe('terminated');
+    expect(h.recorded.some((event) => event.state === 'failed')).toBe(false);
   });
 
   it('after confirmed, receives BYE, sends 200 OK → terminated', async () => {
