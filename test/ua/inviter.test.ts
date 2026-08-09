@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Headers, makeResponse, bodyText, withTextBody } from '../../src/messages/index.js';
+import { Headers, makeRequest, makeResponse, bodyText, withTextBody } from '../../src/messages/index.js';
 import type { SipRequestMessage, SipResponseMessage } from '../../src/messages/message.js';
 import { parseMessage } from '../../src/messages/parser.js';
 import { TransactionLayer, deriveTimers } from '../../src/transactions/index.js';
@@ -190,7 +190,191 @@ function respond(
   h.layer.receive(message);
 }
 
+async function drainMicrotasks(): Promise<void> {
+  for (let i = 0; i < 8; i += 1) await Promise.resolve();
+}
+
+function unrelatedRequest(cseq: number, suffix: string): SipRequestMessage {
+  const headers = new Headers();
+  headers.set('Via', `SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-unrelated-${suffix}`);
+  headers.set('From', '<sip:probe@example.com>;tag=probe');
+  headers.set('To', `<${REMOTE_URI}>`);
+  headers.set('Call-ID', `unrelated-${suffix}@example.com`);
+  headers.set('CSeq', `${cseq} OPTIONS`);
+  return makeRequest('OPTIONS', REMOTE_URI, headers);
+}
+
+function responseFor(
+  request: SipRequestMessage,
+  over: { statusCode?: number; sdp?: string; toTag?: string } = {},
+): SipResponseMessage {
+  const statusCode = over.statusCode ?? 200;
+  const headers = new Headers();
+  headers.set('Via', request.headers.get('Via')!);
+  headers.set('From', request.headers.get('From')!);
+  const toUri = request.headers.get('To')?.match(/<([^>]+)>/)?.[1] ?? REMOTE_URI;
+  headers.set('To', `<${toUri}>;tag=${over.toTag ?? 'server'}`);
+  headers.set('Call-ID', request.headers.get('Call-ID')!);
+  headers.set('CSeq', request.headers.get('CSeq')!);
+  if (statusCode >= 200 && statusCode < 300) {
+    headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
+  }
+  let response: SipResponseMessage = makeResponse(
+    statusCode,
+    statusCode === 200 ? 'OK' : 'Error',
+    headers,
+  );
+  if (over.sdp !== undefined) {
+    response = withTextBody(response, over.sdp, 'application/sdp') as SipResponseMessage;
+  }
+  return response;
+}
+
+function receive(h: Harness, request: SipRequestMessage, over: Parameters<typeof responseFor>[1] = {}): void {
+  h.layer.receive(responseFor(request, over));
+}
+
+async function confirmCall(h: Harness): Promise<SipRequestMessage> {
+  const invitation = h.inviter.invite();
+  await drainMicrotasks();
+  const invite = h.sent.find((request) => request.method === 'INVITE')!;
+  receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-1' });
+  await invitation;
+  return invite;
+}
+
+function observeForkCleanups(h: Harness): Promise<void>[] {
+  const cleanups: Promise<void>[] = [];
+  const internal = h.inviter as unknown as {
+    sendByeForDialog: (dialog: never) => Promise<void>;
+  };
+  const original = internal.sendByeForDialog.bind(h.inviter);
+  internal.sendByeForDialog = (dialog) => {
+    const cleanup = original(dialog);
+    cleanups.push(cleanup);
+    return cleanup;
+  };
+  return cleanups;
+}
+
 describe('Inviter (outgoing SIP call session)', () => {
+  it('ignores a same-CSeq response owned by another operation while inviting', async () => {
+    const h = setup();
+    const invitation = h.inviter.invite();
+    await drainMicrotasks();
+    const invite = h.sent.find((request) => request.method === 'INVITE')!;
+    const unrelated = unrelatedRequest(finalCSeq(invite), 'invite-response');
+
+    h.layer.sendRequest(unrelated);
+    receive(h, unrelated);
+
+    await expectPending(invitation);
+    expect(h.inviter.session.state).toBe('inviting');
+
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-1' });
+    await invitation;
+    expect(h.inviter.session.state).toBe('confirmed');
+  });
+
+  it('ignores a timeout owned by another operation while inviting', async () => {
+    const h = setup();
+    const unrelated = unrelatedRequest(1, 'invite-timeout');
+    h.layer.sendRequest(unrelated);
+    h.clock.advance(1);
+    const invitation = h.inviter.invite();
+    await drainMicrotasks();
+    const invite = h.sent.find((request) => request.method === 'INVITE')!;
+
+    h.clock.advance(31999);
+
+    await expectPending(invitation);
+    expect(h.inviter.session.state).toBe('inviting');
+
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-1' });
+    await invitation;
+    expect(h.inviter.session.state).toBe('confirmed');
+  });
+
+  it('ignores a same-CSeq response owned by another operation while hanging up', async () => {
+    const h = setup();
+    await confirmCall(h);
+    const hangup = h.inviter.hangup();
+    const bye = h.sent[h.sent.length - 1]!;
+    const unrelated = unrelatedRequest(finalCSeq(bye), 'hangup-response');
+
+    h.layer.sendRequest(unrelated);
+    receive(h, unrelated);
+
+    await expectPending(hangup);
+    expect(h.inviter.session.state).toBe('terminating');
+
+    receive(h, bye);
+    await hangup;
+    expect(h.inviter.session.state).toBe('terminated');
+  });
+
+  it('ignores a timeout owned by another operation while hanging up', async () => {
+    const h = setup();
+    await confirmCall(h);
+    const unrelated = unrelatedRequest(2, 'hangup-timeout');
+    h.layer.sendRequest(unrelated);
+    h.clock.advance(1);
+    const hangup = h.inviter.hangup();
+    const bye = h.sent[h.sent.length - 1]!;
+
+    h.clock.advance(31999);
+
+    await expectPending(hangup);
+    expect(h.inviter.session.state).toBe('terminating');
+
+    receive(h, bye);
+    await hangup;
+    expect(h.inviter.session.state).toBe('terminated');
+  });
+
+  it('ignores a same-CSeq response owned by another operation during fork cleanup', async () => {
+    const h = setup();
+    const cleanups = observeForkCleanups(h);
+    const invite = await confirmCall(h);
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-2' });
+    await drainMicrotasks();
+    const cleanup = cleanups[0]!;
+    const bye = h.sent.filter((request) => request.method === 'BYE').at(-1)!;
+    const unrelated = unrelatedRequest(finalCSeq(bye), 'fork-response');
+
+    h.layer.sendRequest(unrelated);
+    receive(h, unrelated);
+
+    await expectPending(cleanup);
+    expect(h.inviter.session.state).toBe('confirmed');
+
+    receive(h, bye);
+    await cleanup;
+    expect(h.inviter.session.state).toBe('confirmed');
+  });
+
+  it('ignores a timeout owned by another operation during fork cleanup', async () => {
+    const h = setup();
+    const cleanups = observeForkCleanups(h);
+    const invite = await confirmCall(h);
+    const unrelated = unrelatedRequest(2, 'fork-timeout');
+    h.layer.sendRequest(unrelated);
+    h.clock.advance(1);
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-2' });
+    await drainMicrotasks();
+    const cleanup = cleanups[0]!;
+    const bye = h.sent.filter((request) => request.method === 'BYE').at(-1)!;
+
+    h.clock.advance(31999);
+
+    await expectPending(cleanup);
+    expect(h.inviter.session.state).toBe('confirmed');
+
+    receive(h, bye);
+    await cleanup;
+    expect(h.inviter.session.state).toBe('confirmed');
+  });
+
   it('walks the full trace to confirmed with a direct 2xx ACK', async () => {
     const h = setup();
     const invite = h.inviter.invite();

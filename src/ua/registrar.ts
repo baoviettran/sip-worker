@@ -19,6 +19,7 @@ import { extractUri, makeBranch } from '../dialogs/header-values.js';
 import type { IdGenerator, AuthManager, AuthFailure } from '../auth/manager.js';
 import type { TransactionLayer } from '../transactions/coordinator.js';
 import type { TransactionLayerEvent } from '../transactions/types.js';
+import { sendOwnedRequest } from '../transactions/request-ownership.js';
 import type { Clock } from '../transport/index.js';
 import type { RegistrationIdentity, RegisterState } from './registration-types.js';
 
@@ -223,31 +224,35 @@ export class Registrar {
 
   private send(request: SipRequestMessage): void {
     try {
-      // Install the listener before sending so a response arriving synchronously
-      // inside `sendRequest` (reliable transport) is still observed.
       this.attachListener(request);
-      this.layer.sendRequest(request);
     } catch (err) {
       this.fail(err);
     }
   }
 
-  /** Install the single transaction-layer listener for one attempt. */
+  /** Send one attempt and install its exact returned transaction-key listener. */
   private attachListener(request: SipRequestMessage): void {
-    if (this.unsubscribe !== undefined) this.unsubscribe();
-    this.unsubscribe = this.layer.subscribe((event: TransactionLayerEvent) => {
-      switch (event.type) {
-        case 'response':
-          this.onResponse(request, event.response);
-          break;
-        case 'timeout':
-        case 'transportError':
-          this.fail(new SipError(0, `REGISTER ${event.type}`));
-          break;
-        default:
-          break;
-      }
-    });
+    this.teardownExchange();
+    sendOwnedRequest(
+      this.layer,
+      request,
+      (unsubscribe) => {
+        this.unsubscribe = unsubscribe;
+      },
+      (event: TransactionLayerEvent) => {
+        switch (event.type) {
+          case 'response':
+            this.onResponse(request, event.response);
+            break;
+          case 'timeout':
+          case 'transportError':
+            this.fail(new SipError(0, `REGISTER ${event.type}`));
+            break;
+          default:
+            break;
+        }
+      },
+    );
   }
 
   private onResponse(base: SipRequestMessage, response: SipResponseMessage): void {

@@ -18,6 +18,7 @@ import { makeBranch, extractTag } from '../dialogs/header-values.js';
 import { Dialog, type IdGenerator } from '../dialogs/dialog.js';
 import type { TransactionLayer } from '../transactions/coordinator.js';
 import type { TransactionLayerEvent } from '../transactions/types.js';
+import { sendOwnedRequest } from '../transactions/request-ownership.js';
 import type { Clock } from '../transport/index.js';
 import type { AuthManager, AuthFailure } from '../auth/manager.js';
 import type { WorkerMediaController } from '../media/worker-controller.js';
@@ -166,34 +167,50 @@ export class Inviter {
   private sendAttempt(request: SipRequestMessage): void {
     try {
       this.attachListener(request);
-      this.layer.sendRequest(request);
     } catch (err) {
       this.fail(err);
     }
   }
 
   private attachListener(request: SipRequestMessage): void {
-    if (this.unsubscribe !== undefined) this.unsubscribe();
-    this.unsubscribe = this.layer.subscribe((event: TransactionLayerEvent) => {
-      if (event.type === 'response') {
-        this.onResponse(request, event.response);
-      } else if (event.type === 'statelessResponse') {
-        // Repeated or forked 2xx arrive after the INVITE client transaction
-        // has terminated. Route them through the same 2xx handler so the
-        // DialogSet resends the right per-dialog ACK or cleans up a fork.
-        const response = event.response;
-        if (cseqNumber(response) === cseqNumber(request) && response.statusCode >= 200 && response.statusCode < 300) {
-          // Only handle if this matches our INVITE (Call-ID + From tag)
-          const callId = response.headers.get('Call-ID');
-          const fromTag = extractTag(response.headers.get('From'));
-          if (callId === this.callId && fromTag === this.fromTag) {
-            void this.onSuccess(response);
-          }
+    this.teardown();
+    const unsubscribeStateless = this.layer.subscribe((event: TransactionLayerEvent) => {
+      if (event.type !== 'statelessResponse') return;
+      // Repeated or forked 2xx arrive after the INVITE client transaction has
+      // terminated, so they have no transaction key. Keep this separate from
+      // the exact-key listener and match the dialog-forming identity instead.
+      const response = event.response;
+      if (
+        cseqNumber(response) === cseqNumber(request)
+        && response.statusCode >= 200
+        && response.statusCode < 300
+      ) {
+        const callId = response.headers.get('Call-ID');
+        const fromTag = extractTag(response.headers.get('From'));
+        if (callId === this.callId && fromTag === this.fromTag) {
+          void this.onSuccess(response);
         }
-      } else if (event.type === 'timeout' || event.type === 'transportError') {
-        this.fail(new SipError(0, `INVITE ${event.type}`));
       }
     });
+    this.unsubscribe = unsubscribeStateless;
+
+    sendOwnedRequest(
+      this.layer,
+      request,
+      (unsubscribeOwned) => {
+        this.unsubscribe = () => {
+          unsubscribeOwned();
+          unsubscribeStateless();
+        };
+      },
+      (event: TransactionLayerEvent) => {
+        if (event.type === 'response') {
+          this.onResponse(request, event.response);
+        } else if (event.type === 'timeout' || event.type === 'transportError') {
+          this.fail(new SipError(0, `INVITE ${event.type}`));
+        }
+      },
+    );
   }
 
   private onResponse(base: SipRequestMessage, response: SipResponseMessage): void {
@@ -304,7 +321,6 @@ export class Inviter {
 
     try {
       this.attachByeListener(bye);
-      this.layer.sendRequest(bye);
     } catch (err) {
       this.failHangup(err);
     }
@@ -319,25 +335,30 @@ export class Inviter {
   private sendByeForDialog(dialog: Dialog): Promise<void> {
     const bye = dialog.createRequest('BYE');
     return new Promise<void>((resolve, reject) => {
-      const unsubscribe = this.layer.subscribe((event: TransactionLayerEvent) => {
-        if (event.type === 'response') {
-          if (cseqNumber(event.response) === cseqNumber(bye)) {
-            const code = event.response.statusCode;
-            if (code >= 200 && code < 300) {
-              unsubscribe();
-              resolve();
-            } else if (code >= 300) {
-              unsubscribe();
-              reject(new SipError(code, `BYE rejected with ${code}`));
-            }
-          }
-        } else if (event.type === 'timeout' || event.type === 'transportError') {
-          unsubscribe();
-          reject(new SipError(0, `BYE ${event.type}`));
-        }
-      });
+      let unsubscribe = (): void => {};
       try {
-        this.layer.sendRequest(bye);
+        sendOwnedRequest(
+          this.layer,
+          bye,
+          (next) => { unsubscribe = next; },
+          (event: TransactionLayerEvent) => {
+            if (event.type === 'response') {
+              if (cseqNumber(event.response) === cseqNumber(bye)) {
+                const code = event.response.statusCode;
+                if (code >= 200 && code < 300) {
+                  unsubscribe();
+                  resolve();
+                } else if (code >= 300) {
+                  unsubscribe();
+                  reject(new SipError(code, `BYE rejected with ${code}`));
+                }
+              }
+            } else if (event.type === 'timeout' || event.type === 'transportError') {
+              unsubscribe();
+              reject(new SipError(0, `BYE ${event.type}`));
+            }
+          },
+        );
       } catch (err) {
         unsubscribe();
         reject(err);
@@ -346,22 +367,29 @@ export class Inviter {
   }
 
   private attachByeListener(request: SipRequestMessage): void {
-    if (this.unsubscribe !== undefined) this.unsubscribe();
-    this.unsubscribe = this.layer.subscribe((event: TransactionLayerEvent) => {
-      if (event.type === 'response') {
-        if (cseqNumber(event.response) === cseqNumber(request)) {
-          const code = event.response.statusCode;
-          if (code >= 200 && code < 300) {
-            this.session.transition('terminated');
-            this.settleHangup();
-          } else if (code >= 300) {
-            this.failHangup(new SipError(code, `BYE rejected with ${code}`));
+    this.teardown();
+    sendOwnedRequest(
+      this.layer,
+      request,
+      (unsubscribe) => {
+        this.unsubscribe = unsubscribe;
+      },
+      (event: TransactionLayerEvent) => {
+        if (event.type === 'response') {
+          if (cseqNumber(event.response) === cseqNumber(request)) {
+            const code = event.response.statusCode;
+            if (code >= 200 && code < 300) {
+              this.session.transition('terminated');
+              this.settleHangup();
+            } else if (code >= 300) {
+              this.failHangup(new SipError(code, `BYE rejected with ${code}`));
+            }
           }
+        } else if (event.type === 'timeout' || event.type === 'transportError') {
+          this.failHangup(new SipError(0, `BYE ${event.type}`));
         }
-      } else if (event.type === 'timeout' || event.type === 'transportError') {
-        this.failHangup(new SipError(0, `BYE ${event.type}`));
-      }
-    });
+      },
+    );
   }
 
   private fail(reason: unknown): void {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Headers, makeResponse, parseMessage } from '../../src/messages/index.js';
+import { Headers, makeRequest, makeResponse, parseMessage } from '../../src/messages/index.js';
 import type { SipRequestMessage } from '../../src/messages/message.js';
 import { TransactionLayer, deriveTimers } from '../../src/transactions/index.js';
 import type { TransactionLayerEvent } from '../../src/transactions/types.js';
@@ -7,7 +7,7 @@ import { FakeClock } from '../support/fake-clock.js';
 import { FakeTransport } from '../support/fake-transport.js';
 import { AuthManager } from '../../src/auth/manager.js';
 import { Registrar, type RegistrarOptions } from '../../src/ua/registrar.js';
-import { SipError } from '../../src/errors.js';
+import { SipError, TransportError } from '../../src/errors.js';
 
 const REGISTRAR_URI = 'sip:registrar.example.com';
 const REALM = 'example.com';
@@ -71,6 +71,36 @@ function setup(options: {
 const branchOf = (request: SipRequestMessage): string =>
   request.headers.get('Via')?.match(/;branch=([^;]+)/)?.[1] ?? '';
 
+const PENDING = Symbol('pending');
+
+function expectPending<T>(promise: Promise<T>): Promise<void> {
+  return expect(Promise.race([promise, PENDING])).resolves.toBe(PENDING);
+}
+
+async function drainMicrotasks(): Promise<void> {
+  for (let i = 0; i < 8; i += 1) await Promise.resolve();
+}
+
+function unrelatedRequest(cseq: number): SipRequestMessage {
+  const headers = new Headers();
+  headers.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-unrelated-options');
+  headers.set('From', '<sip:probe@example.com>;tag=probe');
+  headers.set('To', '<sip:registrar.example.com>');
+  headers.set('Call-ID', 'unrelated-options@example.com');
+  headers.set('CSeq', `${cseq} OPTIONS`);
+  return makeRequest('OPTIONS', REGISTRAR_URI, headers);
+}
+
+function responseFor(request: SipRequestMessage, statusCode = 200): ReturnType<typeof makeResponse> {
+  const headers = new Headers();
+  headers.set('Via', request.headers.get('Via')!);
+  headers.set('From', request.headers.get('From')!);
+  headers.set('To', `${request.headers.get('To')!};tag=server`);
+  headers.set('Call-ID', request.headers.get('Call-ID')!);
+  headers.set('CSeq', request.headers.get('CSeq')!);
+  return makeResponse(statusCode, statusCode === 200 ? 'OK' : 'Error', headers);
+}
+
 /** Route a response to the most recent outbound request through the layer. */
 function respond(
   h: Harness,
@@ -124,6 +154,79 @@ async function completeRegister(
 function flush(): Promise<void> { return new Promise((resolve) => setTimeout(resolve, 0)); }
 
 describe('Registrar', () => {
+  it('ignores a same-CSeq response owned by another operation', async () => {
+    const h = setup();
+    const registration = h.registrar.register();
+    const register = h.sent[0]!;
+    const unrelated = unrelatedRequest(finalCSeq(register)!);
+
+    h.layer.sendRequest(unrelated);
+    h.layer.receive(responseFor(unrelated));
+
+    await expectPending(registration);
+    expect(h.registrar.state).toBe('registering');
+
+    h.layer.receive(responseFor(register));
+    await registration;
+    expect(h.registrar.state).toBe('registered');
+  });
+
+  it('ignores a timeout owned by another operation', async () => {
+    const h = setup();
+    h.layer.sendRequest(unrelatedRequest(1));
+    h.clock.advance(1);
+    const registration = h.registrar.register();
+    const register = h.sent[h.sent.length - 1]!;
+
+    h.clock.advance(31999);
+
+    await expectPending(registration);
+    expect(h.registrar.state).toBe('registering');
+
+    h.layer.receive(responseFor(register));
+    await registration;
+    expect(h.registrar.state).toBe('registered');
+  });
+
+  it('ignores a transport error owned by another operation', async () => {
+    const h = setup();
+    const registration = h.registrar.register();
+    const register = h.sent[0]!;
+    const send = h.transport.send.bind(h.transport);
+    h.transport.send = async (bytes): Promise<void> => {
+      const parsed = parseMessage(bytes);
+      if (parsed.ok && parsed.value.kind === 'request' && parsed.value.method === 'OPTIONS') {
+        throw new TransportError('unrelated send failed');
+      }
+      await send(bytes);
+    };
+
+    h.layer.sendRequest(unrelatedRequest(2));
+    await drainMicrotasks();
+
+    await expectPending(registration);
+    expect(h.registrar.state).toBe('registering');
+
+    h.layer.receive(responseFor(register));
+    await registration;
+    expect(h.registrar.state).toBe('registered');
+  });
+
+
+  it('observes a response delivered synchronously inside sendRequest', async () => {
+    const h = setup();
+    h.transport.onSend = (bytes) => {
+      const parsed = parseMessage(bytes);
+      if (!parsed.ok || parsed.value.kind !== 'request') return;
+      h.sent.push(parsed.value);
+      if (parsed.value.method === 'REGISTER') h.layer.receive(responseFor(parsed.value));
+    };
+
+    await h.registrar.register();
+
+    expect(h.registrar.state).toBe('registered');
+  });
+
   it('registers unauthenticated and reaches registered on a 200', async () => {
     const h = setup();
     const registration = h.registrar.register();
