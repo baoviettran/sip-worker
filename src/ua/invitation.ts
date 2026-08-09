@@ -259,8 +259,8 @@ export class Invitation {
       this.layer.sendResponse(transaction.key, this.buildRequestResponse(request, 481, 'Call/Transaction Does Not Exist'));
       return;
     }
-    this.layer.sendResponse(transaction.key, this.buildRequestResponse(request, 200, 'OK'));
     this.settleHangup();
+    this.layer.sendResponse(transaction.key, this.buildRequestResponse(request, 200, 'OK'));
   }
 
   private buildRequestResponse(request: SipRequestMessage, statusCode: number, reason: string): SipResponseMessage {
@@ -313,6 +313,7 @@ export class Invitation {
   }
 
   private onAck(): void {
+    if (this.state !== 'accepted') return;
     if (this.retransmitter !== undefined) {
       this.retransmitter.stop();
       this.retransmitter = undefined;

@@ -427,6 +427,54 @@ describe('Invitation (incoming SIP call session)', () => {
     expect(h.recorded.some((event) => event.state === 'failed')).toBe(false);
   });
 
+  it('keeps BYE first-wins when its 200 send re-entrantly delivers the matching ACK', async () => {
+    const h = setup();
+    const answer = h.invitation.answer(STUB_SDP);
+    await flush();
+
+    const captureSend = h.transport.onSend;
+    let sentAck = false;
+    h.transport.onSend = (bytes) => {
+      captureSend?.(bytes);
+      const parsed = parseMessage(bytes);
+      if (sentAck
+        || !parsed.ok
+        || parsed.value.kind !== 'response'
+        || parsed.value.statusCode !== 200
+        || parsed.value.headers.get('CSeq') !== '2 BYE') return;
+      sentAck = true;
+
+      const ackHeaders = new Headers();
+      ackHeaders.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-ack-during-bye-200');
+      ackHeaders.set('Max-Forwards', '70');
+      ackHeaders.set('From', `<${REMOTE_URI}>;tag=alice-1`);
+      ackHeaders.set('To', `<${LOCAL_URI}>;tag=${h.invitation.toTag}`);
+      ackHeaders.set('Call-ID', 'call-123@example.com');
+      ackHeaders.set('CSeq', '1 ACK');
+      routeRequest(h, makeRequest('ACK', REMOTE_URI, ackHeaders));
+    };
+
+    const byeHeaders = new Headers();
+    byeHeaders.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-bye-before-reentrant-ack');
+    byeHeaders.set('Max-Forwards', '70');
+    byeHeaders.set('From', `<${REMOTE_URI}>;tag=alice-1`);
+    byeHeaders.set('To', `<${LOCAL_URI}>;tag=${h.invitation.toTag}`);
+    byeHeaders.set('Call-ID', 'call-123@example.com');
+    byeHeaders.set('CSeq', '2 BYE');
+    routeRequest(h, makeRequest('BYE', LOCAL_URI, byeHeaders));
+
+    await expect(answer).rejects.toThrow('BYE received before ACK');
+    const byeAcceptances = h.sent
+      .map((bytes) => parseMessage(bytes))
+      .filter((parsed) => parsed.ok
+        && parsed.value.kind === 'response'
+        && parsed.value.statusCode === 200
+        && parsed.value.headers.get('CSeq') === '2 BYE');
+    expect(byeAcceptances).toHaveLength(1);
+    expect(h.invitation.session.state).toBe('terminated');
+    expect(h.recorded.some((event) => event.state === 'confirmed')).toBe(false);
+  });
+
   it('does not restart retransmission after a re-entrant BYE during the initial 200 send', async () => {
     const h = setup();
     const captureSend = h.transport.onSend;
