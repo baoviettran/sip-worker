@@ -27,9 +27,14 @@ function cseqParts(message: SipMessage): CSeqParts | undefined {
   return { number: match[1]!, method: match[2]! };
 }
 
+/** Extract the first (topmost) Via entry from the Via header. */
+function topViaOf(message: SipMessage): string | undefined {
+  return message.headers.get('Via')?.split(',', 1)[0];
+}
+
 /** Extract and normalize the sent-by value from the top Via header. */
 function sentByOf(message: SipMessage): string | undefined {
-  const via = message.headers.get('Via');
+  const via = topViaOf(message);
   return via?.match(/^SIP\/2\.0\/[^\s]+\s+([^;\s,]+)/i)?.[1]?.toLowerCase();
 }
 
@@ -50,7 +55,7 @@ function validateRequestIdentity(request: SipRequestMessage): void {
 
 /** Extract the branch parameter from the top Via header. */
 export function branchOf(message: SipMessage): string | undefined {
-  return message.headers.get('Via')?.match(/;branch=([^;]+)/)?.[1];
+  return topViaOf(message)?.match(/(?:^|;)branch=([^;,\s]+)/i)?.[1];
 }
 
 /** Client transaction key: top Via branch, normalized sent-by, and CSeq method. */

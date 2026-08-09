@@ -269,6 +269,18 @@ describe('TransactionLayer', () => {
     expect(events).toEqual([]);
   });
 
+  it('rejects a branchless top Via even when a lower Via has a magic-cookie branch', () => {
+    const { events, layer } = setup();
+    const invite = makeInvite();
+    invite.headers.set(
+      'Via',
+      'SIP/2.0/UDP 192.0.2.1:5060;rport, SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-lower',
+    );
+
+    expect(() => layer.receive(invite)).toThrow(TransportError);
+    expect(events).toEqual([]);
+  });
+
   it('distinguishes server transactions with the same branch but different Via sent-by values', () => {
     const { events, layer } = setup();
     const first = makeInvite('z9hG4bK-shared');
