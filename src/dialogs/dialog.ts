@@ -200,35 +200,31 @@ export class Dialog {
   }
 
   /**
-   * The request URI for an in-dialog request: the first route set entry when
-   * the route set is non-empty, or the remote target when empty. A single
-   * strict (non-loose) first route sends the request to the remote target
-   * instead (RFC 3261 12.2.1.1).
+   * The request URI for an in-dialog request. Loose routing uses the remote
+   * target; strict routing uses the first route set entry (RFC 3261
+   * 12.2.1.1). An empty route set also uses the remote target.
    */
   private requestTarget(): string {
     if (this.routeSetValues.length === 0) return this.remoteTarget;
     const first = this.routeSetValues[0] ?? '';
-    if (isStrictRouter(first)) return this.remoteTarget;
-    return first;
+    if (isStrictRouter(first)) return first;
+    return this.remoteTarget;
   }
 
   /**
-   * Populate the Route header for an in-dialog request. The first route set
-   * entry becomes the request URI, so the remaining entries go in Route. A
-   * strict (non-loose) first router cannot resolve the target itself, so the
-   * whole route set is kept in Route with the remote target appended as the
-   * last value (RFC 3261 12.2.1.1).
+   * Populate the Route header for an in-dialog request. Loose routing uses
+   * the complete route set. Strict routing uses the remaining routes followed
+   * by the remote target (RFC 3261 12.2.1.1).
    */
   private setRoute(headers: Headers): void {
     if (this.routeSetValues.length === 0) return;
     const first = this.routeSetValues[0] ?? '';
     if (isStrictRouter(first)) {
-      const route = [...this.routeSetValues, this.remoteTarget].join(', ');
+      const route = [...this.routeSetValues.slice(1), this.remoteTarget].join(', ');
       headers.set('Route', route);
       return;
     }
-    const route = this.routeSetValues.slice(1).join(', ');
-    if (route !== '') headers.set('Route', route);
+    headers.set('Route', this.routeSetValues.join(', '));
   }
 }
 

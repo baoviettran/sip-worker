@@ -10,11 +10,12 @@ export function extractTag(value: string | undefined): string | undefined {
   return match?.[1];
 }
 
-/** Extract the URI from a `<...>`-wrapped address (Contact / Record-Route entry). */
+/** Extract the URI from an address, including a bare Contact / Record-Route URI. */
 export function extractUri(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
-  const match = value.match(/<([^>]+)>/);
-  return match?.[1];
+  const trimmed = value.trim();
+  const match = trimmed.match(/<([^>]+)>/);
+  return match?.[1] ?? (trimmed === '' ? undefined : trimmed);
 }
 
 /** Whether a route set entry is a strict (non-loose) router, i.e. has no `;lr`. */
