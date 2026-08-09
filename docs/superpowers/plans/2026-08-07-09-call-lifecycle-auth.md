@@ -20,19 +20,19 @@
 
 **Files:** Modify `src/ua/user-agent.ts`, `src/ua/inviter.ts`, `src/ua/invitation.ts`, `src/dialogs/dialog.ts`; Test `test/ua/inviter.test.ts`, `test/ua/invitation.test.ts`, `test/integration/call.test.ts`.
 
-- [ ] Add failing tests for remote BYE, wrong-tag BYE, duplicate answer/reject, CANCEL, and duplicate accepted INVITE.
-- [ ] Add dialog-indexed routing, respond 200 to valid BYE/CANCEL, reject invalid in-dialog requests, and make invitation terminal methods atomic.
-- [ ] Run `npm test -- --run test/ua test/integration/call.test.ts`; expect all focused tests pass.
-- [ ] Commit `fix: enforce dialog lifecycle ownership`.
+- [x] Add failing tests for remote BYE, wrong-tag BYE, duplicate answer/reject, CANCEL, and duplicate accepted INVITE.
+- [x] Add dialog-indexed routing, respond 200 to valid BYE/CANCEL, reject invalid in-dialog requests, and make invitation terminal methods atomic.
+- [x] Run `npm test -- --run test/ua test/integration/call.test.ts`; expect all focused tests pass.
+- [x] Commit `fix: enforce dialog lifecycle ownership`.
 
 ### Task 2: Teardown and operation ownership
 
 **Files:** Modify `src/ua/user-agent.ts`, `src/ua/registrar.ts`, `src/ua/inviter.ts`, `src/ua/invitation.ts`; Test `test/ua/user-agent.test.ts`.
 
-- [ ] Add failing tests that disconnect during register, invite, answer, and hangup.
-- [ ] Add idempotent `dispose(error)` paths that detach listeners, stop timers/retransmitters, reject deferreds, and clear active maps.
-- [ ] Run `npm test -- --run test/ua`; expect all focused tests pass.
-- [ ] Commit `fix: settle SIP operations on shutdown`.
+- [x] Add failing tests that disconnect during register, invite, answer, and hangup.
+- [x] Add idempotent `dispose(error)` paths that detach listeners, stop timers/retransmitters, reject deferreds, and clear active maps.
+- [x] Run `npm test -- --run test/ua`; expect all focused tests pass.
+- [x] Commit `fix: settle SIP operations on shutdown`.
 
 ### Task 3: Digest exchange correctness
 
