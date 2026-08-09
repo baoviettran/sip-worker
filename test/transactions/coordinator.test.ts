@@ -281,6 +281,40 @@ describe('TransactionLayer', () => {
     expect(events).toEqual([]);
   });
 
+  it('accepts RFC separator whitespace in the top Via and canonicalizes sent-by', () => {
+    const { layer } = setup();
+    const options = makeOptions();
+    options.headers.set(
+      'Via',
+      'SIP / 2.0 / UDP Example.COM : 5060 ; branch = z9hG4bK-sws',
+    );
+
+    const transaction = layer.sendRequest(options);
+
+    expect(transaction.key).toBe('z9hG4bK-sws|example.com:5060|OPTIONS');
+  });
+
+  it('uses the first field when Via is repeated', () => {
+    const { layer } = setup();
+    const options = makeOptions();
+    options.headers.set('Via', viaHeader('z9hG4bK-top', 'Top.Example.COM:5060'));
+    options.headers.append('Via', viaHeader('z9hG4bK-lower', 'lower.example.com:5060'));
+
+    const transaction = layer.sendRequest(options);
+
+    expect(transaction.key).toBe('z9hG4bK-top|top.example.com:5060|OPTIONS');
+  });
+
+  it('rejects a branchless first field when a repeated lower Via is valid', () => {
+    const { events, layer } = setup();
+    const options = makeOptions();
+    options.headers.set('Via', 'SIP/2.0/UDP top.example.com:5060;rport');
+    options.headers.append('Via', viaHeader('z9hG4bK-lower', 'lower.example.com:5060'));
+
+    expect(() => layer.sendRequest(options)).toThrow(TransportError);
+    expect(events).toEqual([]);
+  });
+
   it('distinguishes server transactions with the same branch but different Via sent-by values', () => {
     const { events, layer } = setup();
     const first = makeInvite('z9hG4bK-shared');

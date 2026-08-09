@@ -225,6 +225,11 @@ void buildNon2xxAck(request, response);
 void MAGIC_COOKIE;
 declare const tKey: TransactionKey;
 declare const layerEvent: TransactionLayerEvent;
+const validTransactionKey: TransactionKey = 'branch|example.com:5060|INVITE';
+void validTransactionKey;
+// @ts-expect-error TransactionKey requires branch, sent-by, and method components.
+const invalidTransactionKey: TransactionKey = 'branch|INVITE';
+void invalidTransactionKey;
 declare const layerOptions: TransactionLayerOptions;
 void tKey;
 void layerEvent;

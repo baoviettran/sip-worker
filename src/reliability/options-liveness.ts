@@ -2,10 +2,11 @@ import { TransportError } from '../errors.js';
 import type { SipRequestMessage } from '../messages/message.js';
 import type { Clock } from '../transport/index.js';
 import type {
-  ClientTransaction,
   TransactionLayer,
   TransactionLayerEvent,
+  TransactionKey,
 } from '../transactions/index.js';
+import { sendOwnedRequest } from '../transactions/request-ownership.js';
 import type { LivenessStrategy } from './liveness.js';
 
 /**
@@ -53,7 +54,7 @@ export class OptionsLiveness implements LivenessStrategy {
   private started = false;
   private probeTimer?: number;
   private unsubscribe?: () => void;
-  private outstanding?: ClientTransaction;
+  private outstanding?: TransactionKey;
   private probeIndex = 0;
 
   constructor(readonly options: OptionsLivenessOptions) {
@@ -88,11 +89,15 @@ export class OptionsLiveness implements LivenessStrategy {
     this.probeIndex += 1;
     const request = this.requestFactory(this.probeIndex);
     this.unsubscribeOwnership();
-    // Install the listener before sending so a response arriving synchronously
-    // inside `sendRequest` (reliable transport) is still observed.
-    this.unsubscribe = this.layer.subscribe((event) => this.handleEvent(event));
-    const tx = this.layer.sendRequest(request);
-    this.outstanding = tx;
+    sendOwnedRequest(
+      this.layer,
+      request,
+      (unsubscribe, key) => {
+        this.unsubscribe = unsubscribe;
+        this.outstanding = key;
+      },
+      (event) => this.handleEvent(event),
+    );
   }
 
   private handleEvent(event: TransactionLayerEvent): void {
@@ -104,7 +109,7 @@ export class OptionsLiveness implements LivenessStrategy {
         // INVITE, BYE) on a shared layer, so an unrelated final response must
         // not clear the outstanding probe slot or a second probe could start.
         const code = event.response.statusCode;
-        if (code >= 200 && code <= 699 && event.transaction.key === this.outstanding?.key) {
+        if (code >= 200 && code <= 699 && event.transaction.key === this.outstanding) {
           // Any final response proves peer liveness; clear the slot so the next
           // probe period can fire. Provisional responses fall through.
           this.clearOutstanding();
@@ -113,7 +118,7 @@ export class OptionsLiveness implements LivenessStrategy {
       }
       case 'timeout':
       case 'transportError': {
-        if (event.key !== this.outstanding.key) return;
+        if (event.key !== this.outstanding) return;
         this.clearOutstanding();
         const message = event.type === 'timeout' ? 'liveness timeout' : 'liveness transport error';
         this.onFailure(new TransportError(message, event.type === 'transportError' ? event.error : undefined));

@@ -16,8 +16,8 @@ import type { SipRequestMessage, SipResponseMessage } from '../messages/message.
 import { SipError } from '../errors.js';
 import { makeBranch, extractTag } from '../dialogs/header-values.js';
 import { Dialog, type IdGenerator } from '../dialogs/dialog.js';
-import type { TransactionLayer } from '../transactions/coordinator.js';
-import type { TransactionLayerEvent } from '../transactions/types.js';
+import { clientKey, type TransactionLayer } from '../transactions/coordinator.js';
+import type { TransactionKey, TransactionLayerEvent } from '../transactions/types.js';
 import { sendOwnedRequest } from '../transactions/request-ownership.js';
 import type { Clock } from '../transport/index.js';
 import type { AuthManager, AuthFailure } from '../auth/manager.js';
@@ -61,7 +61,6 @@ export class Inviter {
   private readonly callId: string;
   private readonly fromTag: string;
   private localCSeq = 1;
-  private branchCounter = 0;
 
   private invitePromise: Promise<void> | undefined;
   private inviteDeferred: { resolve: () => void; reject: (reason: unknown) => void } | undefined;
@@ -148,7 +147,7 @@ export class Inviter {
 
   private buildInviteRequest(sdp: string): SipRequestMessage {
     const headers = new Headers();
-    const branch = makeBranch(`inv-${(this.branchCounter += 1)}`);
+    const branch = makeBranch(this.idGenerator.branch());
     headers.set('Via', `SIP/2.0/UDP ${this.viaAddress};branch=${branch}`);
     headers.set('Max-Forwards', '70');
     headers.set('From', `<${this.from}>;tag=${this.fromTag}`);
@@ -174,6 +173,7 @@ export class Inviter {
 
   private attachListener(request: SipRequestMessage): void {
     this.teardown();
+    let inviteKey: TransactionKey | undefined;
     const unsubscribeStateless = this.layer.subscribe((event: TransactionLayerEvent) => {
       if (event.type !== 'statelessResponse') return;
       // Repeated or forked 2xx arrive after the INVITE client transaction has
@@ -181,7 +181,8 @@ export class Inviter {
       // the exact-key listener and match the dialog-forming identity instead.
       const response = event.response;
       if (
-        cseqNumber(response) === cseqNumber(request)
+        clientKey(response) === inviteKey
+        && cseqNumber(response) === cseqNumber(request)
         && response.headers.get('CSeq')?.trim().split(/\s+/)[1] === 'INVITE'
         && response.statusCode >= 200
         && response.statusCode < 300
@@ -198,7 +199,8 @@ export class Inviter {
     sendOwnedRequest(
       this.layer,
       request,
-      (unsubscribeOwned) => {
+      (unsubscribeOwned, key) => {
+        inviteKey = key;
         this.unsubscribe = () => {
           unsubscribeOwned();
           unsubscribeStateless();

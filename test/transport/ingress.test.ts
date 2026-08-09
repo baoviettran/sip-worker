@@ -6,6 +6,9 @@ import {
   type TransportEvent,
 } from '../../src/transport/index.js';
 import { FakeTransport } from '../support/fake-transport.js';
+import { FakeClock } from '../support/fake-clock.js';
+import { TransactionLayer, deriveTimers } from '../../src/transactions/index.js';
+import type { TransactionLayerEvent } from '../../src/transactions/types.js';
 
 const encoder = new TextEncoder();
 const validResponseBytes = encoder.encode(
@@ -59,6 +62,33 @@ describe('SipIngress', () => {
     expect(errors[0]).toBeInstanceOf(ParseError);
     expect(errors[1]).toBe(transportError);
     expect(errors[2]).toBe(disconnectError);
+  });
+
+  it('reports invalid transaction identity without throwing from the transport callback', () => {
+    const transport = createTransport();
+    const events: TransactionLayerEvent[] = [];
+    const errors: Error[] = [];
+    const layer = new TransactionLayer({
+      transport,
+      clock: new FakeClock(),
+      timers: deriveTimers({ T1: 500, T2: 4000, T4: 5000 }, true),
+      reliable: true,
+      emit: (event) => events.push(event),
+    });
+    const ingress = new SipIngress(transport, layer, (error) => errors.push(error));
+    const invalid = encoder.encode(
+      'OPTIONS sip:example.com SIP/2.0\r\n'
+      + 'Via: SIP/2.0/UDP 192.0.2.1:5060\r\n'
+      + 'CSeq: 1 OPTIONS\r\n'
+      + 'Content-Length: 0\r\n\r\n',
+    );
+
+    ingress.start();
+    expect(() => transport.emitData(invalid)).not.toThrow();
+
+    expect(events).toEqual([]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(TransportError);
   });
 
   it('subscribes only once while started', () => {

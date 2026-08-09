@@ -212,6 +212,33 @@ describe('Registrar', () => {
     expect(h.registrar.state).toBe('registered');
   });
 
+  it('ignores a server transport error that shares its client transaction key', async () => {
+    const h = setup();
+    const registration = h.registrar.register();
+    const register = h.sent[0]!;
+
+    // A same-key incoming request creates a server transaction alongside the
+    // REGISTER client transaction. Its terminal events must not own the UA
+    // operation merely because both directions share a TransactionKey.
+    h.layer.receive(register);
+    const serverRequest = h.events.find((event) => event.type === 'request');
+    if (serverRequest?.type !== 'request') throw new Error('server transaction was not created');
+
+    const send = h.transport.send.bind(h.transport);
+    h.transport.send = async (): Promise<void> => {
+      throw new TransportError('server response send failed');
+    };
+    h.layer.sendResponse(serverRequest.transaction.key, responseFor(register));
+    await drainMicrotasks();
+    h.transport.send = send;
+
+    await expectPending(registration);
+    expect(h.registrar.state).toBe('registering');
+
+    h.layer.receive(responseFor(register));
+    await registration;
+    expect(h.registrar.state).toBe('registered');
+  });
 
   it('observes a response delivered synchronously inside sendRequest', async () => {
     const h = setup();

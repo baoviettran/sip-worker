@@ -27,15 +27,77 @@ function cseqParts(message: SipMessage): CSeqParts | undefined {
   return { number: match[1]!, method: match[2]! };
 }
 
-/** Extract the first (topmost) Via entry from the Via header. */
+interface TopViaIdentity {
+  readonly branch?: string;
+  readonly sentBy?: string;
+}
+
+/** Split a header list at separators outside quoted-string values. */
+function splitOutsideQuotes(value: string, separator: string): string[] {
+  const values: string[] = [];
+  let start = 0;
+  let quoted = false;
+  let escaped = false;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quoted && character === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (character === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (!quoted && character === separator) {
+      values.push(value.slice(start, index));
+      start = index + 1;
+    }
+  }
+  values.push(value.slice(start));
+  return values;
+}
+
+/** Extract the first (topmost) Via value from the first Via header field. */
 function topViaOf(message: SipMessage): string | undefined {
-  return message.headers.get('Via')?.split(',', 1)[0];
+  const value = message.headers.get('Via');
+  if (value === undefined) return undefined;
+  return splitOutsideQuotes(value, ',')[0]?.trim();
+}
+
+/** Parse RFC separator whitespace while retaining strict branch token validation. */
+function topViaIdentity(message: SipMessage): TopViaIdentity | undefined {
+  const via = topViaOf(message);
+  if (via === undefined) return undefined;
+  const protocol = via.match(/^SIP\s*\/\s*2\.0\s*\/\s*[!#$%&'*+\-.^_`|~0-9A-Za-z]+\s+/i);
+  if (protocol === null) return undefined;
+
+  const remainder = via.slice(protocol[0].length);
+  const parameterStart = remainder.indexOf(';');
+  const sentByRaw = (parameterStart === -1 ? remainder : remainder.slice(0, parameterStart))
+    .trim()
+    .replace(/\s*:\s*/g, ':');
+  const sentBy = sentByRaw === '' || /[\s,]/.test(sentByRaw) ? undefined : sentByRaw;
+  if (sentBy === undefined) return undefined;
+
+  let branch: string | undefined;
+  const parameters = parameterStart === -1 ? '' : remainder.slice(parameterStart + 1);
+  for (const parameter of splitOutsideQuotes(parameters, ';')) {
+    const match = parameter.trim().match(/^branch\s*=\s*([!#$%&'*+\-.^_`|~0-9A-Za-z]+)\s*$/i);
+    if (match === null) continue;
+    branch = match[1];
+    break;
+  }
+  return { branch, sentBy };
 }
 
 /** Extract and normalize the sent-by value from the top Via header. */
 function sentByOf(message: SipMessage): string | undefined {
-  const via = topViaOf(message);
-  return via?.match(/^SIP\/2\.0\/[^\s]+\s+([^;\s,]+)/i)?.[1]?.toLowerCase();
+  return topViaIdentity(message)?.sentBy?.toLowerCase();
 }
 
 /** Reject inputs that cannot identify a cookie-based transaction. */
@@ -55,7 +117,7 @@ function validateRequestIdentity(request: SipRequestMessage): void {
 
 /** Extract the branch parameter from the top Via header. */
 export function branchOf(message: SipMessage): string | undefined {
-  return topViaOf(message)?.match(/(?:^|;)branch=([^;,\s]+)/i)?.[1];
+  return topViaIdentity(message)?.branch;
 }
 
 /** Client transaction key: top Via branch, normalized sent-by, and CSeq method. */
@@ -96,6 +158,7 @@ export class TransactionLayer implements MessageSink {
   private readonly servers = new Map<TransactionKey, ServerHandle>();
   private readonly subscribers = new Set<(event: TransactionLayerEvent) => void>();
   private readonly subscribersByKey = new Map<TransactionKey, Set<(event: TransactionLayerEvent) => void>>();
+  private readonly clientSubscribersByKey = new Map<TransactionKey, Set<(event: TransactionLayerEvent) => void>>();
 
   constructor(options: TransactionLayerOptions) {
     this.transport = options.transport;
@@ -127,11 +190,14 @@ export class TransactionLayer implements MessageSink {
       owner.delete(event.key);
     }
     this.emit(event);
-    this.emitToSubscribers(event);
+    this.emitToSubscribers(event, owner);
   }
 
   /** Fan out an event to global and transaction-key subscribers, isolating throws. */
-  private emitToSubscribers(event: TransactionLayerEvent): void {
+  private emitToSubscribers(
+    event: TransactionLayerEvent,
+    owner?: Map<TransactionKey, ClientHandle | ServerHandle>,
+  ): void {
     for (const listener of this.subscribers) {
       try {
         listener(event);
@@ -150,6 +216,14 @@ export class TransactionLayer implements MessageSink {
         listener(event);
       } catch {
         // A throwing subscriber must not break the layer or other listeners.
+      }
+    }
+    if (owner !== this.clients) return;
+    for (const listener of this.clientSubscribersByKey.get(key) ?? []) {
+      try {
+        listener(event);
+      } catch {
+        // A throwing client subscriber must not break the layer or others.
       }
     }
   }
@@ -181,6 +255,21 @@ export class TransactionLayer implements MessageSink {
     return () => {
       listeners.delete(keyedListener);
       if (listeners.size === 0) this.subscribersByKey.delete(keyOrListener);
+    };
+  }
+
+  /**
+   * Subscribe only to events emitted by the client transaction with `key`.
+   * Server events are excluded even when a server transaction shares the key.
+   */
+  subscribeClient(key: TransactionKey, listener: (event: TransactionLayerEvent) => void): () => void {
+    const listeners = this.clientSubscribersByKey.get(key)
+      ?? new Set<(event: TransactionLayerEvent) => void>();
+    listeners.add(listener);
+    this.clientSubscribersByKey.set(key, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) this.clientSubscribersByKey.delete(key);
     };
   }
 

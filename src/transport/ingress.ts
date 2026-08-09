@@ -31,8 +31,15 @@ export class SipIngress {
     switch (event.type) {
       case 'data': {
         const parsed = parseMessage(event.data);
-        if (parsed.ok) this.sink.receive(parsed.value);
-        else this.onError(parsed.error);
+        if (!parsed.ok) {
+          this.onError(parsed.error);
+          return;
+        }
+        try {
+          this.sink.receive(parsed.value);
+        } catch (error) {
+          this.onError(error instanceof Error ? error : new Error(String(error)));
+        }
         return;
       }
       case 'error':

@@ -35,7 +35,7 @@ function setup(overrides: Partial<{ reliable: boolean; uri: string; request: Sip
   const events: TransactionLayerEvent[] = [];
   const tx = new InviteClientTransaction({
     request,
-    key: 'branch|INVITE',
+    key: 'branch|example.com:5060|INVITE',
     transport,
     clock,
     timers: TIMERS,
@@ -106,8 +106,8 @@ describe('InviteClientTransaction', () => {
     expect(events.filter((e) => e.type === 'terminated')).toHaveLength(0);
     clock.advance(1);
     expect(tx.state).toBe('Terminated');
-    expect(events).toContainEqual({ type: 'timeout', key: 'branch|INVITE' });
-    expect(events).toContainEqual({ type: 'terminated', key: 'branch|INVITE' });
+    expect(events).toContainEqual({ type: 'timeout', key: 'branch|example.com:5060|INVITE' });
+    expect(events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|INVITE' });
   });
 
   it('1xx from Calling cancels A, emits, and moves to Proceeding', () => {
@@ -132,7 +132,7 @@ describe('InviteClientTransaction', () => {
     expect(tx.state).toBe('Accepted');
     clock.advance(1);
     expect(tx.state).toBe('Terminated');
-    expect(events).toContainEqual({ type: 'terminated', key: 'branch|INVITE' });
+    expect(events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|INVITE' });
   });
 
   it('timer B fires from Proceeding after a provisional', () => {
@@ -145,7 +145,7 @@ describe('InviteClientTransaction', () => {
     expect(events.filter((e) => e.type === 'timeout')).toHaveLength(0);
     clock.advance(1);
     expect(tx.state).toBe('Terminated');
-    expect(events).toContainEqual({ type: 'timeout', key: 'branch|INVITE' });
+    expect(events).toContainEqual({ type: 'timeout', key: 'branch|example.com:5060|INVITE' });
   });
 
   it('2xx from Proceeding moves to Accepted and arms M', () => {
@@ -156,7 +156,7 @@ describe('InviteClientTransaction', () => {
     expect(tx.state).toBe('Accepted');
     clock.advance(TIMERS.M);
     expect(tx.state).toBe('Terminated');
-    expect(events).toContainEqual({ type: 'terminated', key: 'branch|INVITE' });
+    expect(events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|INVITE' });
   });
 
   it('sent exactly once and no retransmits on a reliable transport', () => {
@@ -239,7 +239,7 @@ describe('InviteClientTransaction', () => {
     const events: TransactionLayerEvent[] = [];
     const tx = new InviteClientTransaction({
       request,
-      key: 'branch|INVITE',
+      key: 'branch|example.com:5060|INVITE',
       transport,
       clock,
       timers: TIMERS,
@@ -251,7 +251,7 @@ describe('InviteClientTransaction', () => {
     await Promise.resolve();
     expect(tx.state).toBe('Terminated');
     expect(events.filter((e) => e.type === 'transportError')).toHaveLength(1);
-    expect(events).toContainEqual({ type: 'terminated', key: 'branch|INVITE' });
+    expect(events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|INVITE' });
   });
 
   it('terminate() emits terminated', () => {
@@ -259,6 +259,6 @@ describe('InviteClientTransaction', () => {
     tx.start();
     tx.terminate();
     expect(tx.state).toBe('Terminated');
-    expect(events).toContainEqual({ type: 'terminated', key: 'branch|INVITE' });
+    expect(events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|INVITE' });
   });
 });

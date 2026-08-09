@@ -36,7 +36,7 @@ function setup(overrides: Partial<{ reliable: boolean }> = {}): Harness {
   const events: TransactionLayerEvent[] = [];
   const tx = new NonInviteServerTransaction({
     request,
-    key: 'branch|REGISTER',
+    key: 'branch|example.com:5060|REGISTER',
     transport,
     clock,
     timers: deriveTimers({ T1: 500, T2: 4000, T4: 5000 }, reliable),
@@ -83,7 +83,7 @@ describe('NonInviteServerTransaction', () => {
     expect(h.tx.state).toBe('Completed');
     h.clock.advance(1);
     expect(h.tx.state).toBe('Terminated');
-    expect(h.events).toContainEqual({ type: 'terminated', key: 'branch|REGISTER' });
+    expect(h.events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|REGISTER' });
   });
 
   it('duplicate in Trying/Proceeding/Completed resends the latest response when present', () => {
@@ -128,7 +128,7 @@ describe('NonInviteServerTransaction', () => {
     const events: TransactionLayerEvent[] = [];
     const tx = new NonInviteServerTransaction({
       request,
-      key: 'branch|REGISTER',
+      key: 'branch|example.com:5060|REGISTER',
       transport,
       clock,
       timers: TIMERS,

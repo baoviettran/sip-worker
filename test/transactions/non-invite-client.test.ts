@@ -35,7 +35,7 @@ function setup(overrides: Partial<{ reliable: boolean; request: SipRequestMessag
   const events: TransactionLayerEvent[] = [];
   const tx = new NonInviteClientTransaction({
     request,
-    key: 'branch|REGISTER',
+    key: 'branch|example.com:5060|REGISTER',
     transport,
     clock,
     timers: TIMERS,
@@ -125,8 +125,8 @@ describe('NonInviteClientTransaction', () => {
     expect(events.filter((e) => e.type === 'terminated')).toHaveLength(0);
     clock.advance(1);
     expect(tx.state).toBe('Terminated');
-    expect(events).toContainEqual({ type: 'timeout', key: 'branch|REGISTER' });
-    expect(events).toContainEqual({ type: 'terminated', key: 'branch|REGISTER' });
+    expect(events).toContainEqual({ type: 'timeout', key: 'branch|example.com:5060|REGISTER' });
+    expect(events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|REGISTER' });
   });
 
   it('200-699 from Trying/Proceeding cancels E/F, emits, starts K, moves to Completed', () => {
@@ -140,7 +140,7 @@ describe('NonInviteClientTransaction', () => {
     expect(transport.sent.length).toBe(1);
     // Timer K (=5000) fired during the F-length advance and terminated the tx.
     expect(tx.state).toBe('Terminated');
-    expect(events).toContainEqual({ type: 'terminated', key: 'branch|REGISTER' });
+    expect(events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|REGISTER' });
   });
 
   it('timer K boundary: terminates one ms before and exactly at K', () => {
@@ -153,7 +153,7 @@ describe('NonInviteClientTransaction', () => {
     expect(events.filter((e) => e.type === 'terminated')).toHaveLength(0);
     clock.advance(1);
     expect(tx.state).toBe('Terminated');
-    expect(events).toContainEqual({ type: 'terminated', key: 'branch|REGISTER' });
+    expect(events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|REGISTER' });
   });
 
   it('timer F fires from Proceeding after a provisional', () => {
@@ -166,7 +166,7 @@ describe('NonInviteClientTransaction', () => {
     expect(events.filter((e) => e.type === 'timeout')).toHaveLength(0);
     clock.advance(1);
     expect(tx.state).toBe('Terminated');
-    expect(events).toContainEqual({ type: 'timeout', key: 'branch|REGISTER' });
+    expect(events).toContainEqual({ type: 'timeout', key: 'branch|example.com:5060|REGISTER' });
   });
 
   it('final 488 from Proceeding completes, never retransmitted after K', () => {
@@ -231,7 +231,7 @@ describe('NonInviteClientTransaction', () => {
     const events: TransactionLayerEvent[] = [];
     const tx = new NonInviteClientTransaction({
       request,
-      key: 'branch|REGISTER',
+      key: 'branch|example.com:5060|REGISTER',
       transport,
       clock,
       timers: TIMERS,
@@ -243,7 +243,7 @@ describe('NonInviteClientTransaction', () => {
     await Promise.resolve();
     expect(tx.state).toBe('Terminated');
     expect(events.filter((e) => e.type === 'transportError')).toHaveLength(1);
-    expect(events).toContainEqual({ type: 'terminated', key: 'branch|REGISTER' });
+    expect(events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|REGISTER' });
   });
 
   it('terminate() emits terminated', () => {
@@ -251,6 +251,6 @@ describe('NonInviteClientTransaction', () => {
     tx.start();
     tx.terminate();
     expect(tx.state).toBe('Terminated');
-    expect(events).toContainEqual({ type: 'terminated', key: 'branch|REGISTER' });
+    expect(events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|REGISTER' });
   });
 });

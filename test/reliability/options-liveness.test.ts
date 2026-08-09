@@ -111,6 +111,25 @@ describe('OptionsLiveness', () => {
     expect(failures).toHaveLength(0);
   });
 
+  it('observes a final response delivered synchronously inside sendRequest', () => {
+    const { clock, transport, layer, requests, failures, liveness } = setup();
+    transport.onSend = () => {
+      const request = requests.at(-1);
+      if (request !== undefined) layer.receive(responseFor(request, 200));
+    };
+    liveness.start();
+
+    clock.advance(1000);
+    expect(requests).toHaveLength(1);
+    expect(failures).toEqual([]);
+
+    // The synchronous final response cleared probe 1, so the next cadence
+    // tick is free to send probe 2 instead of treating probe 1 as outstanding.
+    clock.advance(1000);
+    expect(requests).toHaveLength(2);
+    expect(failures).toEqual([]);
+  });
+
   it('does not complete a probe on a provisional response', () => {
     const { clock, layer, requests, liveness } = setup();
     liveness.start();

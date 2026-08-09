@@ -28,6 +28,10 @@ function makeTopVia(branch: string): string {
   return `SIP/2.0/UDP 192.0.2.1:5060;branch=${branch}`;
 }
 
+function routeNameAddr(uri: string): string {
+  return `<${uri}>`;
+}
+
 /** Extract the Contact URI from the first Contact header (RFC 3261 12.1.1). */
 function contactUri(headers: Headers): string | undefined {
   return extractUri(headers.get('Contact'));
@@ -220,11 +224,13 @@ export class Dialog {
     if (this.routeSetValues.length === 0) return;
     const first = this.routeSetValues[0] ?? '';
     if (isStrictRouter(first)) {
-      const route = [...this.routeSetValues.slice(1), this.remoteTarget].join(', ');
+      const route = [...this.routeSetValues.slice(1), this.remoteTarget]
+        .map(routeNameAddr)
+        .join(', ');
       headers.set('Route', route);
       return;
     }
-    headers.set('Route', this.routeSetValues.join(', '));
+    headers.set('Route', this.routeSetValues.map(routeNameAddr).join(', '));
   }
 }
 

@@ -35,7 +35,7 @@ function setup(overrides: Partial<{ reliable: boolean }> = {}): Harness {
   const events: TransactionLayerEvent[] = [];
   const tx = new InviteServerTransaction({
     request,
-    key: 'branch|INVITE',
+    key: 'branch|example.com:5060|INVITE',
     transport,
     clock,
     timers: TIMERS,
@@ -115,7 +115,7 @@ describe('InviteServerTransaction', () => {
     expect(h.tx.state).toBe('Accepted');
     h.clock.advance(1);
     expect(h.tx.state).toBe('Terminated');
-    expect(h.events).toContainEqual({ type: 'terminated', key: 'branch|INVITE' });
+    expect(h.events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|INVITE' });
   });
 
   it('Accepted repeated INVITE passes the request to the TU', () => {
@@ -181,8 +181,8 @@ describe('InviteServerTransaction', () => {
     expect(h.events.filter((e) => e.type === 'timeout')).toHaveLength(0);
     h.clock.advance(1);
     expect(h.tx.state).toBe('Terminated');
-    expect(h.events).toContainEqual({ type: 'timeout', key: 'branch|INVITE' });
-    expect(h.events).toContainEqual({ type: 'terminated', key: 'branch|INVITE' });
+    expect(h.events).toContainEqual({ type: 'timeout', key: 'branch|example.com:5060|INVITE' });
+    expect(h.events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|INVITE' });
   });
 
   it('Completed matching ACK cancels G/H, starts I, moves to Confirmed; no Timer H timeout', () => {
@@ -197,7 +197,7 @@ describe('InviteServerTransaction', () => {
     expect(h.events.filter((e) => e.type === 'timeout')).toHaveLength(0);
     h.clock.advance(1);
     expect(h.tx.state).toBe('Terminated');
-    expect(h.events).toContainEqual({ type: 'terminated', key: 'branch|INVITE' });
+    expect(h.events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|INVITE' });
   });
 
   it('reliable transport never arms G, still arms H and L, no retransmissions', () => {
@@ -211,7 +211,7 @@ describe('InviteServerTransaction', () => {
     // H still fires and terminates.
     h.clock.advance(TIMERS.H);
     expect(h.tx.state).toBe('Terminated');
-    expect(h.events).toContainEqual({ type: 'timeout', key: 'branch|INVITE' });
+    expect(h.events).toContainEqual({ type: 'timeout', key: 'branch|example.com:5060|INVITE' });
   });
 
   it('send failure emits transportError without discarding state; RFC timers still terminate', async () => {
@@ -222,7 +222,7 @@ describe('InviteServerTransaction', () => {
     const events: TransactionLayerEvent[] = [];
     const tx = new InviteServerTransaction({
       request,
-      key: 'branch|INVITE',
+      key: 'branch|example.com:5060|INVITE',
       transport,
       clock,
       timers: TIMERS,

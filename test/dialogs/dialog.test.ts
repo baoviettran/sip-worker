@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Dialog } from '../../src/dialogs/index.js';
 import type { IdGenerator } from '../../src/dialogs/index.js';
-import { Headers, makeRequest, makeResponse } from '../../src/messages/index.js';
+import { Headers, makeRequest, makeResponse, serializeMessage } from '../../src/messages/index.js';
 import type { SipRequestMessage, SipResponseMessage } from '../../src/messages/message.js';
 
 function topBranch(request: SipRequestMessage): string | undefined {
@@ -131,7 +131,21 @@ describe('dialog routing', () => {
     const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator());
     const bye = dialog.createRequest('BYE');
     expect(bye.uri).toBe('sip:bob@192.0.2.5:5060');
-    expect(bye.headers.get('Route')).toBe('sip:p2.example.com;lr, sip:p1.example.com;lr');
+    expect(bye.headers.get('Route')).toBe('<sip:p2.example.com;lr>, <sip:p1.example.com;lr>');
+    const wire = new TextDecoder().decode(serializeMessage(bye));
+    expect(wire).toContain('Route: <sip:p2.example.com;lr>, <sip:p1.example.com;lr>\r\n');
+  });
+
+  it('keeps a quoted comma in a Record-Route display name out of list splitting', () => {
+    const dialog = Dialog.fromUac(
+      makeInvite(),
+      make2xx(['"Edge, One" <sip:p1.example.com;lr>, <sip:p2.example.com;lr>']),
+      fakeIdGenerator(),
+    );
+    const bye = dialog.createRequest('BYE');
+
+    expect(bye.uri).toBe('sip:bob@192.0.2.5:5060');
+    expect(bye.headers.get('Route')).toBe('<sip:p2.example.com;lr>, <sip:p1.example.com;lr>');
   });
 
   it('uses the first strict route and appends the remote target to the remaining routes', () => {
@@ -146,8 +160,11 @@ describe('dialog routing', () => {
     const bye = dialog.createRequest('BYE');
     expect(bye.uri).toBe('sip:p1.example.com');
     expect(bye.headers.get('Route')).toBe(
-      'sip:p2.example.com;lr, sip:bob@192.0.2.5:5060',
+      '<sip:p2.example.com;lr>, <sip:bob@192.0.2.5:5060>',
     );
+    const wire = new TextDecoder().decode(serializeMessage(bye));
+    expect(wire).toMatch(/^BYE sip:p1\.example\.com SIP\/2\.0\r\n/);
+    expect(wire).toContain('Route: <sip:p2.example.com;lr>, <sip:bob@192.0.2.5:5060>\r\n');
   });
 
   it('uses the remote target directly when the route set is empty', () => {

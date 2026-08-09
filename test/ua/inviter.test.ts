@@ -269,6 +269,89 @@ function observeForkCleanups(h: Harness): Promise<void>[] {
 }
 
 describe('Inviter (outgoing SIP call session)', () => {
+  it('uses a distinct INVITE branch for a second Inviter while the first is in Accepted', async () => {
+    const h = setup();
+    const firstInvitation = h.inviter.invite();
+    await drainMicrotasks();
+    const firstInvite = h.sent.find((request) => request.method === 'INVITE')!;
+    receive(h, firstInvite, { sdp: STUB_SDP, toTag: 'bob-first' });
+    await firstInvitation;
+
+    const second = new Inviter({
+      to: REMOTE_URI,
+      from: AOR,
+      contact: CONTACT,
+      viaAddress: '192.0.2.1:5060',
+      idGenerator: h.idGenerator,
+      layer: h.layer,
+      clock: h.clock,
+      controller: h.controller,
+    });
+    const secondInvitation = second.invite();
+    await drainMicrotasks();
+
+    const invites = h.sent.filter((request) => request.method === 'INVITE');
+    expect(invites).toHaveLength(2);
+    expect(invites[1]!.headers.get('Via')).not.toBe(invites[0]!.headers.get('Via'));
+
+    receive(h, invites[1]!, { sdp: STUB_SDP, toTag: 'bob-second' });
+    await secondInvitation;
+    expect(second.session.state).toBe('confirmed');
+  });
+
+  it('ignores a server timeout that shares its accepted client transaction key', async () => {
+    const h = setup();
+    const invitation = h.inviter.invite();
+    await drainMicrotasks();
+    const invite = h.sent.find((request) => request.method === 'INVITE')!;
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-confirmed' });
+    await invitation;
+
+    h.layer.receive(invite);
+    const serverRequest = h.events.find((event) => event.type === 'request');
+    if (serverRequest?.type !== 'request') throw new Error('server transaction was not created');
+    h.layer.sendResponse(
+      serverRequest.transaction.key,
+      responseFor(invite, { statusCode: 486, toTag: 'local-server' }),
+    );
+
+    // Timer M terminates the accepted client while Timer H emits a same-key
+    // server timeout. Neither server event may fail the confirmed UA session.
+    h.clock.advance(32000);
+
+    expect(h.events).toContainEqual({ type: 'timeout', key: serverRequest.transaction.key });
+    expect(h.inviter.session.state).toBe('confirmed');
+  });
+
+  it.each([
+    [
+      'wrong branch',
+      (via: string): string => via.replace(/branch=[^;,\s]+/, 'branch=z9hG4bK-wrong-invite'),
+    ],
+    [
+      'wrong sent-by',
+      (via: string): string => via.replace('192.0.2.1:5060', '192.0.2.99:5060'),
+    ],
+  ])('ignores a keyless INVITE 2xx with the %s', async (_label, mutateVia) => {
+    const h = setup();
+    const invitation = h.inviter.invite();
+    await drainMicrotasks();
+    const invite = h.sent.find((request) => request.method === 'INVITE')!;
+    const mismatched = responseFor(invite, { sdp: STUB_SDP, toTag: 'wrong-key' });
+    mismatched.headers.set('Via', mutateVia(mismatched.headers.get('Via')!));
+
+    h.layer.receive(mismatched);
+    expect(h.events.at(-1)).toEqual(expect.objectContaining({ type: 'statelessResponse' }));
+    await drainMicrotasks();
+
+    await expectPending(invitation);
+    expect(h.inviter.session.state).toBe('inviting');
+
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-valid' });
+    await invitation;
+    expect(h.inviter.session.state).toBe('confirmed');
+  });
+
   it('ignores a keyless late OPTIONS 2xx with the INVITE dialog identity', async () => {
     const h = setup();
     const invitation = h.inviter.invite();
