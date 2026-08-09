@@ -5,10 +5,11 @@ import { UserAgent } from '../../src/ua/user-agent.js';
 import type { LivenessStrategy } from '../../src/reliability/index.js';
 import { parseMessage } from '../../src/messages/parser.js';
 import type { SipRequestMessage } from '../../src/messages/message.js';
-import { Headers, makeResponse, serializeMessage } from '../../src/messages/index.js';
+import { Headers, makeRequest, makeResponse, serializeMessage } from '../../src/messages/index.js';
 import { WorkerMediaController } from '../../src/media/worker-controller.js';
 import { STUB_SDP } from '../../src/media/index.js';
 import type { MediaMessage } from '../../src/media/index.js';
+import type { Invitation } from '../../src/ua/invitation.js';
 
 function makeIdGenerator() {
   let n = 0;
@@ -23,6 +24,34 @@ class RecordingLiveness implements LivenessStrategy {
   }
   stop(): void {
     this.calls.push('stop');
+  }
+}
+
+/** Transport that can hold ACK sends open to expose disposal continuations. */
+class DelayedAckTransport extends FakeTransport {
+  delayAcks = false;
+  byeAttempts = 0;
+  private ackResolvers: Array<() => void> = [];
+
+  override async send(data: Uint8Array): Promise<void> {
+    const parsed = parseMessage(data);
+    if (parsed.ok && parsed.value.kind === 'request' && parsed.value.method === 'BYE') {
+      this.byeAttempts += 1;
+    }
+    await super.send(data);
+    if (this.delayAcks && parsed.ok && parsed.value.kind === 'request' && parsed.value.method === 'ACK') {
+      await new Promise<void>((resolve) => this.ackResolvers.push(resolve));
+    }
+  }
+
+  get pendingAcks(): number {
+    return this.ackResolvers.length;
+  }
+
+  releaseAcks(): void {
+    const resolvers = this.ackResolvers;
+    this.ackResolvers = [];
+    for (const resolve of resolvers) resolve();
   }
 }
 
@@ -47,9 +76,11 @@ class FakeMediaPort {
   }
 }
 
-function setup(options: { liveness?: LivenessStrategy; intervalMs?: number; viaAddress?: string } = {}) {
+function setup(options: {
+  liveness?: LivenessStrategy; intervalMs?: number; viaAddress?: string; transport?: FakeTransport;
+} = {}) {
   const clock = new FakeClock();
-  const transport = new FakeTransport({ reliable: true, framing: 'stream' });
+  const transport = options.transport ?? new FakeTransport({ reliable: true, framing: 'stream' });
   const idGenerator = makeIdGenerator();
   const media = new FakeMediaPort();
   const mediaController = new WorkerMediaController(media);
@@ -81,6 +112,40 @@ function captureOutboundVia(transport: FakeTransport): string {
 /** Drain pending microtasks so the offer round-trip and INVITE send complete. */
 function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** Deliver an initial INVITE and return the public Invitation emitted by the UA. */
+function receiveIncomingCall(ua: UserAgent, transport: FakeTransport): Invitation {
+  let invitation: Invitation | undefined;
+  ua.once('incomingCall', (incoming: Invitation) => {
+    invitation = incoming;
+  });
+
+  const headers = new Headers();
+  headers.set('Via', 'SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-incoming');
+  headers.set('Max-Forwards', '70');
+  headers.set('From', '<sip:bob@example.com>;tag=bob-incoming');
+  headers.set('To', '<sip:alice@example.com>');
+  headers.set('Call-ID', 'incoming-call@example.com');
+  headers.set('CSeq', '1 INVITE');
+  headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
+  headers.set('Content-Type', 'application/sdp');
+  transport.emitData(serializeMessage(makeRequest(
+    'INVITE',
+    'sip:alice@example.com',
+    headers,
+    new TextEncoder().encode(STUB_SDP),
+  )));
+
+  if (invitation === undefined) throw new Error('UA did not emit an incoming invitation');
+  return invitation;
+}
+
+function sentResponses(transport: FakeTransport, statusCode: number): number {
+  return transport.sent.filter((bytes) => {
+    const parsed = parseMessage(bytes);
+    return parsed.ok && parsed.value.kind === 'response' && parsed.value.statusCode === statusCode;
+  }).length;
 }
 
 /** Deliver a 200 OK to the outbound INVITE, confirming the call. */
@@ -186,6 +251,127 @@ describe('UserAgent liveness wiring', () => {
     // timer runs on a 60s cadence, so a leaked refresh timer would survive this.
     clock.advance(1);
     expect(clock.pending()).toBe(0);
+  });
+});
+
+describe('UserAgent shutdown settlement', () => {
+  it('rejects an active register exactly once when disconnect is repeated', async () => {
+    const { ua } = setup();
+    await ua.connect();
+
+    let rejections = 0;
+    const registration = ua.register().catch((error: unknown) => {
+      rejections += 1;
+      throw error;
+    });
+
+    await ua.disconnect();
+    await ua.disconnect();
+
+    await expect(registration).rejects.toThrow('UserAgent disconnected');
+    expect(rejections).toBe(1);
+  });
+
+  it('rejects an active invite and releases its owner when disconnect is repeated', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+
+    let rejections = 0;
+    const invitation = ua.invite('sip:bob@example.com').catch((error: unknown) => {
+      rejections += 1;
+      throw error;
+    });
+    await flush();
+    expect(captureOutboundVia(transport)).not.toBe('');
+
+    await ua.disconnect();
+    await ua.disconnect();
+
+    await expect(invitation).rejects.toThrow('UserAgent disconnected');
+    expect(rejections).toBe(1);
+    expect(ua.callState).toBe('idle');
+  });
+
+  it('rejects an active answer and stops 200 retransmission on disconnect', async () => {
+    const { ua, transport, clock } = setup();
+    await ua.connect();
+    const invitation = receiveIncomingCall(ua, transport);
+    let rejections = 0;
+    const answer = invitation.answer(STUB_SDP).catch((error: unknown) => {
+      rejections += 1;
+      throw error;
+    });
+    await flush();
+    expect(sentResponses(transport, 200)).toBe(1);
+
+    await ua.disconnect();
+    await ua.disconnect();
+    const sentBeforeAdvance = transport.sent.length;
+    clock.advance(32000);
+
+    await expect(answer).rejects.toThrow('UserAgent disconnected');
+    expect(rejections).toBe(1);
+    expect(invitation.session.state).toBe('failed');
+    expect(transport.sent).toHaveLength(sentBeforeAdvance);
+  });
+
+  it('rejects an active hangup and releases dialog ownership on disconnect', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    const invite = ua.invite('sip:bob@example.com');
+    await confirmCall(transport);
+    await invite;
+
+    let rejections = 0;
+    const hangup = ua.bye().catch((error: unknown) => {
+      rejections += 1;
+      throw error;
+    });
+    await flush();
+
+    await ua.disconnect();
+    await ua.disconnect();
+
+    await expect(hangup).rejects.toThrow('UserAgent disconnected');
+    expect(rejections).toBe(1);
+    expect(ua.callState).toBe('idle');
+  });
+
+  it('does not start fork cleanup after a delayed ACK resumes following disconnect', async () => {
+    const transport = new DelayedAckTransport({ reliable: true, framing: 'stream' });
+    const { ua } = setup({ transport });
+    await ua.connect();
+    const invite = ua.invite('sip:bob@example.com');
+    await confirmCall(transport);
+    await invite;
+
+    const inviteBytes = transport.sent.find((bytes) => {
+      const parsed = parseMessage(bytes);
+      return parsed.ok && parsed.value.kind === 'request' && parsed.value.method === 'INVITE';
+    });
+    const parsedInvite = inviteBytes === undefined ? undefined : parseMessage(inviteBytes);
+    if (parsedInvite === undefined || !parsedInvite.ok || parsedInvite.value.kind !== 'request') {
+      throw new Error('no outbound INVITE to fork');
+    }
+    const request = parsedInvite.value;
+    const headers = new Headers();
+    headers.set('Via', request.headers.get('Via') ?? '');
+    headers.set('From', request.headers.get('From') ?? '');
+    headers.set('To', `${request.headers.get('To') ?? 'sip:bob@example.com'};tag=bob-2`);
+    headers.set('Call-ID', request.headers.get('Call-ID') ?? '');
+    headers.set('CSeq', request.headers.get('CSeq') ?? '');
+    headers.set('Contact', '<sip:bob@192.0.2.3:5060>');
+
+    transport.delayAcks = true;
+    transport.emitData(serializeMessage(makeResponse(200, 'OK', headers)));
+    await flush();
+    expect(transport.pendingAcks).toBe(1);
+
+    await ua.disconnect();
+    transport.releaseAcks();
+    await flush();
+
+    expect(transport.byeAttempts).toBe(0);
   });
 });
 

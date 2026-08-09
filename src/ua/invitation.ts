@@ -56,6 +56,7 @@ export class Invitation {
   private dialogValue: Dialog | undefined;
   private acceptedResponse: SipResponseMessage | undefined;
   private retransmitter: InviteResponseRetransmitter | undefined;
+  private disposed = false;
   readonly toTag: string;
 
   get dialog(): Dialog | undefined {
@@ -86,6 +87,9 @@ export class Invitation {
    * Rejects on ACK timeout (64*T1) or transport error.
    */
   answer(localSdp: string): Promise<void> {
+    if (this.disposed) {
+      return Promise.reject(new SipError(0, 'Invitation has been disposed'));
+    }
     if (this.state !== 'pending') {
       return Promise.reject(new SipError(0, 'answer() already called'));
     }
@@ -237,6 +241,7 @@ export class Invitation {
   }
 
   handleIncomingRequest(transaction: ServerTransaction, request: SipRequestMessage): void {
+    if (this.disposed) return;
     if (request.method === 'ACK') {
       this.onAckRequest(request);
       return;
@@ -271,6 +276,20 @@ export class Invitation {
     headers.set('Call-ID', request.headers.get('Call-ID') ?? '');
     headers.set('CSeq', request.headers.get('CSeq') ?? '');
     return makeResponse(statusCode, reason, headers);
+  }
+
+  /** Final shutdown: stop 2xx retransmission and reject a pending answer exactly once. */
+  dispose(error: unknown): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.state = 'terminated';
+    this.teardown();
+    const deferred = this.answerDeferred;
+    this.answerDeferred = undefined;
+    if (this.session.state !== 'terminated' && this.session.state !== 'failed') {
+      this.session.transition('failed', error instanceof Error ? error : new Error(String(error)));
+    }
+    deferred?.reject(error);
   }
 
   private matchesCancel(request: SipRequestMessage): boolean {

@@ -46,6 +46,11 @@ function cseqNumber(msg: SipRequestMessage | SipResponseMessage): number {
   return Number.parseInt(cseq.trim().split(/\s+/)[0] ?? '', 10);
 }
 
+interface CleanupOperation {
+  unsubscribe: () => void;
+  reject: (reason: unknown) => void;
+}
+
 export class Inviter {
   readonly session: Session;
   private readonly to: string;
@@ -71,6 +76,8 @@ export class Inviter {
   private dialogSet: DialogSet | undefined;
   private hangingUp = false;
   private hangupDeferred: { resolve: () => void; reject: (reason: unknown) => void } | undefined;
+  private disposed = false;
+  private readonly cleanupOperations = new Set<CleanupOperation>();
 
   constructor(options: InviterOptions) {
     this.session = new Session();
@@ -97,6 +104,9 @@ export class Inviter {
    * Rejects with SipError on non-2xx final, timeout, or transport error.
    */
   invite(): Promise<void> {
+    if (this.disposed) {
+      return Promise.reject(new SipError(0, 'Inviter has been disposed'));
+    }
     if (this.invitePromise !== undefined) {
       return Promise.reject(new SipError(0, 'invite() already called'));
     }
@@ -114,6 +124,9 @@ export class Inviter {
    * Resolves when the BYE 2xx is received.
    */
   hangup(): Promise<void> {
+    if (this.disposed) {
+      return Promise.reject(new SipError(0, 'Inviter has been disposed'));
+    }
     if (this.dialog === undefined) {
       return Promise.reject(new SipError(0, 'hangup() called before call was confirmed'));
     }
@@ -139,11 +152,13 @@ export class Inviter {
     try {
       // Obtain SDP offer FIRST
       const sdp = await this.controller.createOffer(this.sessionId);
+      if (this.disposed) return;
       const request = this.buildInviteRequest(sdp);
       this.currentRequest = request;
       this.session.transition('inviting');
       this.sendAttempt(request);
     } catch (err) {
+      if (this.disposed) return;
       this.fail(err);
     }
   }
@@ -259,6 +274,7 @@ export class Inviter {
   }
 
   private async onSuccess(response: SipResponseMessage): Promise<void> {
+    if (this.disposed) return;
     // Lazily create the DialogSet on the first 2xx
     if (this.dialogSet === undefined) {
       this.dialogSet = new DialogSet(
@@ -274,9 +290,11 @@ export class Inviter {
       await this.dialogSet.handleSuccess(response);
     } catch (err) {
       // Malformed 2xx (missing To tag/Contact) - fail the invite if still pending
+      if (this.disposed) return;
       this.fail(err);
       return;
     }
+    if (this.disposed) return;
 
     // Set remote SDP from every 2xx (the selected dialog's answer)
     const sdp = DialogSet.sdpFromBody(response);
@@ -340,35 +358,51 @@ export class Inviter {
    * final / timeout / transport error), then unsubscribes.
    */
   private sendByeForDialog(dialog: Dialog): Promise<void> {
+    if (this.disposed) {
+      return Promise.reject(new SipError(0, 'Inviter has been disposed'));
+    }
     const bye = dialog.createRequest('BYE');
     return new Promise<void>((resolve, reject) => {
-      let unsubscribe = (): void => {};
+      let active = true;
+      const operation: CleanupOperation = {
+        unsubscribe: () => {},
+        reject: () => {},
+      };
+      const settle = (succeeded: boolean, reason?: unknown): void => {
+        if (!active) return;
+        active = false;
+        operation.unsubscribe();
+        this.cleanupOperations.delete(operation);
+        if (succeeded) resolve();
+        else reject(reason);
+      };
+      operation.reject = (reason) => settle(false, reason);
+      this.cleanupOperations.add(operation);
       try {
         sendOwnedRequest(
           this.layer,
           bye,
-          (next) => { unsubscribe = next; },
+          (next) => {
+            if (active) operation.unsubscribe = next;
+            else next();
+          },
           (event: TransactionLayerEvent) => {
             if (event.type === 'response') {
               if (cseqNumber(event.response) === cseqNumber(bye)) {
                 const code = event.response.statusCode;
                 if (code >= 200 && code < 300) {
-                  unsubscribe();
-                  resolve();
+                  settle(true);
                 } else if (code >= 300) {
-                  unsubscribe();
-                  reject(new SipError(code, `BYE rejected with ${code}`));
+                  settle(false, new SipError(code, `BYE rejected with ${code}`));
                 }
               }
             } else if (event.type === 'timeout' || event.type === 'transportError') {
-              unsubscribe();
-              reject(new SipError(0, `BYE ${event.type}`));
+              settle(false, new SipError(0, `BYE ${event.type}`));
             }
           },
         );
       } catch (err) {
-        unsubscribe();
-        reject(err);
+        settle(false, err);
       }
     });
   }
@@ -401,6 +435,7 @@ export class Inviter {
 
   /** Handle a request addressed to the confirmed dialog. */
   handleIncomingRequest(transaction: ServerTransaction, request: SipRequestMessage): void {
+    if (this.disposed) return;
     const dialog = this.dialog;
     if (dialog === undefined || request.method !== 'BYE' || !dialog.matchesRequest(request) || !dialog.receiveRequest(request)) {
       this.layer.sendResponse(transaction.key, this.requestResponse(request, 481, 'Call/Transaction Does Not Exist'));
@@ -426,6 +461,27 @@ export class Inviter {
     headers.set('Call-ID', request.headers.get('Call-ID') ?? '');
     headers.set('CSeq', request.headers.get('CSeq') ?? '');
     return makeResponse(statusCode, reason, headers);
+  }
+
+  /** Final shutdown: detach operation listeners and reject pending public operations exactly once. */
+  dispose(error: unknown): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.teardown();
+
+    const inviteDeferred = this.inviteDeferred;
+    this.inviteDeferred = undefined;
+    const hangupDeferred = this.hangupDeferred;
+    this.hangupDeferred = undefined;
+
+    for (const operation of [...this.cleanupOperations]) operation.reject(error);
+    this.cleanupOperations.clear();
+
+    if (this.session.state !== 'terminated' && this.session.state !== 'failed') {
+      this.session.transition('failed', error instanceof Error ? error : new Error(String(error)));
+    }
+    inviteDeferred?.reject(error);
+    hangupDeferred?.reject(error);
   }
 
   private fail(reason: unknown): void {

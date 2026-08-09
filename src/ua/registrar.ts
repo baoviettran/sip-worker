@@ -110,6 +110,7 @@ export class Registrar {
   private reconnectPending = false;
   private unsubscribe: (() => void) | undefined;
   private deferred: { resolve: () => void; reject: (reason: unknown) => void } | undefined;
+  private disposed = false;
 
   constructor(options: RegistrarOptions) {
     this.layer = options.layer;
@@ -143,6 +144,9 @@ export class Registrar {
    * finals, timeout, or transport error.
    */
   register(): Promise<void> {
+    if (this.disposed) {
+      return Promise.reject(new SipError(0, 'Registrar has been disposed'));
+    }
     if (this.stateValue === 'registering' || this.stateValue === 'unregistering') {
       return Promise.reject(new SipError(0, 'a registration exchange is already in progress'));
     }
@@ -161,6 +165,9 @@ export class Registrar {
    * and `Expires: 0`. Resolves only on the 2xx.
    */
   unregister(): Promise<void> {
+    if (this.disposed) {
+      return Promise.reject(new SipError(0, 'Registrar has been disposed'));
+    }
     if (this.stateValue === 'registering' || this.stateValue === 'unregistering') {
       return Promise.reject(new SipError(0, 'a registration exchange is already in progress'));
     }
@@ -171,6 +178,7 @@ export class Registrar {
 
   /** UA hook: transport is up again after a loss — re-issue the registration. */
   onTransportConnected(): void {
+    if (this.disposed) return;
     if (!this.reconnectPending) return;
     this.reconnectPending = false;
     void this.register();
@@ -178,6 +186,7 @@ export class Registrar {
 
   /** UA hook: transport lost — settle any in-flight exchange, drop to unregistered, cancel refresh. */
   onTransportDisconnected(): void {
+    if (this.disposed) return;
     this.teardownExchange();
     this.releaseAuthBudget();
     this.cancelRefresh();
@@ -388,10 +397,20 @@ export class Registrar {
     }
   }
 
-  /** Final shutdown: cancel the refresh timer and detach the exchange listener. */
-  dispose(): void {
+  /** Final shutdown: reject the active exchange and release every owned resource exactly once. */
+  dispose(error: unknown): void {
+    if (this.disposed) return;
+    this.disposed = true;
     this.teardownExchange();
+    this.releaseAuthBudget();
     this.cancelRefresh();
+    this.reconnectPending = false;
+    const deferred = this.deferred;
+    this.deferred = undefined;
+    if (deferred !== undefined) {
+      this.stateValue = 'failed';
+      deferred.reject(error);
+    }
   }
 
   private settle(): void {

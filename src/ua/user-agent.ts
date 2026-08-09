@@ -19,6 +19,7 @@
 import type { Transport, Clock } from '../transport/index.js';
 import { SipIngress } from '../transport/index.js';
 import type { MessageSink } from '../transport/ingress.js';
+import { SipError } from '../errors.js';
 import { TransactionLayer, deriveTimers, DEFAULT_TIMERS } from '../transactions/index.js';
 import type { TransactionLayerEvent } from '../transactions/types.js';
 import { Registrar } from './registrar.js';
@@ -301,6 +302,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
   async disconnect(): Promise<void> {
     if (this.disconnected) return;
     this.disconnected = true;
+    const error = new SipError(0, 'UserAgent disconnected');
 
     // Stop liveness before tearing down the transport.
     this.liveness?.stop();
@@ -314,6 +316,18 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     this.transportUnsubscribe?.();
     this.transportUnsubscribe = undefined;
 
+    // Settle and release operation owners before closing the transport. Session
+    // transitions synchronously remove their indexed ownership; the explicit
+    // clears below make shutdown complete even for already-terminal owners.
+    this.registrar?.dispose(error);
+    const owners = new Set<DialogOwner>(this.dialogOwners.values());
+    if (this.activeInviter !== undefined) owners.add(this.activeInviter);
+    for (const invitation of this.activeInvitations.values()) owners.add(invitation);
+    for (const owner of owners) owner.dispose(error);
+    this.activeInviter = undefined;
+    this.activeInvitations.clear();
+    this.dialogOwners.clear();
+
     // Disconnect transport
     if (this.connected) {
       await this.transport.disconnect();
@@ -322,7 +336,6 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
 
     // Clear references
     this.layer = undefined;
-    this.registrar?.dispose();
     this.registrar = undefined;
   }
 
