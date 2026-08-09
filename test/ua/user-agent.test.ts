@@ -10,6 +10,7 @@ import { WorkerMediaController } from '../../src/media/worker-controller.js';
 import { STUB_SDP } from '../../src/media/index.js';
 import type { MediaMessage } from '../../src/media/index.js';
 import type { Invitation } from '../../src/ua/invitation.js';
+import type { Inviter } from '../../src/ua/inviter.js';
 
 function makeIdGenerator() {
   let n = 0;
@@ -52,6 +53,36 @@ class DelayedAckTransport extends FakeTransport {
     const resolvers = this.ackResolvers;
     this.ackResolvers = [];
     for (const resolve of resolvers) resolve();
+  }
+}
+
+/** Transport that exposes a pending connection so shutdown can win the race. */
+class DelayedConnectTransport extends FakeTransport {
+  private release: (() => void) | undefined;
+
+  override async connect(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      this.release = resolve;
+    });
+    await super.connect();
+  }
+
+  override async disconnect(): Promise<void> {
+    const release = this.release;
+    this.release = undefined;
+    release?.();
+    await super.disconnect();
+  }
+
+  get connectPending(): boolean {
+    return this.release !== undefined;
+  }
+
+  releaseConnect(): void {
+    const release = this.release;
+    this.release = undefined;
+    if (release === undefined) throw new Error('connect was not pending');
+    release();
   }
 }
 
@@ -175,6 +206,44 @@ async function confirmCall(transport: FakeTransport): Promise<void> {
   transport.emitData(serializeMessage(makeResponse(200, 'OK', headers)));
 }
 
+function sentRequests(transport: FakeTransport, method: string): SipRequestMessage[] {
+  const requests: SipRequestMessage[] = [];
+  for (const bytes of transport.sent) {
+    const parsed = parseMessage(bytes);
+    if (parsed.ok && parsed.value.kind === 'request' && parsed.value.method === method) {
+      requests.push(parsed.value);
+    }
+  }
+  return requests;
+}
+
+function createRemoteBye(transport: FakeTransport): SipRequestMessage {
+  const invite = sentRequests(transport, 'INVITE')[0];
+  if (invite === undefined) throw new Error('no INVITE for remote BYE');
+  const headers = new Headers();
+  headers.set('Via', 'SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-remote-bye');
+  headers.set('Call-ID', invite.headers.get('Call-ID') ?? '');
+  headers.set('From', `${invite.headers.get('To') ?? '<sip:bob@example.com>'};tag=bob-1`);
+  headers.set('To', invite.headers.get('From') ?? '');
+  headers.set('CSeq', '1 BYE');
+  return makeRequest('BYE', 'sip:alice@example.com', headers);
+}
+
+function disconnectOnRequest(
+  ua: UserAgent,
+  transport: FakeTransport,
+  method: string,
+): () => Promise<void> | undefined {
+  let disconnect: Promise<void> | undefined;
+  transport.onSend = (bytes) => {
+    const parsed = parseMessage(bytes);
+    if (disconnect === undefined && parsed.ok && parsed.value.kind === 'request' && parsed.value.method === method) {
+      disconnect = ua.disconnect();
+    }
+  };
+  return () => disconnect;
+}
+
 /** All sent OPTIONS requests, parsed. */
 function sentOptions(transport: FakeTransport): SipRequestMessage[] {
   const out: SipRequestMessage[] = [];
@@ -246,15 +315,30 @@ describe('UserAgent liveness wiring', () => {
     // A successful registration arms the registrar's refresh timer.
     expect(clock.pending()).toBeGreaterThan(0);
     await ua.disconnect();
-    // Flush the already-completed REGISTER transaction's Timer K (K=0 on a reliable
-    // transport, so it terminates on the next clock tick). The registrar's refresh
-    // timer runs on a 60s cadence, so a leaked refresh timer would survive this.
-    clock.advance(1);
+    // Shutdown owns both the registrar refresh and its completed client transaction.
     expect(clock.pending()).toBe(0);
   });
 });
 
 describe('UserAgent shutdown settlement', () => {
+  it('does not resume connection setup after disconnect wins a pending connect', async () => {
+    const transport = new DelayedConnectTransport({ reliable: true, framing: 'stream' });
+    const liveness = new RecordingLiveness();
+    const { ua } = setup({ transport, liveness });
+
+    const connecting = ua.connect();
+    expect(transport.connectPending).toBe(true);
+    const rejection = expect(connecting).rejects.toThrow('UserAgent disconnected');
+    await ua.disconnect();
+    const connectWasPending = transport.connectPending;
+    if (connectWasPending) transport.releaseConnect();
+
+    await rejection;
+    expect(connectWasPending).toBe(false);
+    expect(transport.isConnected()).toBe(false);
+    expect(liveness.calls).toEqual([]);
+  });
+
   it('rejects an active register exactly once when disconnect is repeated', async () => {
     const { ua } = setup();
     await ua.connect();
@@ -335,6 +419,176 @@ describe('UserAgent shutdown settlement', () => {
     await expect(hangup).rejects.toThrow('UserAgent disconnected');
     expect(rejections).toBe(1);
     expect(ua.callState).toBe('idle');
+  });
+
+  it('owns hangup before a terminating listener disconnects re-entrantly', async () => {
+    const transport = new DelayedAckTransport({ reliable: true, framing: 'stream' });
+    const { ua } = setup({ transport });
+    await ua.connect();
+    const invite = ua.invite('sip:bob@example.com');
+    await confirmCall(transport);
+    await invite;
+
+    let disconnect: Promise<void> | undefined;
+    ua.on('stateChanged', (event: { state: string }) => {
+      if (event.state === 'terminating') disconnect = ua.disconnect();
+    });
+
+    const hangup = ua.bye();
+    const rejection = expect(hangup).rejects.toThrow('UserAgent disconnected');
+    if (disconnect === undefined) throw new Error('terminating listener did not disconnect');
+    await disconnect;
+    await rejection;
+
+    expect(transport.byeAttempts).toBe(0);
+    expect(ua.callState).toBe('idle');
+  });
+
+  it('rejects a new outgoing owner created from an incoming-owner dispose callback', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    const incoming = receiveIncomingCall(ua, transport);
+    const answer = incoming.answer(STUB_SDP);
+    const answerRejection = expect(answer).rejects.toThrow('UserAgent disconnected');
+    await flush();
+
+    let spawned: Promise<void> | undefined;
+    ua.on('stateChanged', (event: { state: string }) => {
+      if (event.state === 'failed' && spawned === undefined) {
+        spawned = ua.invite('sip:carol@example.com');
+      }
+    });
+
+    await ua.disconnect();
+    await answerRejection;
+    if (spawned === undefined) throw new Error('dispose callback did not attempt a new invite');
+    await expect(spawned).rejects.toThrow('UserAgent disconnected');
+    expect(sentRequests(transport, 'INVITE')).toHaveLength(0);
+    expect(ua.callState).toBe('idle');
+  });
+
+  it('settles invite before a confirmed listener disconnects re-entrantly', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    let disconnect: Promise<void> | undefined;
+    ua.on('stateChanged', (event: { state: string }) => {
+      if (event.state === 'confirmed') disconnect = ua.disconnect();
+    });
+
+    const invite = ua.invite('sip:bob@example.com');
+    const outcome = invite.then(
+      () => ({ resolved: true as const }),
+      (error: unknown) => ({ resolved: false as const, error }),
+    );
+    await confirmCall(transport);
+    const result = await outcome;
+    if (disconnect === undefined) throw new Error('confirmed listener did not disconnect');
+    await disconnect;
+
+    expect(result).toEqual({ resolved: true });
+    expect(ua.callState).toBe('idle');
+  });
+
+  it('does not overwrite failed when a remote-BYE response send disconnects re-entrantly', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    const invite = ua.invite('sip:bob@example.com');
+    await confirmCall(transport);
+    await invite;
+    const owner = (ua as unknown as { activeInviter?: Inviter }).activeInviter;
+    if (owner === undefined) throw new Error('outgoing owner missing');
+
+    let disconnect: Promise<void> | undefined;
+    transport.onSend = (bytes) => {
+      const parsed = parseMessage(bytes);
+      if (parsed.ok && parsed.value.kind === 'response'
+        && parsed.value.headers.get('CSeq')?.endsWith(' BYE')) {
+        disconnect = ua.disconnect();
+      }
+    };
+    transport.emitData(serializeMessage(createRemoteBye(transport)));
+    if (disconnect === undefined) throw new Error('BYE response send did not disconnect');
+    await disconnect;
+
+    expect(owner.session.state).toBe('failed');
+  });
+
+  it('terminates a REGISTER transaction installed after synchronous disconnect', async () => {
+    const { ua, transport, clock } = setup();
+    await ua.connect();
+    const getDisconnect = disconnectOnRequest(ua, transport, 'REGISTER');
+
+    const registration = ua.register();
+    const rejection = expect(registration).rejects.toThrow('UserAgent disconnected');
+    const disconnect = getDisconnect();
+    if (disconnect === undefined) throw new Error('REGISTER send did not disconnect');
+    await disconnect;
+    await rejection;
+
+    const sentBeforeAdvance = transport.sent.length;
+    expect(clock.pending()).toBe(0);
+    clock.advance(32000);
+    expect(transport.sent).toHaveLength(sentBeforeAdvance);
+  });
+
+  it('terminates an INVITE transaction installed after synchronous disconnect', async () => {
+    const { ua, transport, clock } = setup();
+    await ua.connect();
+    const getDisconnect = disconnectOnRequest(ua, transport, 'INVITE');
+
+    const invitation = ua.invite('sip:bob@example.com');
+    const rejection = expect(invitation).rejects.toThrow('UserAgent disconnected');
+    await flush();
+    const disconnect = getDisconnect();
+    if (disconnect === undefined) throw new Error('INVITE send did not disconnect');
+    await disconnect;
+    await rejection;
+
+    const sentBeforeAdvance = transport.sent.length;
+    expect(clock.pending()).toBe(0);
+    clock.advance(32000);
+    expect(transport.sent).toHaveLength(sentBeforeAdvance);
+  });
+
+  it('terminates a selected BYE transaction installed after synchronous disconnect', async () => {
+    const { ua, transport, clock } = setup();
+    await ua.connect();
+    const invite = ua.invite('sip:bob@example.com');
+    await confirmCall(transport);
+    await invite;
+    const getDisconnect = disconnectOnRequest(ua, transport, 'BYE');
+
+    const hangup = ua.bye();
+    const rejection = expect(hangup).rejects.toThrow('UserAgent disconnected');
+    const disconnect = getDisconnect();
+    if (disconnect === undefined) throw new Error('BYE send did not disconnect');
+    await disconnect;
+    await rejection;
+
+    const sentBeforeAdvance = transport.sent.length;
+    expect(clock.pending()).toBe(0);
+    clock.advance(32000);
+    expect(transport.sent).toHaveLength(sentBeforeAdvance);
+  });
+
+  it('detaches the UA session listener from a retained invitation on disconnect', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    const invitation = receiveIncomingCall(ua, transport);
+    const answer = invitation.answer(STUB_SDP);
+    const rejection = expect(answer).rejects.toThrow('UserAgent disconnected');
+    await flush();
+
+    let stateEvents = 0;
+    ua.on('stateChanged', () => {
+      stateEvents += 1;
+    });
+    await ua.disconnect();
+    await rejection;
+    const eventsAtDisconnect = stateEvents;
+
+    invitation.session.transition('ringing');
+    expect(stateEvents).toBe(eventsAtDisconnect);
   });
 
   it('does not start fork cleanup after a delayed ACK resumes following disconnect', async () => {

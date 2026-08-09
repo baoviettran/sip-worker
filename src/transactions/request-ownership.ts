@@ -8,28 +8,29 @@ import type { TransactionKey, TransactionLayerEvent } from './types.js';
  * events emitted synchronously by `sendRequest`; once the returned key is known,
  * the same client-only subscription owns the operation.
  *
- * `install` runs before buffered events are replayed so a synchronous terminal
- * response can tear down the keyed listener without leaking it.
+ * The installed disposer detaches the listener and terminates the underlying
+ * client transaction, stopping transaction-owned timers and retransmissions.
+ * It is installed before buffered events replay so synchronous teardown is safe.
  */
 export function sendOwnedRequest(
   layer: TransactionLayer,
   request: SipRequestMessage,
-  install: (unsubscribe: () => void, key: TransactionKey) => void,
+  install: (dispose: () => void, key: TransactionKey) => void,
   listener: (event: TransactionLayerEvent) => void,
 ): void {
   const buffered: TransactionLayerEvent[] = [];
   const anticipatedKey = clientKey(request);
   const unsubscribeBuffer = layer.subscribeClient(anticipatedKey, (event) => buffered.push(event));
 
-  let key = anticipatedKey;
+  let transaction: ReturnType<TransactionLayer['sendRequest']>;
   try {
-    const transaction = layer.sendRequest(request);
-    key = transaction.key;
+    transaction = layer.sendRequest(request);
   } catch (error) {
     unsubscribeBuffer();
     throw error;
   }
 
+  const key = transaction.key;
   let active = true;
   const deliver = (event: TransactionLayerEvent): void => {
     if (!active) return;
@@ -40,14 +41,16 @@ export function sendOwnedRequest(
     }
   };
   const unsubscribeKeyed = layer.subscribeClient(key, deliver);
-  const unsubscribe = (): void => {
-    if (!active) return;
-    active = false;
-    unsubscribeKeyed();
+  const dispose = (): void => {
+    if (active) {
+      active = false;
+      unsubscribeKeyed();
+    }
+    transaction.terminate();
   };
 
   unsubscribeBuffer();
-  install(unsubscribe, key);
+  install(dispose, key);
   for (const event of buffered) {
     deliver(event);
     if (!active) break;

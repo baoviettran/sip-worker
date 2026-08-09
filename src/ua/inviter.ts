@@ -47,7 +47,7 @@ function cseqNumber(msg: SipRequestMessage | SipResponseMessage): number {
 }
 
 interface CleanupOperation {
-  unsubscribe: () => void;
+  disposeRequest: () => void;
   reject: (reason: unknown) => void;
 }
 
@@ -77,6 +77,7 @@ export class Inviter {
   private hangingUp = false;
   private hangupDeferred: { resolve: () => void; reject: (reason: unknown) => void } | undefined;
   private disposed = false;
+  private requestVersion = 0;
   private readonly cleanupOperations = new Set<CleanupOperation>();
 
   constructor(options: InviterOptions) {
@@ -135,11 +136,16 @@ export class Inviter {
     }
 
     this.hangingUp = true;
-    this.session.transition('terminating');
-
+    const dialog = this.dialog;
     return new Promise<void>((resolve, reject) => {
       this.hangupDeferred = { resolve, reject };
-      this.sendBye(this.dialog!);
+      this.session.transition('terminating');
+      if (this.disposed) return;
+      if (dialog === undefined) {
+        this.failHangup(new SipError(0, 'hangup() called before call was confirmed'));
+        return;
+      }
+      this.sendBye(dialog);
     });
   }
 
@@ -191,6 +197,7 @@ export class Inviter {
 
   private attachListener(request: SipRequestMessage): void {
     this.teardown();
+    const requestVersion = this.requestVersion;
     let inviteKey: TransactionKey | undefined;
     const unsubscribeStateless = this.layer.subscribe((event: TransactionLayerEvent) => {
       if (event.type !== 'statelessResponse') return;
@@ -217,12 +224,17 @@ export class Inviter {
     sendOwnedRequest(
       this.layer,
       request,
-      (unsubscribeOwned, key) => {
+      (disposeOwned, key) => {
         inviteKey = key;
-        this.unsubscribe = () => {
-          unsubscribeOwned();
+        const disposeRequest = () => {
+          disposeOwned();
           unsubscribeStateless();
         };
+        if (this.disposed || requestVersion !== this.requestVersion) {
+          disposeRequest();
+          return;
+        }
+        this.unsubscribe = disposeRequest;
       },
       (event: TransactionLayerEvent) => {
         if (event.type === 'response') {
@@ -304,11 +316,11 @@ export class Inviter {
 
     // Transition to confirmed and resolve the invite promise once, on the
     // first (selected) dialog. Repeated/forked 2xx produce no state change.
-    if (this.inviteDeferred !== undefined && this.dialogSet.hasSelection) {
-      this.session.transition('confirmed');
-      const deferred = this.inviteDeferred;
+    const deferred = this.inviteDeferred;
+    if (deferred !== undefined && this.dialogSet.hasSelection) {
       this.inviteDeferred = undefined;
       deferred.resolve();
+      this.session.transition('confirmed');
     }
   }
 
@@ -365,13 +377,13 @@ export class Inviter {
     return new Promise<void>((resolve, reject) => {
       let active = true;
       const operation: CleanupOperation = {
-        unsubscribe: () => {},
+        disposeRequest: () => {},
         reject: () => {},
       };
       const settle = (succeeded: boolean, reason?: unknown): void => {
         if (!active) return;
         active = false;
-        operation.unsubscribe();
+        operation.disposeRequest();
         this.cleanupOperations.delete(operation);
         if (succeeded) resolve();
         else reject(reason);
@@ -383,7 +395,7 @@ export class Inviter {
           this.layer,
           bye,
           (next) => {
-            if (active) operation.unsubscribe = next;
+            if (active) operation.disposeRequest = next;
             else next();
           },
           (event: TransactionLayerEvent) => {
@@ -409,19 +421,24 @@ export class Inviter {
 
   private attachByeListener(request: SipRequestMessage): void {
     this.teardown();
+    const requestVersion = this.requestVersion;
     sendOwnedRequest(
       this.layer,
       request,
-      (unsubscribe) => {
-        this.unsubscribe = unsubscribe;
+      (disposeRequest) => {
+        if (this.disposed || requestVersion !== this.requestVersion) {
+          disposeRequest();
+          return;
+        }
+        this.unsubscribe = disposeRequest;
       },
       (event: TransactionLayerEvent) => {
         if (event.type === 'response') {
           if (cseqNumber(event.response) === cseqNumber(request)) {
             const code = event.response.statusCode;
             if (code >= 200 && code < 300) {
-              this.session.transition('terminated');
               this.settleHangup();
+              this.session.transition('terminated');
             } else if (code >= 300) {
               this.failHangup(new SipError(code, `BYE rejected with ${code}`));
             }
@@ -442,15 +459,17 @@ export class Inviter {
       return;
     }
     this.layer.sendResponse(transaction.key, this.requestResponse(request, 200, 'OK'));
+    if (this.disposed) return;
     this.teardown();
     const inviteDeferred = this.inviteDeferred;
     this.inviteDeferred = undefined;
     if (inviteDeferred !== undefined) {
-      this.session.transition('confirmed');
       inviteDeferred.resolve();
+      this.session.transition('confirmed');
+      if (this.disposed) return;
     }
-    this.session.transition('terminated');
     this.settleHangup();
+    this.session.transition('terminated');
   }
 
   private requestResponse(request: SipRequestMessage, statusCode: number, reason: string): SipResponseMessage {
@@ -486,10 +505,10 @@ export class Inviter {
 
   private fail(reason: unknown): void {
     this.teardown();
-    this.session.transition('failed', reason instanceof Error ? reason : undefined);
     const deferred = this.inviteDeferred;
     this.inviteDeferred = undefined;
     if (deferred !== undefined) deferred.reject(reason);
+    this.session.transition('failed', reason instanceof Error ? reason : undefined);
   }
 
   private settleHangup(): void {
@@ -507,6 +526,7 @@ export class Inviter {
   }
 
   private teardown(): void {
+    this.requestVersion += 1;
     if (this.unsubscribe !== undefined) {
       this.unsubscribe();
       this.unsubscribe = undefined;

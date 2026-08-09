@@ -114,8 +114,9 @@ export class NonInviteClientTransaction {
     if (this.currentState === 'Trying' || this.currentState === 'Proceeding') {
       this.cancelTimerE();
       this.cancelTimerF();
-      this.emitResponse(response);
       this.currentState = 'Completed';
+      this.emitResponse(response);
+      if (this.currentState !== 'Completed') return;
       this.armTimerK();
     }
   }

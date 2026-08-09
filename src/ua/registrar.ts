@@ -110,6 +110,7 @@ export class Registrar {
   private reconnectPending = false;
   private unsubscribe: (() => void) | undefined;
   private deferred: { resolve: () => void; reject: (reason: unknown) => void } | undefined;
+  private requestVersion = 0;
   private disposed = false;
 
   constructor(options: RegistrarOptions) {
@@ -242,11 +243,16 @@ export class Registrar {
   /** Send one attempt and install its exact returned transaction-key listener. */
   private attachListener(request: SipRequestMessage): void {
     this.teardownExchange();
+    const requestVersion = this.requestVersion;
     sendOwnedRequest(
       this.layer,
       request,
-      (unsubscribe) => {
-        this.unsubscribe = unsubscribe;
+      (disposeRequest) => {
+        if (this.disposed || requestVersion !== this.requestVersion) {
+          disposeRequest();
+          return;
+        }
+        this.unsubscribe = disposeRequest;
       },
       (event: TransactionLayerEvent) => {
         switch (event.type) {
@@ -437,6 +443,7 @@ export class Registrar {
 
   /** Remove the single transaction listener for the active attempt. */
   private teardownExchange(): void {
+    this.requestVersion += 1;
     if (this.unsubscribe !== undefined) {
       this.unsubscribe();
       this.unsubscribe = undefined;

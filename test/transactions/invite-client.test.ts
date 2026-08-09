@@ -261,4 +261,60 @@ describe('InviteClientTransaction', () => {
     expect(tx.state).toBe('Terminated');
     expect(events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|INVITE' });
   });
+
+  it('does not arm Timer M or D when a final-response listener terminates synchronously', () => {
+    for (const statusCode of [200, 486]) {
+      const clock = new FakeClock();
+      const transport = new FakeTransport({ reliable: false, framing: 'datagram' });
+      void transport.connect();
+      const events: TransactionLayerEvent[] = [];
+      let tx: InviteClientTransaction;
+      tx = new InviteClientTransaction({
+        request: makeInvite(),
+        key: 'branch|example.com:5060|INVITE',
+        transport,
+        clock,
+        timers: TIMERS,
+        reliable: false,
+        emit: (event) => {
+          events.push(event);
+          if (event.type === 'response') tx.terminate();
+        },
+        buildNon2xxAck: (request, _response) => makeRequest('ACK', request.uri),
+      });
+
+      tx.start();
+      tx.receive(response(statusCode));
+
+      expect(tx.state, `status ${statusCode}`).toBe('Terminated');
+      expect(clock.pending(), `status ${statusCode}`).toBe(0);
+    }
+  });
+
+  it('does not resurrect Timer D when ACK sending terminates synchronously', () => {
+    const clock = new FakeClock();
+    const transport = new FakeTransport({ reliable: false, framing: 'datagram' });
+    void transport.connect();
+    const events: TransactionLayerEvent[] = [];
+    let tx: InviteClientTransaction;
+    tx = new InviteClientTransaction({
+      request: makeInvite(),
+      key: 'branch|example.com:5060|INVITE',
+      transport,
+      clock,
+      timers: TIMERS,
+      reliable: false,
+      emit: (event) => events.push(event),
+      buildNon2xxAck: (request, _response) => makeRequest('ACK', request.uri),
+    });
+    transport.onSend = () => {
+      if (transport.sent.length === 2) tx.terminate();
+    };
+
+    tx.start();
+    tx.receive(response(486));
+
+    expect(tx.state).toBe('Terminated');
+    expect(clock.pending()).toBe(0);
+  });
 });

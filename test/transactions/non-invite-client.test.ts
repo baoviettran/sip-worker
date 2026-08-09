@@ -253,4 +253,31 @@ describe('NonInviteClientTransaction', () => {
     expect(tx.state).toBe('Terminated');
     expect(events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|REGISTER' });
   });
+
+  it('does not resurrect Timer K when a final-response listener terminates synchronously', () => {
+    const clock = new FakeClock();
+    const transport = new FakeTransport({ reliable: false, framing: 'datagram' });
+    void transport.connect();
+    const events: TransactionLayerEvent[] = [];
+    let tx: NonInviteClientTransaction;
+    tx = new NonInviteClientTransaction({
+      request: makeRequestMsg(),
+      key: 'branch|example.com:5060|REGISTER',
+      transport,
+      clock,
+      timers: TIMERS,
+      reliable: false,
+      emit: (event) => {
+        events.push(event);
+        if (event.type === 'response') tx.terminate();
+      },
+      buildNon2xxAck: (request, _response) => makeRequest('ACK', request.uri),
+    });
+
+    tx.start();
+    tx.receive(response(200));
+
+    expect(tx.state).toBe('Terminated');
+    expect(clock.pending()).toBe(0);
+  });
 });
