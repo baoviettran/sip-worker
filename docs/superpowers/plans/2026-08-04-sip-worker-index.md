@@ -143,6 +143,11 @@ Phase 4 (authentication + registration) is merged and pushed. The following were
 6. [x] [Plan 05 — Calls and media](./2026-08-04-05-calls-and-media.md)
 7. [x] [Plan 06 — Reliability and release](./2026-08-04-06-reliability-and-release.md)
 8. [ ] [Leftover Hardening](./2026-08-07-leftover-hardening.md)
+9. [x] [Phase 08 — Protocol correctness](./2026-08-07-08-protocol-correctness.md)
+10. [ ] [Phase 09 — Call lifecycle and authentication](./2026-08-07-09-call-lifecycle-auth.md)
+11. [ ] [Phase 10 — Transport resilience](./2026-08-07-10-transport-resilience.md)
+12. [ ] [Phase 11 — Worker and media reliability](./2026-08-07-11-worker-media.md)
+13. [ ] [Phase 12 — Release productization](./2026-08-07-12-release-productization.md)
 
 ## Plan Gates
 
