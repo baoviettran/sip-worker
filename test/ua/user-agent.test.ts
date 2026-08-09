@@ -32,12 +32,16 @@ class RecordingLiveness implements LivenessStrategy {
 class DelayedAckTransport extends FakeTransport {
   delayAcks = false;
   byeAttempts = 0;
+  inviteAttempts = 0;
   private ackResolvers: Array<() => void> = [];
 
   override async send(data: Uint8Array): Promise<void> {
     const parsed = parseMessage(data);
     if (parsed.ok && parsed.value.kind === 'request' && parsed.value.method === 'BYE') {
       this.byeAttempts += 1;
+    }
+    if (parsed.ok && parsed.value.kind === 'request' && parsed.value.method === 'INVITE') {
+      this.inviteAttempts += 1;
     }
     await super.send(data);
     if (this.delayAcks && parsed.ok && parsed.value.kind === 'request' && parsed.value.method === 'ACK') {
@@ -441,6 +445,27 @@ describe('UserAgent shutdown settlement', () => {
     await rejection;
 
     expect(transport.byeAttempts).toBe(0);
+    expect(ua.callState).toBe('idle');
+  });
+
+  it('does not send INVITE after an inviting listener disconnects re-entrantly', async () => {
+    const transport = new DelayedAckTransport({ reliable: true, framing: 'stream' });
+    const { ua } = setup({ transport });
+    await ua.connect();
+
+    let disconnect: Promise<void> | undefined;
+    ua.on('stateChanged', (event: { state: string }) => {
+      if (event.state === 'inviting') disconnect = ua.disconnect();
+    });
+
+    const invite = ua.invite('sip:bob@example.com');
+    const rejection = expect(invite).rejects.toThrow('UserAgent disconnected');
+    await flush();
+    if (disconnect === undefined) throw new Error('inviting listener did not disconnect');
+    await disconnect;
+    await rejection;
+
+    expect(transport.inviteAttempts).toBe(0);
     expect(ua.callState).toBe('idle');
   });
 

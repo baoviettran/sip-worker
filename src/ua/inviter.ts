@@ -162,6 +162,7 @@ export class Inviter {
       const request = this.buildInviteRequest(sdp);
       this.currentRequest = request;
       this.session.transition('inviting');
+      if (this.disposed) return;
       this.sendAttempt(request);
     } catch (err) {
       if (this.disposed) return;

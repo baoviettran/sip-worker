@@ -151,10 +151,12 @@ export class NonInviteClientTransaction {
   private onTimerE(): void {
     if (this.currentState === 'Trying') {
       this.sendRequest();
+      if (this.currentState !== 'Trying') return;
       this.retransmitInterval = Math.min(2 * this.retransmitInterval, this.timers.T2);
       this.armTimerE(this.retransmitInterval);
     } else if (this.currentState === 'Proceeding') {
       this.sendRequest();
+      if (this.currentState !== 'Proceeding') return;
       this.armTimerE(this.timers.T2);
     }
   }

@@ -280,4 +280,17 @@ describe('NonInviteClientTransaction', () => {
     expect(tx.state).toBe('Terminated');
     expect(clock.pending()).toBe(0);
   });
+
+  it('does not re-arm Timer E when retransmission sending terminates synchronously', () => {
+    const { clock, transport, tx } = setup();
+    transport.onSend = () => {
+      if (transport.sent.length === 2) tx.terminate();
+    };
+
+    tx.start();
+    clock.advance(TIMERS.T1);
+
+    expect(tx.state).toBe('Terminated');
+    expect(clock.pending()).toBe(0);
+  });
 });

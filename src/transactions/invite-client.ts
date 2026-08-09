@@ -177,6 +177,7 @@ export class InviteClientTransaction {
   private onTimerA(): void {
     if (this.currentState !== 'Calling') return;
     this.sendRequest();
+    if (this.currentState !== 'Calling') return;
     this.retransmitInterval *= 2;
     this.armTimerA(this.retransmitInterval);
   }
