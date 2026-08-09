@@ -93,3 +93,71 @@ Contact header parameters, while arbitrary extension parameters are ambiguous
 with SIP URI parameters in an unbracketed addr-spec and are left untouched.
 The regression covers the reported target-corruption case; no dialog routing
 behavior was changed.
+
+
+## Review follow-up: optional whitespace before bare Contact parameters
+
+### RED
+
+Added focused regression coverage for bare Contact values with optional
+whitespace around the known header-parameter separator and assignment:
+
+```text
+Contact: sip:bob@host ; expires = 60
+Contact: sip:bob@host ; q = 0.5
+```
+
+Also added guard coverage confirming that `sip:bob@host;transport=tcp;expires=60`
+retains `;transport=tcp`, and that `<sip:bob@host;transport=tcp>;expires=60`
+continues to retain the bracketed URI parameter.
+
+Ran before production changes:
+
+```text
+npm test -- --run test/dialogs
+```
+
+Result: 2 failing, 19 passing dialog tests. Both whitespace cases expected
+`sip:bob@host` but received `sip:bob@host `, confirming the bare-URI regex
+captured optional whitespace preceding `expires` or `q`.
+
+### GREEN
+
+Changed only the captured bare-URI branch in `extractUri` to trim its captured
+prefix. Bracketed URIs remain on their existing early-return path, and URI
+parameters before a bare Contact header parameter remain in the prefix.
+
+Re-ran:
+
+```text
+npm test -- --run test/dialogs
+```
+
+Result:
+
+```text
+Test Files  1 passed (1)
+Tests       21 passed (21)
+```
+
+### Files changed
+
+- `src/dialogs/header-values.ts`: trims the bare addr-spec prefix captured
+  before a known Contact `expires` or `q` parameter.
+- `test/dialogs/dialog.test.ts`: adds `expires` and `q` whitespace regressions
+  plus URI-parameter preservation guards for bare and bracketed Contacts.
+
+### Verification
+
+- `npm test -- --run test/dialogs` — 1 file, 21 tests passed.
+- `npm test` — 38 files, 426 tests passed.
+- `npm run typecheck` — passed.
+- `git diff --check` — passed.
+
+### Self-review
+
+The adjustment is intentionally limited to the extracted bare-URI prefix. It
+removes separator whitespace without changing the recognized Contact header
+parameters, arbitrary bare extension handling, bracketed URI parsing, or
+dialog routing behavior. The regression tests cover both whitespace-tolerant
+known header parameters and the previously documented URI-parameter behavior.

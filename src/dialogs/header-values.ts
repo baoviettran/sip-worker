@@ -20,7 +20,7 @@ export function extractUri(value: string | undefined): string | undefined {
 
   // On a bare Contact addr-spec, known Contact header parameters are not URI
   // parameters. Keep URI parameters before them (for example, ;transport=tcp).
-  return trimmed.match(/^(.*?);\s*(?:expires|q)\s*=/i)?.[1] ?? trimmed;
+  return trimmed.match(/^(.*?);\s*(?:expires|q)\s*=/i)?.[1]?.trim() ?? trimmed;
 }
 
 /** Whether a route set entry is a strict (non-loose) router, i.e. has no `;lr`. */

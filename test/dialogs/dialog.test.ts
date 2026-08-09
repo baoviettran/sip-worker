@@ -71,6 +71,30 @@ describe('Dialog.fromUac', () => {
     expect(dialog.remoteTarget).toBe('sip:bob@host');
   });
 
+  it.each([
+    ['expires', 'sip:bob@host ; expires = 60'],
+    ['q', 'sip:bob@host ; q = 0.5'],
+  ])('trims whitespace before a bare Contact %s parameter', (_parameter, contact) => {
+    const response = make2xx();
+    response.headers.set('Contact', contact);
+    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator());
+    expect(dialog.remoteTarget).toBe('sip:bob@host');
+  });
+
+  it('retains URI parameters before a bare Contact header parameter', () => {
+    const response = make2xx();
+    response.headers.set('Contact', 'sip:bob@host;transport=tcp;expires=60');
+    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator());
+    expect(dialog.remoteTarget).toBe('sip:bob@host;transport=tcp');
+  });
+
+  it('retains bracketed URI parameters before Contact header parameters', () => {
+    const response = make2xx();
+    response.headers.set('Contact', '<sip:bob@host;transport=tcp>;expires=60');
+    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator());
+    expect(dialog.remoteTarget).toBe('sip:bob@host;transport=tcp');
+  });
+
   it('falls back to the request URI when Contact is absent', () => {
     const headers = new Headers();
     headers.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-invite');
