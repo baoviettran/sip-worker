@@ -27,11 +27,11 @@ function makeRequestMsg(overrides: Partial<SipRequestMessage> = {}): SipRequestM
   };
 }
 
-function setup(overrides: Partial<{ reliable: boolean }> = {}): Harness {
+function setup(overrides: Partial<{ reliable: boolean; request: SipRequestMessage }> = {}): Harness {
   const clock = new FakeClock();
   const transport = new FakeTransport({ reliable: overrides.reliable ?? false, framing: 'datagram' });
   void transport.connect();
-  const request = makeRequestMsg();
+  const request = overrides.request ?? makeRequestMsg();
   const events: TransactionLayerEvent[] = [];
   const tx = new NonInviteClientTransaction({
     request,
@@ -78,6 +78,20 @@ describe('NonInviteClientTransaction', () => {
     expect(transport.sent.length).toBe(5);
     clock.advance(TIMERS.T2); // +4000, plateau at T2
     expect(transport.sent.length).toBe(6);
+  });
+
+  it('retransmits the original header and body bytes after the caller mutates the request', () => {
+    const headers = new Headers();
+    headers.set('X-Request-Id', 'original');
+    const request = makeRequestMsg({ headers, body: new TextEncoder().encode('original body') });
+    const { clock, transport, tx } = setup({ request });
+
+    tx.start();
+    request.headers.set('X-Request-Id', 'mutated');
+    request.body.set(new TextEncoder().encode('mutated!'));
+    clock.advance(TIMERS.T1);
+
+    expect(transport.sent[1]).toEqual(transport.sent[0]);
   });
 
   it('1xx from Trying emits, sets E interval to T2, moves to Proceeding', () => {

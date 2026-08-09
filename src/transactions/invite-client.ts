@@ -52,10 +52,15 @@ export class InviteClientTransaction {
   private timerM = -1;
   private retransmitInterval = 0;
   private ackBytes: Uint8Array | undefined;
+  private requestBytes: Uint8Array | undefined;
 
   constructor(options: InviteClientOptions) {
     this.key = options.key;
-    this.request = options.request;
+    this.request = {
+      ...options.request,
+      headers: options.request.headers.clone(),
+      body: options.request.body.slice(),
+    };
     this.transport = options.transport;
     this.clock = options.clock;
     this.timers = options.timers;
@@ -148,7 +153,10 @@ export class InviteClientTransaction {
   }
 
   private sendRequest(): void {
-    this.sendBytes(serializeMessage(this.request));
+    if (this.requestBytes === undefined) {
+      this.requestBytes = serializeMessage(this.request);
+    }
+    this.sendBytes(this.requestBytes);
   }
 
   private sendBytes(bytes: Uint8Array): void {

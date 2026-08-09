@@ -7,10 +7,8 @@ import { DEFAULT_TIMERS, type DerivedTimers, type TimerConfig } from './types.js
  * B/F/H/L/M all scale to 64*T1 (the maximum retransmission interval). D is the
  * time a UAS transaction waits for a retransmission of the request before
  * terminating (T4 for reliable transports, 32 seconds for unreliable ones).
- * I/J/K are only meaningful for unreliable transports: I is the amount of time
- * a client transaction waits for a response before retransmission, J is the
- * time a server transaction lingers after a 2xx, and K is the time a client
- * transaction lingers after a 2xx. On reliable transports these collapse to 0.
+ * I/J/K are only meaningful for unreliable transports: I and K use T4, while J
+ * scales to 64*T1. On reliable transports these collapse to 0.
  */
 export function deriveTimers(config: TimerConfig, reliable: boolean): DerivedTimers {
   const max = 64 * config.T1;
@@ -22,9 +20,9 @@ export function deriveTimers(config: TimerConfig, reliable: boolean): DerivedTim
     D: reliable ? 0 : Math.max(32000, 64 * config.T1),
     F: max,
     H: max,
-    I: reliable ? 0 : 5000,
-    J: reliable ? 0 : 32000,
-    K: reliable ? 0 : 5000,
+    I: reliable ? 0 : config.T4,
+    J: reliable ? 0 : max,
+    K: reliable ? 0 : config.T4,
     L: max,
     M: max,
   };

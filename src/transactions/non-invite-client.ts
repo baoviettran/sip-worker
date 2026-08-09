@@ -48,10 +48,15 @@ export class NonInviteClientTransaction {
   private timerF = -1;
   private timerK = -1;
   private retransmitInterval = 0;
+  private requestBytes: Uint8Array | undefined;
 
   constructor(options: NonInviteClientOptions) {
     this.key = options.key;
-    this.request = options.request;
+    this.request = {
+      ...options.request,
+      headers: options.request.headers.clone(),
+      body: options.request.body.slice(),
+    };
     this.transport = options.transport;
     this.clock = options.clock;
     this.timers = options.timers;
@@ -124,7 +129,10 @@ export class NonInviteClientTransaction {
   }
 
   private sendRequest(): void {
-    this.sendBytes(serializeMessage(this.request));
+    if (this.requestBytes === undefined) {
+      this.requestBytes = serializeMessage(this.request);
+    }
+    this.sendBytes(this.requestBytes);
   }
 
   private sendBytes(bytes: Uint8Array): void {

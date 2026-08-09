@@ -26,6 +26,11 @@ describe('deriveTimers', () => {
     expect(deriveTimers(config, true).D).toBe(0);
   });
 
+  it('derives I and K from T4 and J from 64*T1 for a custom configuration', () => {
+    const config = { T1: 750, T2: 4000, T4: 9000 };
+    expect(deriveTimers(config, false)).toMatchObject({ I: 9000, J: 48000, K: 9000 });
+  });
+
   it('leaves the base TimerConfig values intact', () => {
     const derived = deriveTimers(DEFAULT_TIMERS, false);
     expect(derived.T1).toBe(DEFAULT_TIMERS.T1);

@@ -27,11 +27,11 @@ function makeInvite(overrides: Partial<SipRequestMessage> = {}): SipRequestMessa
   };
 }
 
-function setup(overrides: Partial<{ reliable: boolean; uri: string }> = {}): Harness {
+function setup(overrides: Partial<{ reliable: boolean; uri: string; request: SipRequestMessage }> = {}): Harness {
   const clock = new FakeClock();
   const transport = new FakeTransport({ reliable: overrides.reliable ?? false, framing: 'datagram' });
   void transport.connect();
-  const request = makeInvite(overrides.uri === undefined ? {} : { uri: overrides.uri });
+  const request = overrides.request ?? makeInvite(overrides.uri === undefined ? {} : { uri: overrides.uri });
   const events: TransactionLayerEvent[] = [];
   const tx = new InviteClientTransaction({
     request,
@@ -81,6 +81,20 @@ describe('InviteClientTransaction', () => {
     // Fourth at 4000 more (> T2), proving the INVITE retransmit has no T2 cap.
     clock.advance(TIMERS.T1 * 8);
     expect(transport.sent.length).toBe(5);
+  });
+
+  it('retransmits the original header and body bytes after the caller mutates the request', () => {
+    const headers = new Headers();
+    headers.set('X-Request-Id', 'original');
+    const request = makeInvite({ headers, body: new TextEncoder().encode('original body') });
+    const { clock, transport, tx } = setup({ request });
+
+    tx.start();
+    request.headers.set('X-Request-Id', 'mutated');
+    request.body.set(new TextEncoder().encode('mutated!'));
+    clock.advance(TIMERS.T1);
+
+    expect(transport.sent[1]).toEqual(transport.sent[0]);
   });
 
   it('timer B emits timeout and terminates', () => {
