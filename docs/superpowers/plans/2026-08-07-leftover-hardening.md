@@ -8,6 +8,10 @@
 
 **Tech Stack:** TypeScript 5.x strict ESM, Vitest, virtual clock (`Clock`/`FakeClock`), tsup, Node 22+. No new runtime dependencies.
 
+**Status:** Complete. Final acceptance re-verified on 2026-08-09. The Digest
+primitive supports `auth-int`; the body-less `AuthManager` retry path explicitly
+declines `auth-int`-only challenges rather than attempting an invalid digest.
+
 ## Global Constraints
 
 - Every production change follows a witnessed red test and ends with focused-plus-full verification, matching the Plans 01–06 discipline.
@@ -28,7 +32,7 @@
 - Consumes: `renderAuthorization(params: AuthorizationParams, proxy = false): string` (unchanged signature).
 - Produces: same signature; quoted fields now RFC 2617 `quoted-pair`-escaped.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test/auth/authorization.test.ts` inside the `describe('renderAuthorization', ...)` block:
 
@@ -46,12 +50,12 @@ it('backslash-escapes a quote and a backslash inside quoted fields', () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run test/auth/authorization.test.ts`
 Expected: FAIL — current output is `username="a"b\c"`, which does not contain `username="a\"b\\c"`.
 
-- [ ] **Step 3: Implement escaping**
+- [x] **Step 3: Implement escaping**
 
 In `src/auth/authorization.ts`, add a private helper and apply it to the five quoted fields:
 
@@ -81,17 +85,17 @@ Change the `parts` array to wrap each quoted value:
   if (params.opaque !== undefined) parts.push(`opaque="${escapeQuoted(params.opaque)}"`);
 ```
 
-- [ ] **Step 4: Run to verify passes**
+- [x] **Step 4: Run to verify passes**
 
 Run: `npx vitest run test/auth/authorization.test.ts`
 Expected: PASS — the existing three tests still pass (their values contain no `"` or `\`), and the new escape test passes.
 
-- [ ] **Step 5: Full verification**
+- [x] **Step 5: Full verification**
 
 Run: `npm test` and `npm run typecheck`
 Expected: all tests pass; typecheck clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/auth/authorization.ts test/auth/authorization.test.ts
@@ -111,7 +115,7 @@ git commit -m "fix: backslash-escape quotes inside Digest auth fields"
 - Consumes: `computeDigest(params: DigestParams): string`.
 - Produces: `DigestParams` gains `readonly body?: Uint8Array`; `computeDigest` honors `qop: 'auth-int'`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `test/auth/digest.test.ts`:
 
@@ -155,12 +159,12 @@ it('throws when auth-int is requested without a body', () => {
 
 > **Vector note:** The expected `auth-int` hex above is a placeholder to be replaced by the implementer's hand-written RFC 2617 `auth-int` vector during Step 3 — see the "No Placeholder" rule: recompute `H(HA1:nonce:nc:cnonce:qop:H(method:uri:H(body)))` for the chosen body and pin the literal. Do not ship the placeholder string.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run test/auth/digest.test.ts`
 Expected: FAIL — the auth-int test computes the `auth` formula (wrong hex), and the body-missing test does not throw.
 
-- [ ] **Step 3: Implement auth-int**
+- [x] **Step 3: Implement auth-int**
 
 In `src/auth/digest.ts`, extend `DigestParams` and the computation:
 
@@ -203,17 +207,17 @@ Keep the rest of `computeDigest` (the `data` assembly and final `h(data)`) uncha
 
 Then, in `src/auth/challenge.ts` `selectChallenge` (line ~255), stop rejecting `auth-int` — ensure `qop.includes('auth')` still scores an `auth-int` challenge as supported (it already does: `c.qop.includes('auth')` matches the `'auth'` token within `'auth-int'`). No change needed here if the test passes; only adjust if selectChallenge filters out `auth-int`.
 
-- [ ] **Step 4: Run to verify passes**
+- [x] **Step 4: Run to verify passes**
 
 Run: `npx vitest run test/auth/digest.test.ts`
 Expected: PASS — the pinned `auth-int` vector and the body-missing `TypeError` both pass.
 
-- [ ] **Step 5: Full verification**
+- [x] **Step 5: Full verification**
 
 Run: `npm test` and `npm run typecheck`
 Expected: all tests pass; typecheck clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/auth/digest.ts src/auth/manager.ts src/auth/challenge.ts test/auth/digest.test.ts
@@ -232,7 +236,7 @@ git commit -m "feat: support Digest auth-int entity-body integrity"
 - Consumes: `AuthManager.retry(context)`, `makeBranch`, `IdGenerator` (existing).
 - Produces: retried request Via keeps all original params except `branch`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append inside `test/auth/manager.test.ts` (uses the existing `fixture()` helper):
 
@@ -256,12 +260,12 @@ it('preserves every Via param except branch on auth retry', () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run test/auth/manager.test.ts -t "preserves every Via param"`
 Expected: FAIL — current `nextVia` rebuilds only `transport + sentBy + ;rport`, dropping `received`, `comp`, `transport`.
 
-- [ ] **Step 3: Implement param-preserving nextVia**
+- [x] **Step 3: Implement param-preserving nextVia**
 
 Replace `nextVia` in `src/auth/manager.ts` (lines 261-273):
 
@@ -287,17 +291,17 @@ function nextVia(idGenerator: IdGenerator, headers: Headers): string {
 
 `makeBranch` is already imported in `manager.ts`. If it is not, add `import { makeBranch } from '../dialogs/header-values.js';` at the top.
 
-- [ ] **Step 4: Run to verify passes**
+- [x] **Step 4: Run to verify passes**
 
 Run: `npx vitest run test/auth/manager.test.ts`
 Expected: PASS — the new test and all existing manager tests (including Via-branch-stability assertions) pass.
 
-- [ ] **Step 5: Full verification**
+- [x] **Step 5: Full verification**
 
 Run: `npm test` and `npm run typecheck`
 Expected: all tests pass; typecheck clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/auth/manager.ts test/auth/manager.test.ts
@@ -316,7 +320,7 @@ git commit -m "fix: preserve Via params across authentication retries"
 - Consumes: `AuthManager.retry`, request `method`.
 - Produces: `nextCSeq` fallback carries the request's actual method, not hardcoded `INVITE`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test/auth/manager.test.ts`:
 
@@ -335,12 +339,12 @@ it('stamps a CSeq-less retry with the original method', () => {
 
 Add `makeRequest` to the existing `import { makeRequest, makeResponse, ... }` line if not already imported.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run test/auth/manager.test.ts -t "CSeq-less retry"`
 Expected: FAIL — current fallback returns `1 INVITE`.
 
-- [ ] **Step 3: Implement method-correct fallback**
+- [x] **Step 3: Implement method-correct fallback**
 
 Change `nextCSeq` in `src/auth/manager.ts` to accept the request method and use it in the fallback. Update the call site (`retry`, line ~189) accordingly:
 
@@ -356,17 +360,17 @@ function nextCSeq(headers: Headers, method: string): string {
 
 And at the call site, `headers.set('CSeq', nextCSeq(request.headers, request.method));`.
 
-- [ ] **Step 4: Run to verify passes**
+- [x] **Step 4: Run to verify passes**
 
 Run: `npx vitest run test/auth/manager.test.ts`
 Expected: PASS.
 
-- [ ] **Step 5: Full verification**
+- [x] **Step 5: Full verification**
 
 Run: `npm test` and `npm run typecheck`
 Expected: all tests pass; typecheck clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/auth/manager.ts test/auth/manager.test.ts
@@ -385,7 +389,7 @@ git commit -m "fix: use original method for CSeq-less auth retries"
 - Consumes: the string emitted by `renderAuthorization`.
 - Produces: header name/value split robust to a value containing `": "`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 it('routes a rendered header value that itself contains ": "', () => {
@@ -406,12 +410,12 @@ it('routes a rendered header value that itself contains ": "', () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run test/auth/manager.test.ts -t "routes a rendered header value"`
 Expected: FAIL — `fieldValue = rendered.slice(colon + 2)` splits on the first `": ",` so the value is truncated at the first colon-space inside the realm.
 
-- [ ] **Step 3: Implement a first-colon splitter**
+- [x] **Step 3: Implement a first-colon splitter**
 
 Replace the `": "` split in `retry` (lines 184-186) with a split-on-first-colon:
 
@@ -423,17 +427,17 @@ Replace the `": "` split in `retry` (lines 184-186) with a split-on-first-colon:
     const fieldValue = rest.startsWith(' ') ? rest.slice(1) : rest;
 ```
 
-- [ ] **Step 4: Run to verify passes**
+- [x] **Step 4: Run to verify passes**
 
 Run: `npx vitest run test/auth/manager.test.ts`
 Expected: PASS.
 
-- [ ] **Step 5: Full verification**
+- [x] **Step 5: Full verification**
 
 Run: `npm test` and `npm run typecheck`
 Expected: all tests pass; typecheck clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/auth/manager.ts test/auth/manager.test.ts
@@ -452,7 +456,7 @@ git commit -m "fix: split rendered auth header on first colon, not hardcoded ': 
 - Consumes: `TransactionLayer.forward(event)`.
 - Produces: a throwing subscriber does not break the layer or other subscribers.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test/transactions/coordinator.test.ts`. Construct a `TransactionLayer` with a fake transport, add a throwing subscriber and a good subscriber, emit an internal event by sending a request, and assert the good subscriber still fires:
 
@@ -473,12 +477,12 @@ it('isolates a throwing subscriber from the rest', async () => {
 
 > **Helper note:** Adapt names (`makeLayer`, `messageHeaders`, `responseBytes`) to whatever the coordinator test file already exposes. The essential assertion is that after a throwing subscriber, a second subscriber still receives an event.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run test/transactions/coordinator.test.ts`
 Expected: FAIL — the throwing subscriber propagates and the good subscriber never fires.
 
-- [ ] **Step 3: Wrap each subscriber call**
+- [x] **Step 3: Wrap each subscriber call**
 
 In `src/transactions/coordinator.ts` `forward()`, change the subscriber loop:
 
@@ -499,17 +503,17 @@ In `src/transactions/coordinator.ts` `forward()`, change the subscriber loop:
   }
 ```
 
-- [ ] **Step 4: Run to verify passes**
+- [x] **Step 4: Run to verify passes**
 
 Run: `npx vitest run test/transactions/coordinator.test.ts`
 Expected: PASS — the good subscriber fires while the throwing one is swallowed.
 
-- [ ] **Step 5: Full verification**
+- [x] **Step 5: Full verification**
 
 Run: `npm test` and `npm run typecheck`
 Expected: all tests pass; typecheck clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/transactions/coordinator.ts test/transactions/coordinator.test.ts
@@ -528,7 +532,7 @@ git commit -m "fix: isolate throwing transaction-layer subscribers"
 - Consumes: `Registrar` response handling, `nextRequest`, `identity`.
 - Produces: 301/302 re-REGISTER to the redirect `Contact` target, single-hop with loop guard.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `test/ua/registrar.test.ts` (using the test's existing Registrar + FakeClock harness). Follow a redirect, reject a non-redirect 3xx, and guard a loop:
 
@@ -550,12 +554,12 @@ it('fails a redirect loop instead of spinning', async () => {
 
 > **Detail:** Use two FakeClock exchanges. Capture the request URIs the registrar sends. For the loop guard, either cap redirect hops at 5 or treat "target equals current registrarUri / a repeated target" as a failure — pick one and assert it.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run test/ua/registrar.test.ts`
 Expected: FAIL — current code hard-fails (≥300 → `SipError`), never following a redirect.
 
-- [ ] **Step 3: Implement redirect handling**
+- [x] **Step 3: Implement redirect handling**
 
 In `src/ua/registrar.ts`, add a redirect counter to the class (`private redirectCount = 0;`). In `onResponse` (lines 235-245), add a branch **before** the generic `>= 300` handler:
 
@@ -588,17 +592,17 @@ private handleRedirect(base: SipRequestMessage, response: SipResponseMessage): v
 
 Reuse the existing `contactUri` extraction (header-values `extractUri`) or the registrar's own Contact parse; the redirect URI must come from the response's highest-priority `Contact`, not the registrar URI. Reset `redirectCount = 0` on `onGranted` (a successful registration) and on a fresh connect.
 
-- [ ] **Step 4: Run to verify passes**
+- [x] **Step 4: Run to verify passes**
 
 Run: `npx vitest run test/ua/registrar.test.ts`
 Expected: PASS — 302 followed to completion, 305 still fails, loop guarded.
 
-- [ ] **Step 5: Full verification**
+- [x] **Step 5: Full verification**
 
 Run: `npm test` and `npm run typecheck`
 Expected: all tests pass (including the release-smoke REGISTER flow, which has no redirect); typecheck clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/ua/registrar.ts test/ua/registrar.test.ts
@@ -618,7 +622,7 @@ git commit -m "feat: follow 301/302 REGISTER redirects with a loop guard"
 - Consumes: `Registrar`, `Cancellable` clock timer.
 - Produces: `Registrar.dispose(): void` cancels refresh timer and unsubscribes.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `test/ua/user-agent.test.ts`:
 
@@ -633,12 +637,12 @@ it('disconnect() leaves no pending registrar refresh timer', async () => {
 
 Adapt `makeConnectedUa`/`fakeClock.pending()` to the existing test helpers (the FakeClock should expose the outstanding timer count).
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run test/ua/user-agent.test.ts`
 Expected: FAIL — `disconnect()` nils the registrar without cancelling its refresh timer, so a pending handle remains.
 
-- [ ] **Step 3: Add Registrar.dispose() and call it**
+- [x] **Step 3: Add Registrar.dispose() and call it**
 
 In `src/ua/registrar.ts`, add a public `dispose()` that mirrors `teardownExchange()` + `cancelRefresh()`:
 
@@ -659,17 +663,17 @@ In `src/ua/user-agent.ts` `disconnect()`, replace `this.registrar = undefined` w
 
 Keep `onTransportDisconnected()` (the reconnect-pending path) unchanged — it calls `teardownExchange()` + `cancelRefresh()` separately and sets `reconnectPending`.
 
-- [ ] **Step 4: Run to verify passes**
+- [x] **Step 4: Run to verify passes**
 
 Run: `npx vitest run test/ua/user-agent.test.ts`
 Expected: PASS — no lingering refresh handle after `disconnect()`.
 
-- [ ] **Step 5: Full verification**
+- [x] **Step 5: Full verification**
 
 Run: `npm test` and `npm run typecheck`
 Expected: all tests pass; typecheck clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/ua/user-agent.ts src/ua/registrar.ts test/ua/user-agent.test.ts
@@ -688,7 +692,7 @@ git commit -m "fix: dispose registrar refresh timer on UA shutdown"
 - Consumes: `AuthManager` nonce counts and per-request retry budget.
 - Produces: bounded maps — `nonceCounts` capped (evict oldest), `retriesByRequest` cleaned on completion.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 it('keeps nonceCounts under the cap across many distinct nonces', () => {
@@ -713,12 +717,12 @@ it('clears a request retry budget entry once its exchange completes', () => {
 
 > **Exposure note:** The test holds the class to an observable surface. Prefer exposing read-only getters (`nonceCountSize`, `retriesByRequestSize`) and a completion hook (`settle(requestId)`) so the plan's tasks see exact names. If tightening the API is undesired, keep the maps internal and assert behaviorally (no exhaustion at N retries) instead.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run test/auth/manager.test.ts -t "cap\|clears a request"`
 Expected: FAIL — `nonceCounts` grows unbounded; `settle` does not exist.
 
-- [ ] **Step 3: Implement bounding**
+- [x] **Step 3: Implement bounding**
 
 Add a module constant and cap the maps in `src/auth/manager.ts`:
 
@@ -755,17 +759,17 @@ In `nextNonceCount` (lines 244-249), evict the oldest insertion when the cap is 
 
 Wire `settle(requestId)` to be called by `Registrar` after an exchange completes (in `src/ua/registrar.ts` after a final response). If threading it is more than desired for this task, at minimum cap `nonceCounts` and document `settle` as an available hook; the release-smoke test still passes without it.
 
-- [ ] **Step 4: Run to verify passes**
+- [x] **Step 4: Run to verify passes**
 
 Run: `npx vitest run test/auth/manager.test.ts`
 Expected: PASS — map sizes bounded; budget cleaned on settle.
 
-- [ ] **Step 5: Full verification**
+- [x] **Step 5: Full verification**
 
 Run: `npm test` and `npm run typecheck`
 Expected: all tests pass; typecheck clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/auth/manager.ts src/ua/registrar.ts test/auth/manager.test.ts
@@ -785,7 +789,7 @@ git commit -m "fix: bound AuthManager nonce and retry-budget state"
 
 > **Note:** The source already exports these types from `src/index.ts:27-31` (via `src/ua/index.ts`). This task adds only the missing test assertions; no source change is expected unless a consumer fixture fails.
 
-- [ ] **Step 1: Write the failing consumer assertions**
+- [x] **Step 1: Write the failing consumer assertions**
 
 In `test/package/fixtures/esm/index.mjs`, add:
 
@@ -819,21 +823,21 @@ let f: RegistrationFailedEvent | undefined;
 
 > **Fixture editorial rule (from Plan 06):** every import in a consumer fixture must resolve from a passing packed install. If `types/index.ts` already exists, extend it rather than duplicating.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npm run test:package`
 Expected: FAIL if the type import does not resolve; if the tarball already exports them, this step PASSES and Step 3 confirms no source change is needed.
 
-- [ ] **Step 3: Adjust only if a fixture fails**
+- [x] **Step 3: Adjust only if a fixture fails**
 
 If the `types` fixture fails to compile against the four types, add the missing re-export to `src/index.ts` (they are already there per the check; do not add duplicates). Re-run `npm run build` if `src/index.ts` changed.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run: `npm run build && npm run test:package`
 Expected: PASS — ESM, CommonJS, and types consumers all resolve the four event types.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add test/package test/package/fixtures
@@ -852,7 +856,7 @@ git commit -m "test: assert event-type exports resolve in packed consumers"
 - Consumes: `parseDigestChallenges(values)`.
 - Produces: token-aware boundary, intact unquoted values, real byte offsets for missing realm/nonce.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `test/auth/challenge.test.ts`:
 
@@ -882,29 +886,29 @@ it('reports the real offset for a missing nonce', () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run test/auth/challenge.test.ts`
 Expected: FAIL — the `digest`-named param is misparsed, unquoted multi-word splits to two qop tokens, and missing-nonce uses a hardcoded `0` offset.
 
-- [ ] **Step 3: Implement hardening**
+- [x] **Step 3: Implement hardening**
 
 In `src/auth/challenge.ts`:
 1. **Boundary heuristic (`:159-166` region):** make the "a param named digest" case unambiguous by only treating a bare scheme token (`Digest`/`Basic`) at the start as the scheme boundary — a `digest=` in the middle is a parameter, not a boundary.
 2. **Unquoted multi-word values (`:176`):** in `commitParam`, do not split an unquoted value on space/tab; an unquoted value is a single token captured up to the next `,` or challenge boundary. Adjust the character scanner so whitespace only separates a *name* from its `=`/value when inside a name context, not inside an unquoted value.
 3. **Missed realm/nonce offset (`:142-143`):** change `fail(0, ...)` to report the byte offset of the first character of the spec's own token (the challenge index in `raw`), so `offset` is the real bad-byte location, not `0`.
 
-- [ ] **Step 4: Run to verify passes**
+- [x] **Step 4: Run to verify passes**
 
 Run: `npx vitest run test/auth/challenge.test.ts`
 Expected: PASS — all three new cases plus the full existing challenge suite (quoted commas, multiple challenges) still pass.
 
-- [ ] **Step 5: Full verification**
+- [x] **Step 5: Full verification**
 
 Run: `npm test` and `npm run typecheck`
 Expected: all tests pass; typecheck clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/auth/challenge.ts test/auth/challenge.test.ts
@@ -925,7 +929,7 @@ git commit -m "fix: harden Digest challenge parser boundaries, offsets, and unqu
 - Consumes: existing test suites only.
 - Produces: truthful descriptions and closed coverage gaps. No production changes.
 
-- [ ] **Step 1: Fix the malformed-escape test**
+- [x] **Step 1: Fix the malformed-escape test**
 
 `test/auth/challenge.test.ts:73` currently feeds `['Digest realm="a\\', 'nonce="n1"']`, which actually raises **missing-realm/nonce** (offset `0`) rather than a malformed escape in `commitParam`. Rewrite it to genuinely reach the malformed-escape path:
 
@@ -942,7 +946,7 @@ it('returns a ParseError on a malformed escape', () => {
 
 > **Verify first:** run the current test and confirm its message is `Digest challenge missing realm|nonce` (offset 0). Only change it if the escape path differs; if the parser resolves `\x` as a literal `x` (valid escape), this input does NOT hit malformed-escape either — in that case use a dangling trailing backslash `realm="a\` alone and assert the `commitParam` escape error. Choose the input that actually hits the escape path; assert the message if `ParseError.message` exposes it.
 
-- [ ] **Step 2: Correct the hash label**
+- [x] **Step 2: Correct the hash label**
 
 `test/auth/hash.test.ts:18` the md5 "448-bit" label is wrong — `abcdefghijklmnopqrstuvwxyz` is 208 bits (single block). Fix the description only (expected value is correct):
 
@@ -952,7 +956,7 @@ it('returns a ParseError on a malformed escape', () => {
   });
 ```
 
-- [ ] **Step 3: Tighten the digest throw tests**
+- [x] **Step 3: Tighten the digest throw tests**
 
 `test/auth/digest.test.ts:35-48` — assert the error message and add the `cnonce`-present/`nc`-missing case:
 
@@ -974,7 +978,7 @@ it('rejects a missing nc/cnonce when qop is set', () => {
 });
 ```
 
-- [ ] **Step 4: Close the stale/nc-reset gaps**
+- [x] **Step 4: Close the stale/nc-reset gaps**
 
 `test/auth/manager.test.ts` — the two stale=true tests (`:219,:230`) neither discriminate budget consumption nor test a genuinely new nonce. Add:
 1. A stale retry that does **not** consume budget (assert an allowed extra non-stale retry after a stale one).
@@ -982,12 +986,12 @@ it('rejects a missing nc/cnonce when qop is set', () => {
 
 Use `buildResponseHeaders(realm, nonce, true)` for stale and a fresh `nonce-2` for the new-nonce case, asserting the `nc=` field of the retried `Authorization`.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run: `npx vitest run test/auth/challenge.test.ts test/auth/hash.test.ts test/auth/digest.test.ts test/auth/manager.test.ts`
 Expected: PASS — all updated and new assertions green, with no production file changed.
 
-- [ ] **Step 6: Full regression + commit**
+- [x] **Step 6: Full regression + commit**
 
 Run: `npm test`
 Expected: all tests pass.
@@ -1012,7 +1016,7 @@ git commit -m "test: correct malformed-escape and digest coverage gaps"
 - Consumes: `buildNon2xxAck`, `cseqMethod`, `contactUri`/`extractUri`, `forward()`.
 - Produces: trimmer ACK header copy, one shared `cseqMethod`, one shared URI extraction, map-precise terminated delete. Behavior preserved.
 
-- [ ] **Step 1: Trim buildNon2xxAck header copy**
+- [x] **Step 1: Trim buildNon2xxAck header copy**
 
 `src/transactions/ack.ts` currently does `request.headers.clone()` — a superset of the RFC-required ACK headers (Route, From, Call-ID, Max-Forwards, Via, To, CSeq). Build the ACK from only the required set:
 
@@ -1030,11 +1034,11 @@ git commit -m "test: correct malformed-escape and digest coverage gaps"
 
 Add an `ack.test.ts` assertion that the ACK carries only the required headers (no `Contact`, no `Content-Type`, no `WWW-Authenticate`).
 
-- [ ] **Step 2: Extract a shared cseqMethod**
+- [x] **Step 2: Extract a shared cseqMethod**
 
 `cseqMethod(response)` is byte-identical in `invite-client.ts` and `non-invite-client.ts`. Move it to a shared `src/transactions/ack.ts` (it is small and co-located with the transactional helpers the barrel already re-exports), export it from `src/transactions/index.ts`, and have both files import it. Update the two import sites and delete the local duplicates. Add a test that exercises the shared helper through both transaction types.
 
-- [ ] **Step 3: Collapse contactUri onto extractUri**
+- [x] **Step 3: Collapse contactUri onto extractUri**
 
 `src/dialogs/dialog.ts` local `contactUri(headers)`:
 ```ts
@@ -1047,16 +1051,16 @@ function contactUri(headers: Headers): string | undefined {
 ```
 is identical to `extractUri(value)` in `src/dialogs/header-values.ts`. Replace its body with `extractUri(headers.get('Contact'))` and import `extractUri`. Keep the `contactUri` name (call sites `:95,:119,:120` unchanged) but delegate. Add a dialog test confirming Contact extraction is unchanged.
 
-- [ ] **Step 4: Map-precise terminated delete**
+- [x] **Step 4: Map-precise terminated delete**
 
 `src/transactions/coordinator.ts` `forward()` deletes the key from both `clients` and `servers`. Since client/server keys can collide (`branch|INVITE`), pass the owning map to make the delete precise. Change the emit path so the caller records which map owns the terminated key. If the coordinator does not know ownership at delete time, keep the dual delete but add a comment + test documenting the branch-uniqueness invariant; otherwise thread the owning map through the terminated event handler.
 
-- [ ] **Step 5: Full verification**
+- [x] **Step 5: Full verification**
 
 Run: `npm test`, `npm run typecheck`, `npm run build`, `npm run test:package`
 Expected: all pass — packed consumers still resolve; ack header trim does not break the release-smoke 2xx/non-2xx ACK paths.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/transactions src/dialogs test/transactions test/dialogs
@@ -1075,7 +1079,7 @@ git commit -m "refactor: phase-3 internal polish (ack headers, shared helpers, m
 - Consumes: `UserAgentOptions`.
 - Produces: additive `viaAddress?: string`; Inviter/Invitation/OPTIONS use it with the current default fallback.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 it('uses a caller-supplied viaAddress for sent-by', async () => {
@@ -1096,12 +1100,12 @@ it('defaults to 192.0.2.1:5060 when viaAddress is absent', async () => {
 
 Adapt to the existing user-agent test harness (media controller must be configured for `invite()`; the harness likely already injects a `WorkerMediaController`).
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run test/ua/user-agent.test.ts`
 Expected: FAIL — `viaAddress` is not in `UserAgentOptions`; the hardcoded `192.0.2.1:5060` is used regardless.
 
-- [ ] **Step 3: Add the option and thread it**
+- [x] **Step 3: Add the option and thread it**
 
 In `src/ua/user-agent.ts`, add to `UserAgentOptions`:
 
@@ -1125,17 +1129,17 @@ Replace the three hardcoded call sites:
 
 Remove both `// TODO: extract from transport` comments.
 
-- [ ] **Step 4: Run to verify passes**
+- [x] **Step 4: Run to verify passes**
 
 Run: `npx vitest run test/ua/user-agent.test.ts`
 Expected: PASS — supplied sent-by appears in INVITE Via; default preserved.
 
-- [ ] **Step 5: Full verification**
+- [x] **Step 5: Full verification**
 
 Run: `npm test` and `npm run typecheck`
 Expected: all tests pass; typecheck clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/ua/user-agent.ts test/ua/user-agent.test.ts
@@ -1154,11 +1158,11 @@ git commit -m "feat: allow caller-supplied viaAddress for Via sent-by"
 - Consumes: git history proving the phase-1 follow-up is done.
 - Produces: plan/index accurately reflect completion and add Plan 07.
 
-- [ ] **Step 1: Mark the phase-1 follow-up plan done**
+- [x] **Step 1: Mark the phase-1 follow-up plan done**
 
 The phase-1 codec follow-up was fully implemented (commits `9bfe75a`, `fb99b08`, `8cb88ba`, `ab996ff`) but its plan file shows zero `[x]`. Flip every `- [ ] Step` to `- [x] Step` in `docs/superpowers/plans/2026-08-04-phase-1-codec-follow-up-fixes.md`.
 
-- [ ] **Step 2: Add Plan 07 to the index**
+- [x] **Step 2: Add Plan 07 to the index**
 
 In `docs/superpowers/plans/2026-08-04-sip-worker-index.md`:
 1. Add the phase-1 follow-up plan to the Execution Order as a completed entry.
@@ -1166,11 +1170,11 @@ In `docs/superpowers/plans/2026-08-04-sip-worker-index.md`:
 
 | 07 | Leftover hardening (Plan 07 file) | Auth quoted/redirect/lifecycle fixes; viaAddress; parser hardening; green regressions |
 
-- [ ] **Step 3: Verify the docs render**
+- [x] **Step 3: Verify the docs render**
 
 Read both files to confirm no broken Markdown and that every phase-1 follow-up task is `[x]`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/superpowers/plans/

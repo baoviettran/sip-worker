@@ -142,7 +142,7 @@ Phase 4 (authentication + registration) is merged and pushed. The following were
 5. [x] [Plan 04 — Authentication and registration](./2026-08-04-04-auth-and-registration.md)
 6. [x] [Plan 05 — Calls and media](./2026-08-04-05-calls-and-media.md)
 7. [x] [Plan 06 — Reliability and release](./2026-08-04-06-reliability-and-release.md)
-8. [ ] [Leftover Hardening](./2026-08-07-leftover-hardening.md)
+8. [x] [Leftover Hardening](./2026-08-07-leftover-hardening.md)
 9. [x] [Phase 08 — Protocol correctness](./2026-08-07-08-protocol-correctness.md)
 10. [ ] [Phase 09 — Call lifecycle and authentication](./2026-08-07-09-call-lifecycle-auth.md)
 11. [ ] [Phase 10 — Transport resilience](./2026-08-07-10-transport-resilience.md)
