@@ -4,6 +4,7 @@ import { deriveTimers } from '../../src/transactions/timers.js';
 import type { TransactionLayerEvent } from '../../src/transactions/types.js';
 import type { SipRequestMessage, SipResponseMessage } from '../../src/messages/message.js';
 import { Headers, makeRequest, makeResponse, parseMessage } from '../../src/messages/index.js';
+import { TransportError } from '../../src/errors.js';
 import { FakeClock } from '../support/fake-clock.js';
 import { FakeTransport } from '../support/fake-transport.js';
 
@@ -18,8 +19,8 @@ interface Harness {
   layer: TransactionLayer;
 }
 
-function viaHeader(branch: string): string {
-  return `SIP/2.0/UDP 192.0.2.1:5060;branch=${branch}`;
+function viaHeader(branch: string, sentBy = '192.0.2.1:5060'): string {
+  return `SIP/2.0/UDP ${sentBy};branch=${branch}`;
 }
 
 function makeInvite(branch = 'z9hG4bK-abc'): SipRequestMessage {
@@ -44,6 +45,17 @@ function makeRegister(branch = 'z9hG4bK-reg'): SipRequestMessage {
   return makeRequest('REGISTER', 'sip:example.com', headers);
 }
 
+function makeOptions(branch = 'z9hG4bK-options'): SipRequestMessage {
+  const headers = new Headers();
+  headers.set('Via', viaHeader(branch));
+  headers.set('From', '<sip:alice@example.com>');
+  headers.set('To', '<sip:example.com>');
+  headers.set('Call-ID', 'options123');
+  headers.set('CSeq', '1 OPTIONS');
+  headers.set('Max-Forwards', '70');
+  return makeRequest('OPTIONS', 'sip:example.com', headers);
+}
+
 function setup(reliable = false): Harness {
   const clock = new FakeClock();
   const transport = new FakeTransport({ reliable, framing: 'datagram' });
@@ -59,9 +71,9 @@ function setup(reliable = false): Harness {
   return { clock, transport, events, layer };
 }
 
-function responseFor(branch: string, statusCode: number, method = 'INVITE', cseq = '41'): SipResponseMessage {
+function responseFor(branch: string, statusCode: number, method = 'INVITE', cseq = '41', sentBy = '192.0.2.1:5060'): SipResponseMessage {
   const headers = new Headers();
-  headers.set('Via', viaHeader(branch));
+  headers.set('Via', viaHeader(branch, sentBy));
   headers.set('From', '<sip:alice@example.com>');
   headers.set('To', '<sip:bob@example.com>');
   headers.set('Call-ID', 'abc123');
@@ -118,6 +130,7 @@ describe('TransactionLayer', () => {
     const invite = makeInvite();
     layer.receive(invite);
     const ack = makeRequest('ACK', 'sip:bob@example.com', invite.headers);
+    ack.headers.set('CSeq', '41 ACK');
     layer.receive(ack);
     // The ACK is consumed by the server transaction; no statelessRequest is emitted.
     expect(events.filter((e) => e.type === 'statelessRequest')).toHaveLength(0);
@@ -147,20 +160,20 @@ describe('TransactionLayer', () => {
     const { clock, events, layer } = setup(true);
     // A UA both sends and receives on the SAME branch: an INVITE client
     // transaction and an INVITE server transaction share the key
-    // `z9hG4bK-abc|INVITE`. Terminating one must not delete the other.
+    // `z9hG4bK-abc|192.0.2.1:5060|INVITE`. Terminating one must not delete the other.
     const invite = makeInvite();
-    layer.sendRequest(invite); // client transaction, key z9hG4bK-abc|INVITE
+    layer.sendRequest(invite); // client transaction, key z9hG4bK-abc|192.0.2.1:5060|INVITE
     layer.receive(makeInvite()); // server transaction, same key
     // Both reach Completed.
     layer.receive(responseFor('z9hG4bK-abc', 486)); // client -> Completed
-    layer.sendResponse('z9hG4bK-abc|INVITE', responseFor('z9hG4bK-abc', 486)); // server -> Completed
+    layer.sendResponse('z9hG4bK-abc|192.0.2.1:5060|INVITE', responseFor('z9hG4bK-abc', 486)); // server -> Completed
     expect(events.filter((e) => e.type === 'terminated')).toHaveLength(0);
 
     // Advance past timer D: only the CLIENT terminates. This layer is reliable,
     // so its derived D = 0 (use TIMERS's own mismatch would skip forward far
     // enough to also fire the server's timer H).
     clock.advance(0); // client Completed -> Terminated (reliable D = 0)
-    expect(events).toContainEqual({ type: 'terminated', key: 'z9hG4bK-abc|INVITE' });
+    expect(events).toContainEqual({ type: 'terminated', key: 'z9hG4bK-abc|192.0.2.1:5060|INVITE' });
     const terminatedAtClient = events.filter((e) => e.type === 'terminated').length;
 
     // The SERVER transaction on the same key must still be tracked: a duplicate
@@ -173,6 +186,7 @@ describe('TransactionLayer', () => {
 
     // The server ACKs and its own termination does not resurrect anything.
     const ack = makeRequest('ACK', 'sip:bob@example.com', invite.headers);
+    ack.headers.set('CSeq', '41 ACK');
     layer.receive(ack); // server Completed -> Confirmed
     clock.advance(0); // server Confirmed -> Terminated (reliable I = 0)
     expect(events.filter((e) => e.type === 'terminated')).toHaveLength(terminatedAtClient + 1);
@@ -194,7 +208,7 @@ describe('TransactionLayer', () => {
     expect(events.filter((e) => e.type === 'response')).toHaveLength(1);
     // Advance past timer M so the Accepted client transaction terminates.
     clock.advance(TIMERS.M);
-    expect(events).toContainEqual({ type: 'terminated', key: 'z9hG4bK-abc|INVITE' });
+    expect(events).toContainEqual({ type: 'terminated', key: 'z9hG4bK-abc|192.0.2.1:5060|INVITE' });
     // After termination the map entry is gone; a late response is dropped.
     layer.receive(responseFor('z9hG4bK-abc', 200));
     expect(events.filter((e) => e.type === 'response')).toHaveLength(1);
@@ -219,6 +233,76 @@ describe('TransactionLayer', () => {
     expect(events).toContainEqual(expect.objectContaining({ type: 'response', transaction: expect.objectContaining({ key: tx.key }) }));
   });
 
+  it('routes subscriptions only to their returned transaction key when CSeq values collide', () => {
+    const { layer } = setup();
+    const register = layer.sendRequest(makeRegister('z9hG4bK-shared'));
+    const options = layer.sendRequest(makeOptions('z9hG4bK-shared'));
+    const received: TransactionLayerEvent[] = [];
+    layer.subscribe(register.key, (event: TransactionLayerEvent) => received.push(event));
+
+    layer.receive(responseFor('z9hG4bK-shared', 200, 'OPTIONS', '1'));
+    expect(received).toEqual([]);
+    layer.receive(responseFor('z9hG4bK-shared', 200, 'REGISTER', '1'));
+    expect(received).toContainEqual(expect.objectContaining({ type: 'response', transaction: expect.objectContaining({ key: register.key }) }));
+    expect(received).not.toContainEqual(expect.objectContaining({ type: 'response', transaction: expect.objectContaining({ key: options.key }) }));
+  });
+
+  it('delivers all events bearing a shared client and server transaction key', () => {
+    const { layer } = setup();
+    const client = layer.sendRequest(makeInvite());
+    const received: TransactionLayerEvent[] = [];
+    layer.subscribe(client.key, (event) => received.push(event));
+
+    layer.receive(makeInvite());
+    layer.receive(responseFor('z9hG4bK-abc', 486));
+
+    expect(received).toContainEqual(expect.objectContaining({ type: 'request', transaction: expect.objectContaining({ key: client.key }) }));
+    expect(received).toContainEqual(expect.objectContaining({ type: 'response', transaction: expect.objectContaining({ key: client.key }) }));
+  });
+
+  it('rejects branchless incoming requests instead of legacy-matching them', () => {
+    const { events, layer } = setup();
+    const invite = makeInvite();
+    invite.headers.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060');
+
+    expect(() => layer.receive(invite)).toThrow(TransportError);
+    expect(events).toEqual([]);
+  });
+
+  it('distinguishes server transactions with the same branch but different Via sent-by values', () => {
+    const { events, layer } = setup();
+    const first = makeInvite('z9hG4bK-shared');
+    first.headers.set('Via', viaHeader('z9hG4bK-shared', 'EXAMPLE.COM:5060'));
+    const normalizedDuplicate = makeInvite('z9hG4bK-shared');
+    normalizedDuplicate.headers.set('Via', viaHeader('z9hG4bK-shared', 'example.com:5060'));
+    const collision = makeInvite('z9hG4bK-shared');
+    collision.headers.set('Via', viaHeader('z9hG4bK-shared', 'other.example.com:5060'));
+
+    layer.receive(first);
+    layer.receive(normalizedDuplicate);
+    layer.receive(collision);
+
+    expect(events.filter((event) => event.type === 'request')).toHaveLength(2);
+  });
+
+  it('rejects requests whose CSeq number is invalid or whose CSeq method mismatches', () => {
+    const { events, layer } = setup();
+    const outgoingMethodMismatch = makeInvite('z9hG4bK-out-method');
+    outgoingMethodMismatch.headers.set('CSeq', '41 OPTIONS');
+    const outgoingInvalidNumber = makeInvite('z9hG4bK-out-number');
+    outgoingInvalidNumber.headers.set('CSeq', 'not-a-number INVITE');
+    const incomingMethodMismatch = makeInvite('z9hG4bK-in-method');
+    incomingMethodMismatch.headers.set('CSeq', '41 OPTIONS');
+    const incomingInvalidNumber = makeInvite('z9hG4bK-in-number');
+    incomingInvalidNumber.headers.set('CSeq', 'not-a-number INVITE');
+
+    expect(() => layer.sendRequest(outgoingMethodMismatch)).toThrow(TransportError);
+    expect(() => layer.sendRequest(outgoingInvalidNumber)).toThrow(TransportError);
+    expect(() => layer.receive(incomingMethodMismatch)).toThrow(TransportError);
+    expect(() => layer.receive(incomingInvalidNumber)).toThrow(TransportError);
+    expect(events).toEqual([]);
+  });
+
   it('fans out layer events to every subscriber and stops after unsubscribe', () => {
     const { clock, layer } = setup(true);
     const first: TransactionLayerEvent[] = [];
@@ -233,8 +317,8 @@ describe('TransactionLayer', () => {
     clock.advance(TIMERS.K);
     expect(first).toContainEqual(expect.objectContaining({ type: 'response' }));
     expect(second).toContainEqual(expect.objectContaining({ type: 'response' }));
-    expect(first).toContainEqual({ type: 'terminated', key: 'z9hG4bK-reg|REGISTER' });
-    expect(second).toContainEqual({ type: 'terminated', key: 'z9hG4bK-reg|REGISTER' });
+    expect(first).toContainEqual({ type: 'terminated', key: 'z9hG4bK-reg|192.0.2.1:5060|REGISTER' });
+    expect(second).toContainEqual({ type: 'terminated', key: 'z9hG4bK-reg|192.0.2.1:5060|REGISTER' });
 
     // Unsubscribed subscriber is never called again, while a fresh one is.
     const after: TransactionLayerEvent[] = [];

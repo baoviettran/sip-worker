@@ -21,7 +21,7 @@ export interface DerivedTimers extends TimerConfig {
   readonly M: number;
 }
 
-// top Via branch | CSeq method
+// top Via branch | normalized sent-by | CSeq/request method
 export type TransactionKey = `${string}|${string}`;
 
 export interface ClientTransaction {

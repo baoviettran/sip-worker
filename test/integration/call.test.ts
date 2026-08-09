@@ -283,6 +283,7 @@ async function sendBye200(transport: FakeTransport): Promise<void> {
 
 function createInviteRequest() {
   const headers = new Headers();
+  headers.set('Via', 'SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-incoming');
   headers.set('Call-ID', 'incoming-call-1');
   headers.set('From', '<sip:bob@example.com>;tag=remote-tag');
   headers.set('To', '<sip:alice@example.com>');
@@ -295,6 +296,7 @@ function createInviteRequest() {
 
 function createAckRequest(remoteTag: string) {
   const headers = new Headers();
+  headers.set('Via', 'SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-incoming');
   headers.set('Call-ID', 'incoming-call-1');
   headers.set('From', '<sip:bob@example.com>;tag=remote-tag');
   headers.set('To', `<sip:alice@example.com>;tag=${remoteTag}`);
@@ -304,6 +306,7 @@ function createAckRequest(remoteTag: string) {
 
 function createByeRequest(dialog: any) {
   const headers = new Headers();
+  headers.set('Via', 'SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-incoming-bye');
   headers.set('Call-ID', 'incoming-call-1');
   headers.set('From', '<sip:bob@example.com>;tag=remote-tag');
   headers.set('To', `<sip:alice@example.com>;tag=${dialog.localTag}`);
