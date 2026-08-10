@@ -92,6 +92,7 @@ interface Harness {
   media: FakeMediaPort;
   controller: WorkerMediaController;
   inviter: Inviter;
+  authManager: AuthManager | undefined;
   recorded: Array<{ previous: SessionState; state: SessionState }>;
   idGenerator: { branch: () => string };
 }
@@ -152,7 +153,7 @@ function setup(options: { credentials?: boolean; rejectTransport?: boolean } = {
   inviter.session.on((event: SessionEvent) => {
     recorded.push({ previous: event.previous, state: event.state });
   });
-  return { clock, transport, layer, events, sent, media, controller, inviter, recorded, idGenerator };
+  return { clock, transport, layer, events, sent, media, controller, inviter, authManager, recorded, idGenerator };
 }
 
 function flush(): Promise<void> { return new Promise((resolve) => setTimeout(resolve, 0)); }
@@ -556,6 +557,62 @@ describe('Inviter (outgoing SIP call session)', () => {
     respond(h, 200, { sdp: STUB_SDP, toTag: 'bob-1' });
     await invite;
     expect(h.inviter.session.state).toBe('confirmed');
+    expect(h.authManager!.retriesByRequestSize).toBe(0);
+  });
+
+  it('rejects the fourth challenge in one logical INVITE exchange', async () => {
+    const h = setup({ credentials: true });
+    const invite = h.inviter.invite();
+    const outcome = invite.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await flush();
+
+    for (let challenge = 0; challenge < 4; challenge += 1) {
+      respond(h, 401, { challenge: true });
+      await flush();
+    }
+
+    const settled = await Promise.race([outcome, PENDING]);
+    const inviteAttempts = h.sent.filter((request) => request.method === 'INVITE').length;
+    if (settled === PENDING) {
+      h.inviter.dispose(new Error('test cleanup'));
+      await outcome;
+    }
+
+    expect(settled).toMatchObject({ statusCode: 401, message: expect.stringContaining('budget exhausted') });
+    expect(inviteAttempts).toBe(4);
+    expect(h.inviter.session.state).toBe('failed');
+    expect(h.authManager!.retriesByRequestSize).toBe(0);
+  });
+
+  it('releases the logical INVITE exchange after an authenticated terminal failure', async () => {
+    const h = setup({ credentials: true });
+    const invite = h.inviter.invite();
+    await flush();
+
+    respond(h, 401, { challenge: true });
+    await flush();
+    expect(h.authManager!.retriesByRequestSize).toBe(1);
+
+    respond(h, 486);
+    await expect(invite).rejects.toMatchObject({ statusCode: 486 });
+    expect(h.authManager!.retriesByRequestSize).toBe(0);
+  });
+
+  it('releases the logical INVITE exchange when disposed after authentication', async () => {
+    const h = setup({ credentials: true });
+    const invite = h.inviter.invite();
+    await flush();
+
+    respond(h, 401, { challenge: true });
+    await flush();
+    expect(h.authManager!.retriesByRequestSize).toBe(1);
+
+    h.inviter.dispose(new Error('shutdown'));
+    await expect(invite).rejects.toThrow('shutdown');
+    expect(h.authManager!.retriesByRequestSize).toBe(0);
   });
 
   it('rejects with a SipError 486 and reaches failed', async () => {

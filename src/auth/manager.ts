@@ -120,6 +120,7 @@ export class AuthManager {
   private readonly idGenerator: IdGenerator;
   private readonly maxOrdinary: number;
   private readonly retriesByRequest: Map<string, number> = new Map();
+  private readonly challengesByRequest: Map<string, AnsweredChallenge> = new Map();
   private readonly nonceCounts: Map<string, number> = new Map();
 
   constructor(idGenerator: IdGenerator, maxOrdinary = DEFAULT_MAX_RETRIES) {
@@ -140,6 +141,7 @@ export class AuthManager {
   /** Mark an exchange (by requestId) complete so its retry budget is released. */
   settle(requestId: string): void {
     this.retriesByRequest.delete(requestId);
+    this.challengesByRequest.delete(requestId);
   }
 
   /**
@@ -150,7 +152,7 @@ export class AuthManager {
     const { requestId, request, response, credentials } = context;
     const answered = readChallenge(response);
     if ('error' in answered) return answered;
-    const { challenge, proxy } = answered;
+    const { challenge } = answered;
 
     // The REGISTER path has no meaningful entity body, so `auth-int` integrity
     // adds nothing and cannot be answered without a body (computeDigest would
@@ -182,16 +184,40 @@ export class AuthManager {
       this.retriesByRequest.set(requestId, spent + 1);
     }
 
+    this.challengesByRequest.set(requestId, answered);
+    return this.authorize(request, credentials, answered, true);
+  }
+
+  /**
+   * Re-render Digest for a request changed within the same logical exchange.
+   * This consumes the next nonce-count but not another challenge retry slot,
+   * and preserves the request's already-allocated CSeq and Via branch.
+   */
+  reauthorize(context: Omit<AuthContext, 'response'>): SipRequestMessage | AuthFailure {
+    const answered = this.challengesByRequest.get(context.requestId);
+    if (answered === undefined) {
+      return {
+        type: 'malformed',
+        error: new SipError(0, `cannot regenerate authentication for unknown exchange "${context.requestId}"`),
+      };
+    }
+    return this.authorize(context.request, context.credentials, answered, false);
+  }
+
+  private authorize(
+    request: SipRequestMessage,
+    credentials: AuthContext['credentials'],
+    answered: AnsweredChallenge,
+    advanceTransaction: boolean,
+  ): SipRequestMessage {
+    const { challenge, proxy } = answered;
     const cnonce = this.idGenerator.branch();
     const nc = this.nextNonceCount(challenge.realm, challenge.nonce);
     // Only a valid qop token reaches computeDigest/renderAuthorization. The
     // challenge.qop array may retain unrecognized verbatim tokens (e.g. an
     // unquoted multi-word value); pick the first exact 'auth'. 'auth-int' is
     // declined above (unsupported on this path), so it never reaches the digest.
-    const qop =
-      challenge.qop !== undefined
-        ? challenge.qop.find((q) => q === 'auth')
-        : undefined;
+    const qop = challenge.qop?.find((value) => value === 'auth');
 
     const responseDigest = computeDigest({
       algorithm: challenge.algorithm ?? 'MD5',
@@ -230,8 +256,10 @@ export class AuthManager {
     const fieldValue = rendered.slice(colon + 2);
 
     const headers = request.headers.clone();
-    headers.set('CSeq', nextCSeq(request.headers, request.method));
-    headers.set('Via', nextVia(this.idGenerator, request.headers));
+    if (advanceTransaction) {
+      headers.set('CSeq', nextCSeq(request.headers, request.method));
+      headers.set('Via', nextVia(this.idGenerator, request.headers));
+    }
     headers.set(headerName, fieldValue);
     for (const name of AUTH_HEADERS) {
       if (name !== headerName) headers.delete(name);

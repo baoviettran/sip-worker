@@ -286,6 +286,7 @@ describe('Registrar', () => {
     respond(h, 200);
     await registration;
     expect(h.registrar.state).toBe('registered');
+    expect(h.authManager!.retriesByRequestSize).toBe(0);
   });
 
   it('answers a 407 via Proxy-Authorization', async () => {
@@ -314,6 +315,58 @@ describe('Registrar', () => {
     respond(h, 200);
     await registration;
     expect(h.registrar.state).toBe('registered');
+  });
+
+  it('regenerates Digest after authentication followed by 423', async () => {
+    const h = setup();
+    const registration = h.registrar.register();
+    await flush();
+
+    respond(h, 401, { challenge: true });
+    await flush();
+    const authenticated = h.sent[h.sent.length - 1]!;
+    const firstAuthorization = authenticated.headers.get('Authorization');
+    expect(firstAuthorization).toContain('nc=00000001');
+
+    respond(h, 423, { minExpires: '600' });
+    await flush();
+    const intervalRetry = h.sent[h.sent.length - 1]!;
+    const regenerated = intervalRetry.headers.get('Authorization');
+    expect(intervalRetry.uri).toBe(authenticated.uri);
+    expect(intervalRetry.headers.get('Expires')).toBe('600');
+    expect(regenerated).toContain('nc=00000002');
+    expect(regenerated).not.toBe(firstAuthorization);
+
+    respond(h, 200);
+    await registration;
+    expect(h.authManager!.retriesByRequestSize).toBe(0);
+  });
+
+  it('rejects the fourth challenge in one logical REGISTER exchange', async () => {
+    const h = setup();
+    const registration = h.registrar.register();
+    const outcome = registration.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await flush();
+
+    for (let challenge = 0; challenge < 4; challenge += 1) {
+      respond(h, 401, { challenge: true });
+      await flush();
+    }
+
+    const settled = await Promise.race([outcome, PENDING]);
+    const registerAttempts = h.sent.length;
+    if (settled === PENDING) {
+      h.registrar.dispose(new Error('test cleanup'));
+      await outcome;
+    }
+
+    expect(settled).toMatchObject({ statusCode: 401, message: expect.stringContaining('budget exhausted') });
+    expect(registerAttempts).toBe(4);
+    expect(h.registrar.state).toBe('failed');
+    expect(h.authManager!.retriesByRequestSize).toBe(0);
   });
 
   it('accepts a shorter granted expiry without an immediate retry', async () => {
@@ -532,6 +585,31 @@ describe('Registrar', () => {
     respond(h, 200);
     await registration;
     expect(h.registrar.state).toBe('registered');
+  });
+
+  it('regenerates Digest for the changed request URI after an authenticated redirect', async () => {
+    const h = setup();
+    const registration = h.registrar.register();
+    await flush();
+
+    respond(h, 401, { challenge: true });
+    await flush();
+    const authenticated = h.sent[h.sent.length - 1]!;
+    const firstAuthorization = authenticated.headers.get('Authorization');
+    expect(firstAuthorization).toContain(`uri="${REGISTRAR_URI}"`);
+
+    respond(h, 302, { contact: '<sip:redirect-auth.example.com>' });
+    await flush();
+    const redirected = h.sent[h.sent.length - 1]!;
+    const regenerated = redirected.headers.get('Authorization');
+    expect(redirected.uri).toBe('sip:redirect-auth.example.com');
+    expect(regenerated).toContain('uri="sip:redirect-auth.example.com"');
+    expect(regenerated).toContain('nc=00000002');
+    expect(regenerated).not.toBe(firstAuthorization);
+
+    respond(h, 200);
+    await registration;
+    expect(h.authManager!.retriesByRequestSize).toBe(0);
   });
 
   it('does not follow a 305 Use Proxy as a REGISTER redirect', async () => {

@@ -75,6 +75,7 @@ function minExpiresFor(response: SipResponseMessage): number {
 
 /** Maximum REGISTER redirect hops before falling through to the generic fail (RFC 3261 10.2). */
 const MAX_REDIRECTS = 5;
+const AUTHORIZATION_HEADERS = ['Authorization', 'Proxy-Authorization'] as const;
 
 /**
  * Tracks registration for a single UA account. Registers/unregisters return
@@ -95,14 +96,8 @@ export class Registrar {
 
   private redirectCount = 0;
   private redirectTarget: string | undefined;
-  /**
-   * requestIds whose retry budgets are in flight for the current exchange
-   * (each challenged CSeq yields its own `${callId}:${cseq}`). A multi-challenge
-   * exchange (e.g. 401→401→200) accumulates more than one; all are released via
-   * `authManager.settle` once the exchange grants or terminally fails, keeping
-   * `AuthManager.retriesByRequest` bounded across a long-lived UA.
-   */
-  private readonly activeRequestIds: Set<string> = new Set();
+  /** Stable across authentication, interval, and redirect attempts. */
+  private authExchangeId: string | undefined;
 
   private stateValue: RegisterState = 'unregistered';
   private refreshTimer = -1;
@@ -226,6 +221,7 @@ export class Registrar {
 
   private startExchange(request: SipRequestMessage): Promise<void> {
     this.stateValue = this.stateValue === 'unregistering' ? 'unregistering' : 'registering';
+    this.authExchangeId = `${this.identity.callId}:REGISTER:${numeric(request.headers) ?? 0}`;
     return new Promise<void>((resolve, reject) => {
       this.deferred = { resolve, reject };
       this.send(request);
@@ -292,7 +288,11 @@ export class Registrar {
       this.fail(new SipError(response.statusCode, `${response.statusCode} received but no credentials configured`));
       return;
     }
-    const requestId = `${this.identity.callId}:${numeric(base.headers) ?? 0}`;
+    const requestId = this.authExchangeId;
+    if (requestId === undefined) {
+      this.fail(new SipError(0, 'REGISTER authentication exchange is not active'));
+      return;
+    }
     const result = this.authManager.retry({
       requestId,
       request: base,
@@ -303,9 +303,6 @@ export class Registrar {
       this.fail(result.error);
       return;
     }
-    // The retry consumed one budget entry for this requestId; remember it so the
-    // exchange's terminal 2xx or fail can release it via authManager.settle.
-    this.activeRequestIds.add(requestId);
     // Retry is a NEW request on a NEW client transaction (new branch). Re-stamp
     // its CSeq from the single persisted counter so the wire sequence stays
     // strictly increasing on one Call-ID across every outbound REGISTER.
@@ -317,12 +314,8 @@ export class Registrar {
   private handleMinExpires(base: SipRequestMessage, response: SipResponseMessage): void {
     const interval = minExpiresFor(response);
     const request = this.nextRequest(interval, base.headers.get('Contact') ?? this.contact);
-    // Carry any in-progress authorization (from an earlier 401/407) forward.
-    const authorization = base.headers.get('Authorization');
-    const proxyAuthorization = base.headers.get('Proxy-Authorization');
-    if (authorization !== undefined) request.headers.set('Authorization', authorization);
-    if (proxyAuthorization !== undefined) request.headers.set('Proxy-Authorization', proxyAuthorization);
-    this.send(request);
+    const authenticated = this.regenerateAuthorization(base, request);
+    if (authenticated !== undefined) this.send(authenticated);
   }
 
   /**
@@ -342,12 +335,25 @@ export class Registrar {
     this.redirectCount += 1;
     if (response.statusCode === 301) this.redirectTarget = contact;
     const request = this.nextRequestForTarget(contact, base);
-    // Carry any in-progress authorization (from an earlier 401/407) forward.
-    const authorization = base.headers.get('Authorization');
-    const proxyAuthorization = base.headers.get('Proxy-Authorization');
-    if (authorization !== undefined) request.headers.set('Authorization', authorization);
-    if (proxyAuthorization !== undefined) request.headers.set('Proxy-Authorization', proxyAuthorization);
-    this.send(request);
+    const authenticated = this.regenerateAuthorization(base, request);
+    if (authenticated !== undefined) this.send(authenticated);
+  }
+
+  /** Return a fresh Digest request, or the plain request when no auth is active. */
+  private regenerateAuthorization(base: SipRequestMessage, request: SipRequestMessage): SipRequestMessage | undefined {
+    const hasAuthorization = AUTHORIZATION_HEADERS.some((name) => base.headers.has(name));
+    if (!hasAuthorization) return request;
+    const requestId = this.authExchangeId;
+    if (this.authManager === undefined || this.credentials === undefined || requestId === undefined) {
+      this.fail(new SipError(0, 'REGISTER authentication exchange cannot be regenerated'));
+      return undefined;
+    }
+    const result = this.authManager.reauthorize({ requestId, request, credentials: this.credentials });
+    if (isAuthFailure(result)) {
+      this.fail(result.error);
+      return undefined;
+    }
+    return result;
   }
 
   /**
@@ -379,12 +385,11 @@ export class Registrar {
     this.settle();
   }
 
-  /** Release every retry-budget entry accumulated by the active exchange. */
+  /** Release the retry budget and retained challenge for the active exchange. */
   private releaseAuthBudget(): void {
-    if (this.activeRequestIds.size > 0 && this.authManager !== undefined) {
-      for (const requestId of this.activeRequestIds) this.authManager.settle(requestId);
-    }
-    this.activeRequestIds.clear();
+    const requestId = this.authExchangeId;
+    this.authExchangeId = undefined;
+    if (requestId !== undefined) this.authManager?.settle(requestId);
   }
 
   private scheduleRefresh(granted: number): void {

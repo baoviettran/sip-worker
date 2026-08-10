@@ -67,6 +67,7 @@ export class Inviter {
   private readonly sessionId: string;
   private readonly callId: string;
   private readonly fromTag: string;
+  private readonly authExchangeId: string;
   private localCSeq = 1;
 
   private invitePromise: Promise<void> | undefined;
@@ -97,6 +98,7 @@ export class Inviter {
     this.sessionId = options.idGenerator.branch();
     this.callId = options.idGenerator.branch();
     this.fromTag = options.idGenerator.branch();
+    this.authExchangeId = `${this.callId}:INVITE`;
   }
 
   /**
@@ -320,6 +322,7 @@ export class Inviter {
     const deferred = this.inviteDeferred;
     if (deferred !== undefined && this.dialogSet.hasSelection) {
       this.inviteDeferred = undefined;
+      this.settleAuthExchange();
       deferred.resolve();
       this.session.transition('confirmed');
     }
@@ -332,7 +335,7 @@ export class Inviter {
     }
 
     const result = this.authManager.retry({
-      requestId: `${this.callId}:${cseqNumber(base)}`,
+      requestId: this.authExchangeId,
       request: base,
       response,
       credentials: this.credentials,
@@ -465,6 +468,7 @@ export class Inviter {
     const inviteDeferred = this.inviteDeferred;
     this.inviteDeferred = undefined;
     if (inviteDeferred !== undefined) {
+      this.settleAuthExchange();
       inviteDeferred.resolve();
       this.session.transition('confirmed');
       if (this.disposed) return;
@@ -488,6 +492,7 @@ export class Inviter {
     if (this.disposed) return;
     this.disposed = true;
     this.teardown();
+    this.settleAuthExchange();
 
     const inviteDeferred = this.inviteDeferred;
     this.inviteDeferred = undefined;
@@ -506,10 +511,15 @@ export class Inviter {
 
   private fail(reason: unknown): void {
     this.teardown();
+    this.settleAuthExchange();
     const deferred = this.inviteDeferred;
     this.inviteDeferred = undefined;
     if (deferred !== undefined) deferred.reject(reason);
     this.session.transition('failed', reason instanceof Error ? reason : undefined);
+  }
+
+  private settleAuthExchange(): void {
+    this.authManager?.settle(this.authExchangeId);
   }
 
   private settleHangup(): void {

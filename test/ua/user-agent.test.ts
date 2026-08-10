@@ -12,6 +12,9 @@ import type { MediaMessage } from '../../src/media/index.js';
 import type { Invitation } from '../../src/ua/invitation.js';
 import type { Inviter } from '../../src/ua/inviter.js';
 
+const AUTH_REALM = 'example.com';
+const AUTH_NONCE = 'ua-shared-nonce';
+
 function makeIdGenerator() {
   let n = 0;
   return { branch: () => `id-${(n += 1)}` };
@@ -113,6 +116,7 @@ class FakeMediaPort {
 
 function setup(options: {
   liveness?: LivenessStrategy; intervalMs?: number; viaAddress?: string; transport?: FakeTransport;
+  credentials?: boolean;
 } = {}) {
   const clock = new FakeClock();
   const transport = options.transport ?? new FakeTransport({ reliable: true, framing: 'stream' });
@@ -129,8 +133,35 @@ function setup(options: {
     liveness: options.liveness,
     mediaController,
     viaAddress: options.viaAddress,
+    credentials: options.credentials ? { username: 'alice', password: 'secret' } : undefined,
   });
   return { clock, transport, ua, idGenerator };
+}
+
+function digestNonceCount(request: SipRequestMessage): string | undefined {
+  return request.headers.get('Authorization')?.match(/nc=([0-9a-fA-F]{8})/)?.[1];
+}
+
+function respondTo(
+  transport: FakeTransport,
+  request: SipRequestMessage,
+  statusCode: number,
+  options: { challenge?: boolean; contact?: string } = {},
+): void {
+  const headers = new Headers();
+  headers.set('Via', request.headers.get('Via') ?? '');
+  headers.set('From', request.headers.get('From') ?? '');
+  headers.set('To', `${request.headers.get('To') ?? ''};tag=server`);
+  headers.set('Call-ID', request.headers.get('Call-ID') ?? '');
+  headers.set('CSeq', request.headers.get('CSeq') ?? '');
+  if (options.contact !== undefined) headers.set('Contact', options.contact);
+  if (options.challenge === true) {
+    headers.set(
+      'WWW-Authenticate',
+      `Digest realm="${AUTH_REALM}", nonce="${AUTH_NONCE}", qop="auth", algorithm=SHA-256`,
+    );
+  }
+  transport.emitData(serializeMessage(makeResponse(statusCode, statusCode === 200 ? 'OK' : 'Unauthorized', headers)));
 }
 
 /** The Via header of the outbound INVITE request, or '' if none was sent. */
@@ -259,6 +290,37 @@ function sentOptions(transport: FakeTransport): SipRequestMessage[] {
   }
   return out;
 }
+
+describe('UserAgent Digest ownership', () => {
+  it('uses one credentials-created AuthManager for REGISTER and INVITE', async () => {
+    const { ua, transport } = setup({ credentials: true });
+    await ua.connect();
+
+    const registration = ua.register();
+    await flush();
+    const initialRegister = sentRequests(transport, 'REGISTER').at(-1)!;
+    respondTo(transport, initialRegister, 401, { challenge: true });
+    await flush();
+    const authenticatedRegister = sentRequests(transport, 'REGISTER').at(-1)!;
+    expect(authenticatedRegister.headers.get('Authorization')).toMatch(/^Digest /);
+    expect(digestNonceCount(authenticatedRegister)).toBe('00000001');
+    respondTo(transport, authenticatedRegister, 200);
+    await registration;
+
+    const invitation = ua.invite('sip:bob@example.com');
+    await flush();
+    const initialInvite = sentRequests(transport, 'INVITE').at(-1)!;
+    respondTo(transport, initialInvite, 401, { challenge: true });
+    await flush();
+    const authenticatedInvite = sentRequests(transport, 'INVITE').at(-1)!;
+    expect(authenticatedInvite.headers.get('Authorization')).toMatch(/^Digest /);
+    expect(digestNonceCount(authenticatedInvite)).toBe('00000002');
+    respondTo(transport, authenticatedInvite, 200, { contact: '<sip:bob@192.0.2.2:5060>' });
+    await invitation;
+
+    await ua.disconnect();
+  });
+});
 
 describe('UserAgent liveness wiring', () => {
   it('starts an injected strategy on connect and stops it on disconnect', async () => {

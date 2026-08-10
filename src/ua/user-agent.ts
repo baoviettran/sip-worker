@@ -83,6 +83,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
   private readonly transport: Transport;
   private readonly clock: Clock;
   private readonly options: UserAgentOptions;
+  private readonly authManager?: AuthManager;
   private layer?: TransactionLayer;
   private ingress?: SipIngress;
   private registrar?: Registrar;
@@ -102,6 +103,8 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     this.transport = options.transport;
     this.clock = options.clock;
     this.options = options;
+    this.authManager = options.authManager ??
+      (options.credentials ? new AuthManager(options.idGenerator) : undefined);
   }
 
   /** Current registration state. */
@@ -191,9 +194,6 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     });
 
     // Create the registrar (now operations are enabled)
-    const authManager = this.options.authManager ??
-      (this.options.credentials ? new AuthManager(this.options.idGenerator) : undefined);
-
     const registrarOptions: RegistrarOptions = {
       registrarUri: this.options.registrarUri,
       aor: this.options.aor,
@@ -202,7 +202,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       idGenerator: this.options.idGenerator,
       layer: this.layer,
       clock: this.clock,
-      authManager,
+      authManager: this.authManager,
       refreshFraction: this.options.refreshFraction,
       initialIdentity: this.options.initialIdentity,
     };
@@ -292,7 +292,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       layer: this.layer,
       clock: this.clock,
       controller: mediaController,
-      authManager: this.options.authManager,
+      authManager: this.authManager,
       credentials: this.options.credentials,
       onDialogCreated: (dialog) => {
         if (!this.disconnected) this.dialogOwners.set(dialog.id, inviter);
