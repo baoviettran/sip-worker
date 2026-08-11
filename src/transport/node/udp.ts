@@ -68,7 +68,7 @@ export class NodeUdpTransport implements Transport {
     if (typeof rinfo !== 'object' || rinfo === null) return false;
     const info = rinfo as { address?: unknown; port?: unknown };
     return info.address === this.options.remoteHost && info.port === this.options.remotePort;
-  };
+  }
 
   private readonly handleError: SocketListener = (...args) => {
     if (!this.socketListenersActive) return;
