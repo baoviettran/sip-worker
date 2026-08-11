@@ -120,6 +120,19 @@ describe('NonInviteServerTransaction', () => {
     expect(h.tx.state).toBe('Terminated');
   });
 
+  it('normalizes a synchronous final-response send throw and terminates', () => {
+    const h = setup();
+    start(h);
+    h.transport.send = () => {
+      throw new Error('synchronous send failure');
+    };
+
+    expect(() => h.tx.sendResponse(response(200))).not.toThrow();
+    expect(h.events.filter((event) => event.type === 'transportError')).toHaveLength(1);
+    expect(h.tx.state).toBe('Terminated');
+    expect(h.clock.pending()).toBe(0);
+  });
+
   it('send failure emits transportError and terminates', async () => {
     const clock = new FakeClock();
     const transport = new FakeTransport({ reliable: false, framing: 'datagram' });
@@ -140,5 +153,17 @@ describe('NonInviteServerTransaction', () => {
     await Promise.resolve();
     expect(events.filter((e) => e.type === 'transportError')).toHaveLength(1);
     expect(tx.state).toBe('Terminated');
+
+  });
+
+  it('does not arm Timer J after final-response send terminates re-entrantly', () => {
+    const h = setup();
+    start(h);
+    h.transport.onSend = () => h.tx.terminate();
+
+    h.tx.sendResponse(response(200));
+
+    expect(h.tx.state).toBe('Terminated');
+    expect(h.clock.pending()).toBe(0);
   });
 });

@@ -313,7 +313,8 @@ export class Registrar {
 
   private handleMinExpires(base: SipRequestMessage, response: SipResponseMessage): void {
     const interval = minExpiresFor(response);
-    const request = this.nextRequest(interval, base.headers.get('Contact') ?? this.contact);
+    const fresh = this.nextRequest(interval, base.headers.get('Contact') ?? this.contact);
+    const request = { ...fresh, uri: base.uri };
     const authenticated = this.regenerateAuthorization(base, request);
     if (authenticated !== undefined) this.send(authenticated);
   }

@@ -124,6 +124,23 @@ describe('Dialog.fromUac', () => {
 });
 
 describe('dialog routing', () => {
+
+  it('routes with header tags while ignoring quoted and URI tag decoys', () => {
+    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator());
+    const validHeaders = new Headers();
+    validHeaders.set('From', '<sip:bob@example.com;tag=uri-remote>;TaG=bob77');
+    validHeaders.set('To', '<sip:alice@example.com;tag=uri-local>;TAG=alice9');
+    validHeaders.set('Call-ID', 'abc123');
+    validHeaders.set('CSeq', '1 BYE');
+    const valid = makeRequest('BYE', 'sip:alice@example.com', validHeaders);
+    expect(dialog.matchesRequest(valid)).toBe(true);
+
+    const forgedHeaders = validHeaders.clone();
+    forgedHeaders.set('From', '"Agent;tag=bob77;ignored" <sip:bob@example.com>');
+    forgedHeaders.set('To', '<sip:alice@example.com>;tag=alice9');
+    const forged = makeRequest('BYE', 'sip:alice@example.com', forgedHeaders);
+    expect(dialog.matchesRequest(forged)).toBe(false);
+  });
   it('uses the remote target and complete route set for loose routing', () => {
     // Repeated Record-Route fields [p1, p2] reverse to [p2, p1].
     const response = make2xx(['<sip:p1.example.com;lr>', '<sip:p2.example.com;lr>']);

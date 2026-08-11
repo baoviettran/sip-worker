@@ -44,6 +44,12 @@ export class Session {
     const previous = this.stateValue;
     this.stateValue = to;
     const event: SessionEvent = { session: this, previous, state: to, error };
-    for (const listener of this.listeners) listener(event);
+    for (const listener of this.listeners) {
+      try {
+        listener(event);
+      } catch {
+        // Observers cannot corrupt an already-committed protocol transition.
+      }
+    }
   }
 }

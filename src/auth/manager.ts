@@ -16,9 +16,9 @@
  *
  * Nonce counts are keyed by realm+nonce and start at `00000001` per new
  * nonce. cnonce and the Via branch come from the injected `IdGenerator`.
- * Ordinary (non-stale) retries are keyed by requestId and budgeted to three
- * per request; a `stale=true` challenge is answered with the new nonce
- * without consuming that budget.
+ * Ordinary retries are keyed by requestId and budgeted to three per request.
+ * A `stale=true` challenge uses the new nonce without consuming that ordinary
+ * budget, but is bounded by its own absolute retry cap.
  */
 
 import { makeRequest } from '../messages/message.js';
@@ -50,6 +50,8 @@ export type AuthFailure = {
 
 /** Default cap on ordinary (non-stale) retries per requestId. */
 const DEFAULT_MAX_RETRIES = 3;
+/** Absolute cap on stale=true retries within one logical exchange. */
+const DEFAULT_MAX_STALE_RETRIES = 3;
 
 /** Cap on distinct realm+nonce counters retained; evict the oldest insertion. */
 const MAX_NONCE_COUNTS = 64;
@@ -120,6 +122,7 @@ export class AuthManager {
   private readonly idGenerator: IdGenerator;
   private readonly maxOrdinary: number;
   private readonly retriesByRequest: Map<string, number> = new Map();
+  private readonly staleRetriesByRequest: Map<string, number> = new Map();
   private readonly challengesByRequest: Map<string, AnsweredChallenge> = new Map();
   private readonly nonceCounts: Map<string, number> = new Map();
 
@@ -135,12 +138,17 @@ export class AuthManager {
 
   /** Number of in-flight request retry budgets currently retained. */
   get retriesByRequestSize(): number {
-    return this.retriesByRequest.size;
+    let size = this.retriesByRequest.size;
+    for (const requestId of this.staleRetriesByRequest.keys()) {
+      if (!this.retriesByRequest.has(requestId)) size += 1;
+    }
+    return size;
   }
 
   /** Mark an exchange (by requestId) complete so its retry budget is released. */
   settle(requestId: string): void {
     this.retriesByRequest.delete(requestId);
+    this.staleRetriesByRequest.delete(requestId);
     this.challengesByRequest.delete(requestId);
   }
 
@@ -173,16 +181,18 @@ export class AuthManager {
       };
     }
 
-    if (challenge.stale !== true) {
-      const spent = this.retriesByRequest.get(requestId) ?? 0;
-      if (spent >= this.maxOrdinary) {
-        return {
-          type: 'exhausted',
-          error: new SipError(response.statusCode, `authentication retry budget exhausted for request "${requestId}"`),
-        };
-      }
-      this.retriesByRequest.set(requestId, spent + 1);
+    const budget = challenge.stale === true
+      ? this.staleRetriesByRequest
+      : this.retriesByRequest;
+    const maximum = challenge.stale === true ? DEFAULT_MAX_STALE_RETRIES : this.maxOrdinary;
+    const spent = budget.get(requestId) ?? 0;
+    if (spent >= maximum) {
+      return {
+        type: 'exhausted',
+        error: new SipError(response.statusCode, `authentication retry budget exhausted for request "${requestId}"`),
+      };
     }
+    budget.set(requestId, spent + 1);
 
     this.challengesByRequest.set(requestId, answered);
     return this.authorize(request, credentials, answered, true);

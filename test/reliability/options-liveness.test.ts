@@ -48,7 +48,7 @@ function responseFor(request: SipRequestMessage, status: number): SipResponseMes
   const headers = new Headers();
   headers.set('Via', request.headers.get('Via') ?? '');
   headers.set('From', request.headers.get('From') ?? '');
-  headers.set('To', request.headers.get('To') ?? '');
+  headers.set('To', `${request.headers.get('To') ?? ''};tag=proxy`);
   headers.set('Call-ID', request.headers.get('Call-ID') ?? '');
   headers.set('CSeq', request.headers.get('CSeq') ?? '');
   return makeResponse(status, status >= 200 ? 'OK' : 'Trying', headers);
@@ -239,6 +239,21 @@ describe('OptionsLiveness', () => {
 
     expect(failures).toHaveLength(1);
     expect(failures[0]).toBeInstanceOf(TransportError);
+  });
+
+  it('does not resurrect probe ownership when stop is called synchronously during send', () => {
+    const { clock, transport, requests, failures, liveness } = setup();
+    transport.onSend = () => {
+      liveness.stop();
+    };
+    liveness.start();
+    clock.advance(1000);
+
+    expect(requests).toHaveLength(1);
+    expect(clock.pending()).toBe(0);
+    clock.advance(50000);
+    expect(requests).toHaveLength(1);
+    expect(failures).toEqual([]);
   });
 
   it('stop unsubscribes from its owned probe without scheduling another', () => {

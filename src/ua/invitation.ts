@@ -48,7 +48,7 @@ export class Invitation {
   private readonly T2: number;
   private readonly onDialogCreated: ((dialog: Dialog) => void) | undefined;
 
-  private state: 'pending' | 'answering' | 'accepted' | 'rejected' | 'cancelled' | 'terminated' = 'pending';
+  private state: 'pending' | 'answering' | 'accepted' | 'confirmed' | 'rejected' | 'cancelled' | 'terminated' = 'pending';
   private readonly sessionId: string;
   private readonly remoteSdp: string;
 
@@ -56,6 +56,7 @@ export class Invitation {
   private dialogValue: Dialog | undefined;
   private acceptedResponse: SipResponseMessage | undefined;
   private retransmitter: InviteResponseRetransmitter | undefined;
+  private unsubscribeTransactionEvents: (() => void) | undefined;
   private disposed = false;
   readonly toTag: string;
 
@@ -79,6 +80,11 @@ export class Invitation {
     this.sessionId = options.idGenerator.branch();
     this.remoteSdp = bodyText(options.request);
     this.toTag = options.idGenerator.branch();
+    this.unsubscribeTransactionEvents = this.layer.subscribeServer(this.transaction.key, (event) => {
+      if (event.type === 'transportError' && this.answerDeferred !== undefined) {
+        this.fail(event.error);
+      }
+    });
   }
 
   /**
@@ -146,7 +152,7 @@ export class Invitation {
     const headers = new Headers();
     headers.set('Via', this.request.headers.get('Via') ?? `SIP/2.0/UDP ${this.viaAddress}`);
     headers.set('From', this.request.headers.get('From') ?? '');
-    headers.set('To', `${this.request.headers.get('To') ?? ''};tag=${this.toTag}`);
+    headers.set('To', this.localToHeader(this.request));
     headers.set('Call-ID', this.request.headers.get('Call-ID') ?? '');
     headers.set('CSeq', this.request.headers.get('CSeq') ?? '');
     headers.set('Contact', this.contact);
@@ -162,11 +168,16 @@ export class Invitation {
     const headers = new Headers();
     headers.set('Via', this.request.headers.get('Via') ?? `SIP/2.0/UDP ${this.viaAddress}`);
     headers.set('From', this.request.headers.get('From') ?? '');
-    headers.set('To', this.request.headers.get('To') ?? '');
+    headers.set('To', this.localToHeader(this.request));
     headers.set('Call-ID', this.request.headers.get('Call-ID') ?? '');
     headers.set('CSeq', this.request.headers.get('CSeq') ?? '');
 
     return makeResponse(statusCode, reason, headers);
+  }
+
+  private localToHeader(request: SipRequestMessage): string {
+    const to = request.headers.get('To') ?? '';
+    return extractTag(to) === undefined ? `${to};tag=${this.toTag}` : to;
   }
 
   private startRetransmission(response: SipResponseMessage): void {
@@ -179,6 +190,7 @@ export class Invitation {
       T1: this.T1,
       T2: this.T2,
       onTimeout: () => this.onRetransmitTimeout(),
+      onError: (error) => this.fail(error),
     });
 
     this.retransmitter.start();
@@ -231,7 +243,7 @@ export class Invitation {
       return;
     }
     const response = this.acceptedResponse;
-    if (this.state !== 'accepted' || response === undefined) return;
+    if ((this.state !== 'accepted' && this.state !== 'confirmed') || response === undefined) return;
     const headers = response.headers.clone();
     headers.set('Via', request.headers.get('Via') ?? '');
     this.layer.sendResponse(
@@ -251,8 +263,7 @@ export class Invitation {
         this.layer.sendResponse(transaction.key, this.buildRequestResponse(request, 481, 'Call/Transaction Does Not Exist'));
         return;
       }
-      this.layer.sendResponse(transaction.key, this.buildRequestResponse(request, 200, 'OK'));
-      this.cancel();
+      this.cancel(transaction, request);
       return;
     }
     if (this.dialogValue === undefined) return;
@@ -272,7 +283,7 @@ export class Invitation {
     const headers = new Headers();
     headers.set('Via', request.headers.get('Via') ?? '');
     headers.set('From', request.headers.get('From') ?? '');
-    headers.set('To', request.headers.get('To') ?? '');
+    headers.set('To', this.localToHeader(request));
     headers.set('Call-ID', request.headers.get('Call-ID') ?? '');
     headers.set('CSeq', request.headers.get('CSeq') ?? '');
     return makeResponse(statusCode, reason, headers);
@@ -284,12 +295,11 @@ export class Invitation {
     this.disposed = true;
     this.state = 'terminated';
     this.teardown();
-    const deferred = this.answerDeferred;
-    this.answerDeferred = undefined;
+    const deferred = this.takeAnswerDeferred();
+    deferred?.reject(error);
     if (this.session.state !== 'terminated' && this.session.state !== 'failed') {
       this.session.transition('failed', error instanceof Error ? error : new Error(String(error)));
     }
-    deferred?.reject(error);
   }
 
   private matchesCancel(request: SipRequestMessage): boolean {
@@ -316,32 +326,38 @@ export class Invitation {
       && extractTag(request.headers.get('To')) === extractTag(this.request.headers.get('To'));
   }
 
-  private cancel(): void {
-    if (this.state !== 'pending' && this.state !== 'answering') return;
+  private cancel(transaction: ServerTransaction, request: SipRequestMessage): void {
+    const response = this.buildRequestResponse(request, 200, 'OK');
+    if (this.state !== 'pending' && this.state !== 'answering') {
+      this.layer.sendResponse(transaction.key, response);
+      return;
+    }
+
     this.state = 'cancelled';
+    this.teardown();
     const error = new SipError(487, 'INVITE cancelled');
+    const deferred = this.takeAnswerDeferred();
+    deferred?.reject(error);
+
     try {
-      this.layer.sendResponse(this.transaction.key, this.buildErrorResponse(487, 'Request Terminated'));
+      this.layer.sendResponse(transaction.key, response);
     } finally {
-      this.teardown();
-      this.session.transition('terminated');
-      const deferred = this.answerDeferred;
-      this.answerDeferred = undefined;
-      if (deferred !== undefined) deferred.reject(error);
+      try {
+        this.layer.sendResponse(this.transaction.key, this.buildErrorResponse(487, 'Request Terminated'));
+      } finally {
+        this.session.transition('terminated');
+      }
     }
   }
 
   private onAck(): void {
     if (this.state !== 'accepted') return;
-    if (this.retransmitter !== undefined) {
-      this.retransmitter.stop();
-      this.retransmitter = undefined;
-    }
+    this.state = 'confirmed';
+    this.teardown();
 
+    const deferred = this.takeAnswerDeferred();
+    deferred?.resolve();
     this.session.transition('confirmed');
-    const deferred = this.answerDeferred;
-    this.answerDeferred = undefined;
-    if (deferred !== undefined) deferred.resolve();
   }
 
   private onRetransmitTimeout(): void {
@@ -349,28 +365,37 @@ export class Invitation {
   }
 
   private fail(reason: unknown): void {
+    this.state = 'terminated';
     this.teardown();
+    const deferred = this.takeAnswerDeferred();
+    deferred?.reject(reason);
     this.session.transition('failed', reason instanceof Error ? reason : undefined);
-    const deferred = this.answerDeferred;
-    this.answerDeferred = undefined;
-    if (deferred !== undefined) deferred.reject(reason);
   }
 
   private settleHangup(): void {
     this.state = 'terminated';
     this.teardown();
-    const deferred = this.answerDeferred;
-    this.answerDeferred = undefined;
-    this.session.transition('terminated');
+    const deferred = this.takeAnswerDeferred();
     if (deferred !== undefined) {
       deferred.reject(new SipError(0, 'BYE received before ACK'));
     }
+    this.session.transition('terminated');
+  }
+
+  private takeAnswerDeferred(): { resolve: () => void; reject: (reason: unknown) => void } | undefined {
+    const deferred = this.answerDeferred;
+    this.answerDeferred = undefined;
+    return deferred;
   }
 
   private teardown(): void {
     if (this.retransmitter !== undefined) {
       this.retransmitter.stop();
       this.retransmitter = undefined;
+    }
+    if (this.unsubscribeTransactionEvents !== undefined) {
+      this.unsubscribeTransactionEvents();
+      this.unsubscribeTransactionEvents = undefined;
     }
   }
 }

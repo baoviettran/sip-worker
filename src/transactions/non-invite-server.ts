@@ -91,6 +91,7 @@ export class NonInviteServerTransaction {
       this.currentState = 'Completed';
       this.cachedResponse = serializeMessage(response);
       this.sendBytes(this.cachedResponse);
+      if (this.currentState !== 'Completed') return;
       this.armTimerJ();
     }
   }
@@ -112,10 +113,15 @@ export class NonInviteServerTransaction {
   }
 
   private sendBytes(bytes: Uint8Array): void {
-    this.transport.send(bytes).catch((err: unknown) => {
+    const onError = (err: unknown): void => {
       const error = err instanceof TransportError ? err : new TransportError(String(err));
       this.terminate(error);
-    });
+    };
+    try {
+      void this.transport.send(bytes).catch(onError);
+    } catch (error) {
+      onError(error);
+    }
   }
 
   private armTimerJ(): void {

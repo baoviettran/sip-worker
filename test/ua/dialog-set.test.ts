@@ -138,6 +138,38 @@ describe('DialogSet', () => {
       expect(ackToTag(sentBytes[2]!)).toBe('tag-b');
     });
 
+    it('starts cleanup once for concurrent repeated 2xx on an extra fork', async () => {
+      const pendingSends: Array<() => void> = [];
+      const delayedTransport = {
+        send: async (bytes: Uint8Array) => new Promise<void>((resolve) => {
+          sentBytes.push(bytes.slice());
+          pendingSends.push(resolve);
+        }),
+      };
+      const concurrentSet = new DialogSet(
+        createInviteRequest(),
+        idGenerator,
+        delayedTransport,
+        async (dialog: Dialog) => {
+          sendByeCalls.push(dialog);
+        },
+      );
+
+      const selected = concurrentSet.handleSuccess(createResponse('tag-a'));
+      pendingSends.shift()!();
+      await selected;
+
+      const firstExtra = concurrentSet.handleSuccess(createResponse('tag-b'));
+      const repeatedExtra = concurrentSet.handleSuccess(createResponse('tag-b'));
+      expect(pendingSends).toHaveLength(2);
+      for (const release of pendingSends.splice(0)) release();
+      await Promise.all([firstExtra, repeatedExtra]);
+
+      expect(sendByeCalls).toHaveLength(1);
+      expect(sendByeCalls[0]!.remoteTag).toBe('tag-b');
+      expect(concurrentSet.allDialogs).toHaveLength(2);
+    });
+
     it('should handle three forks: first selected, rest ACKed and BYEd', async () => {
       const responseA = createResponse('tag-a');
       const responseB = createResponse('tag-b');

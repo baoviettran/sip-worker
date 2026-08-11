@@ -9,6 +9,7 @@ import type { SipRequestMessage } from '../../src/messages/message.js';
 import { parseMessage } from '../../src/messages/parser.js';
 import { serializeMessage } from '../../src/messages/serializer.js';
 import { AuthManager } from '../../src/auth/manager.js';
+import { responseMatchesRequestIdentity } from '../../src/ua/response-identity.js';
 
 describe('Full Call Integration', () => {
   let transport: FakeTransport;
@@ -139,6 +140,39 @@ describe('Full Call Integration', () => {
     expect(states).toContain('terminated');
   });
 
+  it('publishes an extra fork before ACK I/O so an immediate remote BYE gets 200', async () => {
+    await ua.connect();
+    const outgoing = ua.invite('sip:bob@example.com');
+    await waitForSentMessage(transport, 'INVITE');
+    await send200OkWithTag(transport, 'fork-a');
+    await outgoing;
+
+    let sentRemoteBye = false;
+    transport.onSend = (bytes) => {
+      const parsed = parseMessage(bytes);
+      if (sentRemoteBye
+        || !parsed.ok
+        || parsed.value.kind !== 'request'
+        || parsed.value.method !== 'ACK'
+        || toTagOf(parsed.value) !== 'fork-b') return;
+      sentRemoteBye = true;
+      const remoteBye = createOutgoingBye(transport, 'during-fork-ack', 'fork-b');
+      transport.emitData(serializeMessage(remoteBye));
+    };
+
+    await send200OkWithTag(transport, 'fork-b');
+    await flush();
+
+    const statuses = transport.sent
+      .map((bytes) => parseMessage(bytes))
+      .filter((parsed) => parsed.ok
+        && parsed.value.kind === 'response'
+        && parsed.value.headers.get('CSeq') === '1 BYE')
+      .map((parsed) => parsed.ok && parsed.value.kind === 'response' ? parsed.value.statusCode : 0);
+    expect(statuses).toEqual([200]);
+    expect(ua.callState).toBe('confirmed');
+  });
+
   it('should handle incoming call flow: invite → answer → bye', async () => {
     const incomingCalls: any[] = [];
     ua.on('incomingCall', (event: any) => {
@@ -225,6 +259,29 @@ describe('Full Call Integration', () => {
     expect(ua.callState).toBe('confirmed');
   });
 
+  it('emits a local rejection accepted by the full response identity policy', async () => {
+    const incomingCalls: any[] = [];
+    ua.on('incomingCall', (invitation: any) => incomingCalls.push(invitation));
+
+    await ua.connect();
+    const invite = createInviteRequest();
+    transport.emitData(serializeMessage(invite));
+    await flush();
+
+    incomingCalls[0]!.reject(486, 'Busy Here');
+    await flush();
+
+    const rejection = transport.sent
+      .map((bytes) => parseMessage(bytes))
+      .find((parsed) => parsed.ok
+        && parsed.value.kind === 'response'
+        && parsed.value.statusCode === 486);
+    if (rejection === undefined || !rejection.ok || rejection.value.kind !== 'response') {
+      throw new Error('Expected 486 response');
+    }
+    expect(responseMatchesRequestIdentity(invite, rejection.value)).toBe(true);
+  });
+
   it('accepts a matching CANCEL and terminates the pending incoming invitation', async () => {
     const incomingCalls: any[] = [];
     ua.on('incomingCall', (invitation: any) => {
@@ -232,21 +289,28 @@ describe('Full Call Integration', () => {
     });
 
     await ua.connect();
-    transport.emitData(serializeMessage(createInviteRequest()));
+    const invite = createInviteRequest();
+    transport.emitData(serializeMessage(invite));
     await flush();
     expect(incomingCalls).toHaveLength(1);
 
-    transport.emitData(serializeMessage(createCancelRequest()));
+    const cancel = createCancelRequest();
+    transport.emitData(serializeMessage(cancel));
     await flush();
 
     const responses = transport.sent
       .map((bytes) => parseMessage(bytes))
       .filter((parsed) => parsed.ok && parsed.value.kind === 'response')
-      .map((parsed) => parsed.ok && parsed.value.kind === 'response'
-        ? [parsed.value.statusCode, parsed.value.headers.get('CSeq')]
-        : [0, undefined]);
-    expect(responses).toContainEqual([200, '1 CANCEL']);
-    expect(responses).toContainEqual([487, '1 INVITE']);
+      .map((parsed) => parsed.ok && parsed.value.kind === 'response' ? parsed.value : undefined)
+      .filter((response) => response !== undefined);
+    const cancelOk = responses.find((response) => response.statusCode === 200
+      && response.headers.get('CSeq') === '1 CANCEL');
+    const inviteTerminated = responses.find((response) => response.statusCode === 487
+      && response.headers.get('CSeq') === '1 INVITE');
+    expect(cancelOk).toBeDefined();
+    expect(inviteTerminated).toBeDefined();
+    expect(responseMatchesRequestIdentity(cancel, cancelOk!)).toBe(true);
+    expect(responseMatchesRequestIdentity(invite, inviteTerminated!)).toBe(true);
     expect(incomingCalls[0]!.session.state).toBe('terminated');
   });
 

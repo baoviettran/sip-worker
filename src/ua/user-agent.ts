@@ -297,6 +297,9 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       onDialogCreated: (dialog) => {
         if (!this.disconnected) this.dialogOwners.set(dialog.id, inviter);
       },
+      onDialogReleased: (dialog) => {
+        if (this.dialogOwners.get(dialog.id) === inviter) this.dialogOwners.delete(dialog.id);
+      },
     });
 
     // Listen to session state changes
@@ -310,10 +313,9 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       if (terminal && this.activeInviter === inviter) {
         this.activeInviter = undefined;
       }
-      const dialog = inviter.dialog;
-      if (terminal
-        && dialog !== undefined && this.dialogOwners.get(dialog.id) === inviter) {
-        this.dialogOwners.delete(dialog.id);
+      const selectedDialog = inviter.dialog;
+      if (terminal && selectedDialog !== undefined && this.dialogOwners.get(selectedDialog.id) === inviter) {
+        this.dialogOwners.delete(selectedDialog.id);
       }
       if (terminal) this.detachOwnerSession(inviter);
     };
@@ -366,6 +368,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     this.ownerSessionUnsubscribers.clear();
     this.activeInvitations.clear();
     this.dialogOwners.clear();
+    this.layer?.dispose();
 
     // Disconnect transport
     if (this.connected || this.connecting) {
@@ -474,7 +477,11 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     const headers = new Headers();
     headers.set('Via', request.headers.get('Via') ?? '');
     headers.set('From', request.headers.get('From') ?? '');
-    headers.set('To', request.headers.get('To') ?? '');
+    const to = request.headers.get('To') ?? '';
+    const taggedTo = statusCode === 100 || extractTag(to) !== undefined
+      ? to
+      : `${to};tag=${this.options.idGenerator.branch()}`;
+    headers.set('To', taggedTo);
     headers.set('Call-ID', request.headers.get('Call-ID') ?? '');
     headers.set('CSeq', request.headers.get('CSeq') ?? '');
     return makeResponse(statusCode, reason, headers);

@@ -1,6 +1,7 @@
 import { TransportError } from '../errors.js';
 import type { SipMessage, SipRequestMessage, SipResponseMessage } from '../messages/message.js';
 import { isRequest } from '../messages/message.js';
+import { responseMatchesRequestIdentity } from '../ua/response-identity.js';
 import type { Clock, Transport } from '../transport/transport.js';
 import type { MessageSink } from '../transport/ingress.js';
 import { buildNon2xxAck, MAGIC_COOKIE } from './ack.js';
@@ -159,6 +160,8 @@ export class TransactionLayer implements MessageSink {
   private readonly subscribers = new Set<(event: TransactionLayerEvent) => void>();
   private readonly subscribersByKey = new Map<TransactionKey, Set<(event: TransactionLayerEvent) => void>>();
   private readonly clientSubscribersByKey = new Map<TransactionKey, Set<(event: TransactionLayerEvent) => void>>();
+  private readonly serverSubscribersByKey = new Map<TransactionKey, Set<(event: TransactionLayerEvent) => void>>();
+  private disposed = false;
 
   constructor(options: TransactionLayerOptions) {
     this.transport = options.transport;
@@ -171,6 +174,35 @@ export class TransactionLayer implements MessageSink {
   /** Expose the transport for direct sends (e.g. 2xx ACKs that bypass transactions). */
   getTransport(): Transport {
     return this.transport;
+  }
+
+  /** Terminate every owned transaction and release all layer subscriptions. */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    try {
+      for (const transaction of [...this.clients.values()]) {
+        try {
+          transaction.terminate();
+        } catch {
+          // Continue terminating other transactions if an observer throws.
+        }
+      }
+      for (const transaction of [...this.servers.values()]) {
+        try {
+          transaction.terminate();
+        } catch {
+          // Continue terminating other transactions if an observer throws.
+        }
+      }
+    } finally {
+      this.clients.clear();
+      this.servers.clear();
+      this.subscribers.clear();
+      this.subscribersByKey.clear();
+      this.clientSubscribersByKey.clear();
+      this.serverSubscribersByKey.clear();
+    }
   }
 
   /**
@@ -218,12 +250,15 @@ export class TransactionLayer implements MessageSink {
         // A throwing subscriber must not break the layer or other listeners.
       }
     }
-    if (owner !== this.clients) return;
-    for (const listener of this.clientSubscribersByKey.get(key) ?? []) {
+    const directional = owner === this.clients
+      ? this.clientSubscribersByKey
+      : owner === this.servers ? this.serverSubscribersByKey : undefined;
+    if (directional === undefined) return;
+    for (const listener of directional.get(key) ?? []) {
       try {
         listener(event);
       } catch {
-        // A throwing client subscriber must not break the layer or others.
+        // A throwing directional subscriber must not break the layer or others.
       }
     }
   }
@@ -273,8 +308,26 @@ export class TransactionLayer implements MessageSink {
     };
   }
 
+  /**
+   * Subscribe only to events emitted by the server transaction with `key`.
+   * Client events are excluded even when a client transaction shares the key.
+   */
+  subscribeServer(key: TransactionKey, listener: (event: TransactionLayerEvent) => void): () => void {
+    const listeners = this.serverSubscribersByKey.get(key)
+      ?? new Set<(event: TransactionLayerEvent) => void>();
+    listeners.add(listener);
+    this.serverSubscribersByKey.set(key, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) this.serverSubscribersByKey.delete(key);
+    };
+  }
+
   /** Send a request, creating and starting the matching client transaction. */
   sendRequest(request: SipRequestMessage): ClientHandle {
+    if (this.disposed) {
+      throw new TransportError('transaction layer has been disposed');
+    }
     validateRequestIdentity(request);
     const key = clientKey(request);
     const existing = this.clients.get(key);
@@ -306,6 +359,9 @@ export class TransactionLayer implements MessageSink {
 
   /** Send a response via an existing server transaction. */
   sendResponse(key: TransactionKey, response: SipResponseMessage): void {
+    if (this.disposed) {
+      throw new TransportError('transaction layer has been disposed');
+    }
     const tx = this.servers.get(key);
     if (tx === undefined) {
       throw new TransportError(`no server transaction found for key: ${key}`);
@@ -315,6 +371,7 @@ export class TransactionLayer implements MessageSink {
 
   /** Route an incoming message to the correct client or server transaction. */
   receive(message: SipMessage): void {
+    if (this.disposed) return;
     if (isRequest(message)) this.receiveRequest(message);
     else this.receiveResponse(message);
   }
@@ -329,6 +386,7 @@ export class TransactionLayer implements MessageSink {
       this.emitToSubscribers(event);
       return;
     }
+    if (!responseMatchesRequestIdentity(tx.request, response)) return;
     tx.receive(response);
   }
 

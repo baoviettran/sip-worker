@@ -4,6 +4,7 @@ import { deriveTimers } from '../../src/transactions/timers.js';
 import type { TransactionLayerEvent } from '../../src/transactions/types.js';
 import type { SipRequestMessage, SipResponseMessage } from '../../src/messages/message.js';
 import { Headers, makeRequest, makeResponse } from '../../src/messages/index.js';
+import { TransportError } from '../../src/errors.js';
 import { FakeClock } from '../support/fake-clock.js';
 import { FakeTransport } from '../support/fake-transport.js';
 
@@ -14,6 +15,22 @@ interface Harness {
   transport: FakeTransport;
   events: TransactionLayerEvent[];
   tx: InviteClientTransaction;
+}
+
+class SynchronouslyThrowingTransport extends FakeTransport {
+  attempts = 0;
+
+  constructor(private readonly throwOnAttempt: number) {
+    super({ reliable: false, framing: 'datagram' });
+  }
+
+  override send(data: Uint8Array): Promise<void> {
+    this.attempts += 1;
+    if (this.attempts === this.throwOnAttempt) {
+      throw new TransportError(`synchronous send ${this.attempts} failed`);
+    }
+    return super.send(data);
+  }
 }
 
 function makeInvite(overrides: Partial<SipRequestMessage> = {}): SipRequestMessage {
@@ -27,9 +44,15 @@ function makeInvite(overrides: Partial<SipRequestMessage> = {}): SipRequestMessa
   };
 }
 
-function setup(overrides: Partial<{ reliable: boolean; uri: string; request: SipRequestMessage }> = {}): Harness {
+function setup(overrides: Partial<{
+  reliable: boolean;
+  uri: string;
+  request: SipRequestMessage;
+  transport: FakeTransport;
+}> = {}): Harness {
   const clock = new FakeClock();
-  const transport = new FakeTransport({ reliable: overrides.reliable ?? false, framing: 'datagram' });
+  const transport = overrides.transport
+    ?? new FakeTransport({ reliable: overrides.reliable ?? false, framing: 'datagram' });
   void transport.connect();
   const request = overrides.request ?? makeInvite(overrides.uri === undefined ? {} : { uri: overrides.uri });
   const events: TransactionLayerEvent[] = [];
@@ -252,6 +275,44 @@ describe('InviteClientTransaction', () => {
     expect(tx.state).toBe('Terminated');
     expect(events.filter((e) => e.type === 'transportError')).toHaveLength(1);
     expect(events).toContainEqual({ type: 'terminated', key: 'branch|example.com:5060|INVITE' });
+  });
+
+  it('normalizes a synchronous initial send throw and leaves no timers', () => {
+    const transport = new SynchronouslyThrowingTransport(1);
+    void transport.connect();
+    const { clock, events, tx } = setup({ transport });
+
+    expect(() => tx.start()).not.toThrow();
+
+    expect(tx.state).toBe('Terminated');
+    expect(events.filter((event) => event.type === 'transportError')).toHaveLength(1);
+    expect(clock.pending()).toBe(0);
+  });
+
+  it('normalizes a synchronous Timer A retransmit throw and leaves no timers', () => {
+    const transport = new SynchronouslyThrowingTransport(2);
+    void transport.connect();
+    const { clock, events, tx } = setup({ transport });
+    tx.start();
+
+    expect(() => clock.advance(TIMERS.T1)).not.toThrow();
+
+    expect(tx.state).toBe('Terminated');
+    expect(events.filter((event) => event.type === 'transportError')).toHaveLength(1);
+    expect(clock.pending()).toBe(0);
+  });
+
+  it('normalizes a synchronous non-2xx ACK send throw and leaves no timers', () => {
+    const transport = new SynchronouslyThrowingTransport(2);
+    void transport.connect();
+    const { clock, events, tx } = setup({ transport });
+    tx.start();
+
+    expect(() => tx.receive(response(486))).not.toThrow();
+
+    expect(tx.state).toBe('Terminated');
+    expect(events.filter((event) => event.type === 'transportError')).toHaveLength(1);
+    expect(clock.pending()).toBe(0);
   });
 
   it('terminate() emits terminated', () => {

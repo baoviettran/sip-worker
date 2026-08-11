@@ -254,6 +254,9 @@ describe('AuthManager.retry', () => {
     const staleRequest = stale as SipRequestMessage;
     const nc1 = staleRequest.headers.get('Authorization')?.match(/nc=([0-9a-fA-F]{8})/)?.[1];
     expect(nc1).toBe('00000001');
+    expect(manager.retriesByRequestSize).toBe(1);
+    manager.settle('req-stale');
+    expect(manager.retriesByRequestSize).toBe(0);
   });
 
   it('answers a stale=true retry without consuming another request budget via a fixed realm+nonce response', () => {

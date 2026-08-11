@@ -26,7 +26,7 @@ function viaHeader(branch: string, sentBy = '192.0.2.1:5060'): string {
 function makeInvite(branch = 'z9hG4bK-abc'): SipRequestMessage {
   const headers = new Headers();
   headers.set('Via', viaHeader(branch));
-  headers.set('From', '<sip:alice@example.com>');
+  headers.set('From', '<sip:alice@example.com>;tag=alice-tx');
   headers.set('To', '<sip:bob@example.com>');
   headers.set('Call-ID', 'abc123');
   headers.set('CSeq', '41 INVITE');
@@ -37,7 +37,7 @@ function makeInvite(branch = 'z9hG4bK-abc'): SipRequestMessage {
 function makeRegister(branch = 'z9hG4bK-reg'): SipRequestMessage {
   const headers = new Headers();
   headers.set('Via', viaHeader(branch));
-  headers.set('From', '<sip:alice@example.com>');
+  headers.set('From', '<sip:alice@example.com>;tag=alice-tx');
   headers.set('To', '<sip:alice@example.com>');
   headers.set('Call-ID', 'reg123');
   headers.set('CSeq', '1 REGISTER');
@@ -48,7 +48,7 @@ function makeRegister(branch = 'z9hG4bK-reg'): SipRequestMessage {
 function makeOptions(branch = 'z9hG4bK-options'): SipRequestMessage {
   const headers = new Headers();
   headers.set('Via', viaHeader(branch));
-  headers.set('From', '<sip:alice@example.com>');
+  headers.set('From', '<sip:alice@example.com>;tag=alice-tx');
   headers.set('To', '<sip:example.com>');
   headers.set('Call-ID', 'options123');
   headers.set('CSeq', '1 OPTIONS');
@@ -74,9 +74,13 @@ function setup(reliable = false): Harness {
 function responseFor(branch: string, statusCode: number, method = 'INVITE', cseq = '41', sentBy = '192.0.2.1:5060'): SipResponseMessage {
   const headers = new Headers();
   headers.set('Via', viaHeader(branch, sentBy));
-  headers.set('From', '<sip:alice@example.com>');
-  headers.set('To', '<sip:bob@example.com>');
-  headers.set('Call-ID', 'abc123');
+  headers.set('From', '<sip:alice@example.com>;tag=alice-tx');
+  headers.set('To', method === 'REGISTER'
+    ? '<sip:alice@example.com>;tag=server'
+    : method === 'OPTIONS'
+      ? '<sip:example.com>;tag=server'
+      : '<sip:bob@example.com>;tag=server');
+  headers.set('Call-ID', method === 'REGISTER' ? 'reg123' : method === 'OPTIONS' ? 'options123' : 'abc123');
   headers.set('CSeq', `${cseq} ${method}`);
   return makeResponse(statusCode, 'x', headers);
 }
@@ -93,6 +97,54 @@ describe('TransactionLayer', () => {
     layer.receive(responseFor('z9hG4bK-abc', 200));
     expect(events).toContainEqual(expect.objectContaining({ type: 'response', transaction: expect.objectContaining({ key: tx.key }) }));
     expect(tx.state).toBe('Accepted');
+  });
+
+  it('accepts a tagless 100 Trying without relaxing the remaining response identity', () => {
+    const { clock, transport, events, layer } = setup();
+    const invite = makeInvite();
+    const tx = layer.sendRequest(invite);
+    const trying = responseFor('z9hG4bK-abc', 100);
+    trying.headers.set('To', '<sip:bob@example.com>');
+    const forged = { ...trying, headers: trying.headers.clone() };
+    forged.headers.set('Call-ID', 'forged-call-id');
+    layer.receive(forged);
+    expect(tx.state).toBe('Calling');
+    expect(events.filter((event) => event.type === 'response')).toHaveLength(0);
+
+    layer.receive(trying);
+    clock.advance(TIMERS.T1);
+
+    expect(tx.state).toBe('Proceeding');
+    expect(events.filter((event) => event.type === 'response')).toHaveLength(1);
+    expect(transport.sent).toHaveLength(1);
+  });
+
+  it('accepts a response tag on a bare To address without changing its URI identity', () => {
+    const { events, layer } = setup(true);
+    const invite = makeInvite();
+    invite.headers.set('To', 'sip:bob@example.com;transport=tcp');
+    const tx = layer.sendRequest(invite);
+    const response = responseFor('z9hG4bK-abc', 200);
+    response.headers.set('To', 'sip:bob@example.com;transport=tcp;tag=server');
+
+    layer.receive(response);
+
+    expect(tx.state).toBe('Accepted');
+    expect(events.filter((event) => event.type === 'response')).toHaveLength(1);
+  });
+
+  it('removes the exact bare To tag instead of a quoted tag decoy', () => {
+    const { events, layer } = setup(true);
+    const invite = makeInvite();
+    invite.headers.set('To', 'sip:bob@example.com;foo="x;tag=fake;bar=y"');
+    const tx = layer.sendRequest(invite);
+    const response = responseFor('z9hG4bK-abc', 200);
+    response.headers.set('To', 'sip:bob@example.com;foo="x;tag=fake;bar=y";tag=server');
+
+    layer.receive(response);
+
+    expect(tx.state).toBe('Accepted');
+    expect(events.filter((event) => event.type === 'response')).toHaveLength(1);
   });
 
   it('tracks before synchronous transport delivery', () => {
@@ -116,6 +168,43 @@ describe('TransactionLayer', () => {
     layer.receive(responseFor('z9hG4bK-abc', 486));
     expect(events).toContainEqual(expect.objectContaining({ type: 'response', transaction: expect.objectContaining({ key: tx.key }) }));
     expect(tx.state).toBe('Completed');
+  });
+
+  it.each([
+    { label: 'INVITE', request: makeInvite(), statusCode: 486, branch: 'z9hG4bK-abc', cseq: '41' },
+    { label: 'REGISTER', request: makeRegister(), statusCode: 403, branch: 'z9hG4bK-reg', cseq: '1' },
+  ])('ignores a forged $label final before mutation and accepts the legitimate final', ({ request, statusCode, branch, cseq }) => {
+    const { events, layer } = setup();
+    const tx = layer.sendRequest(request);
+    const forged = responseFor(branch, statusCode, request.method, cseq);
+    forged.headers.set('Call-ID', 'forged-call-id');
+
+    layer.receive(forged);
+
+    expect(tx.state).toBe(request.method === 'INVITE' ? 'Calling' : 'Trying');
+    expect(events.filter((event) => event.type === 'response')).toHaveLength(0);
+
+    layer.receive(responseFor(branch, statusCode, request.method, cseq));
+
+    expect(tx.state).toBe('Completed');
+    expect(events.filter((event) => event.type === 'response')).toHaveLength(1);
+  });
+
+  it.each([
+    { label: 'INVITE Timer B', request: makeInvite(), statusCode: 486, branch: 'z9hG4bK-abc', cseq: '41', timeout: TIMERS.B },
+    { label: 'REGISTER Timer F', request: makeRegister(), statusCode: 403, branch: 'z9hG4bK-reg', cseq: '1', timeout: TIMERS.F },
+  ])('ignores a forged final and settles through $label without disposal', ({ request, statusCode, branch, cseq, timeout }) => {
+    const { clock, events, layer } = setup();
+    const tx = layer.sendRequest(request);
+    const forged = responseFor(branch, statusCode, request.method, cseq);
+    forged.headers.set('From', '<sip:alice@example.com>;tag=forged-from');
+
+    layer.receive(forged);
+    clock.advance(timeout);
+
+    expect(events.filter((event) => event.type === 'response')).toHaveLength(0);
+    expect(events).toContainEqual({ type: 'timeout', key: tx.key });
+    expect(tx.state).toBe('Terminated');
   });
 
   it('creates a server transaction for an unmatched request', () => {
@@ -374,6 +463,52 @@ describe('TransactionLayer', () => {
     layer.receive(responseFor('z9hG4bK-abc', 486));
     expect(after).toContainEqual(expect.objectContaining({ type: 'response' }));
     expect(first.filter((e) => e.type === 'response' && (e as { response: SipResponseMessage }).response.statusCode === 486)).toHaveLength(0);
+  });
+
+  it('does not create new transactions after disposal', () => {
+    const { clock, events, layer } = setup();
+    layer.dispose();
+
+    let sendError: unknown;
+    try {
+      layer.sendRequest(makeRegister('z9hG4bK-after-dispose-client'));
+    } catch (error) {
+      sendError = error;
+    }
+    layer.receive(makeRegister('z9hG4bK-after-dispose-server'));
+
+    expect(sendError).toBeInstanceOf(TransportError);
+    expect(events).toEqual([]);
+    expect(clock.pending()).toBe(0);
+  });
+
+  it('terminates every transaction when one termination observer throws during disposal', () => {
+    const clock = new FakeClock();
+    const transport = new FakeTransport({ reliable: false, framing: 'datagram' });
+    void transport.connect();
+    let terminatedEvents = 0;
+    const layer = new TransactionLayer({
+      transport,
+      clock,
+      timers: TIMERS,
+      reliable: false,
+      emit: (event) => {
+        if (event.type === 'terminated' && terminatedEvents++ === 0) {
+          throw new Error('termination observer failed');
+        }
+      },
+    });
+
+    const invite = layer.sendRequest(makeInvite('z9hG4bK-dispose-invite'));
+    const register = layer.sendRequest(makeRegister('z9hG4bK-dispose-register'));
+    layer.receive(makeInvite('z9hG4bK-dispose-server'));
+    expect(clock.pending()).toBeGreaterThan(0);
+
+    expect(() => layer.dispose()).not.toThrow();
+
+    expect(invite.state).toBe('Terminated');
+    expect(register.state).toBe('Terminated');
+    expect(clock.pending()).toBe(0);
   });
 
   it('isolates a throwing subscriber from the rest', () => {

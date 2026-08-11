@@ -11,6 +11,7 @@ import { STUB_SDP } from '../../src/media/index.js';
 import type { MediaMessage } from '../../src/media/index.js';
 import type { Invitation } from '../../src/ua/invitation.js';
 import type { Inviter } from '../../src/ua/inviter.js';
+import { responseMatchesRequestIdentity } from '../../src/ua/response-identity.js';
 
 const AUTH_REALM = 'example.com';
 const AUTH_NONCE = 'ua-shared-nonce';
@@ -241,6 +242,20 @@ async function confirmCall(transport: FakeTransport): Promise<void> {
   transport.emitData(serializeMessage(makeResponse(200, 'OK', headers)));
 }
 
+/** Deliver another 200 OK for an extra fork of the outbound INVITE. */
+function emitFork200(transport: FakeTransport, toTag: string): void {
+  const invite = sentRequests(transport, 'INVITE')[0];
+  if (invite === undefined) throw new Error('no outbound INVITE to fork');
+  const headers = new Headers();
+  headers.set('Via', invite.headers.get('Via') ?? '');
+  headers.set('From', invite.headers.get('From') ?? '');
+  headers.set('To', `${invite.headers.get('To') ?? '<sip:bob@example.com>'};tag=${toTag}`);
+  headers.set('Call-ID', invite.headers.get('Call-ID') ?? '');
+  headers.set('CSeq', invite.headers.get('CSeq') ?? '');
+  headers.set('Contact', '<sip:bob@192.0.2.3:5060>');
+  transport.emitData(serializeMessage(makeResponse(200, 'OK', headers)));
+}
+
 function sentRequests(transport: FakeTransport, method: string): SipRequestMessage[] {
   const requests: SipRequestMessage[] = [];
   for (const bytes of transport.sent) {
@@ -252,13 +267,17 @@ function sentRequests(transport: FakeTransport, method: string): SipRequestMessa
   return requests;
 }
 
-function createRemoteBye(transport: FakeTransport): SipRequestMessage {
+function createRemoteBye(
+  transport: FakeTransport,
+  remoteTag = 'bob-1',
+  branch = 'remote-bye',
+): SipRequestMessage {
   const invite = sentRequests(transport, 'INVITE')[0];
   if (invite === undefined) throw new Error('no INVITE for remote BYE');
   const headers = new Headers();
-  headers.set('Via', 'SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-remote-bye');
+  headers.set('Via', `SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-${branch}`);
   headers.set('Call-ID', invite.headers.get('Call-ID') ?? '');
-  headers.set('From', `${invite.headers.get('To') ?? '<sip:bob@example.com>'};tag=bob-1`);
+  headers.set('From', `${invite.headers.get('To') ?? '<sip:bob@example.com>'};tag=${remoteTag}`);
   headers.set('To', invite.headers.get('From') ?? '');
   headers.set('CSeq', '1 BYE');
   return makeRequest('BYE', 'sip:alice@example.com', headers);
@@ -447,22 +466,45 @@ describe('UserAgent shutdown settlement', () => {
     await ua.connect();
     const invitation = receiveIncomingCall(ua, transport);
     let rejections = 0;
-    const answer = invitation.answer(STUB_SDP).catch((error: unknown) => {
-      rejections += 1;
-      throw error;
-    });
+    const answerOutcome = invitation.answer(STUB_SDP).then(
+      () => undefined,
+      (error: unknown) => {
+        rejections += 1;
+        return error;
+      },
+    );
     await flush();
     expect(sentResponses(transport, 200)).toBe(1);
 
     await ua.disconnect();
     await ua.disconnect();
+    expect(clock.pending()).toBe(0);
     const sentBeforeAdvance = transport.sent.length;
     clock.advance(32000);
 
-    await expect(answer).rejects.toThrow('UserAgent disconnected');
+    expect(await answerOutcome).toMatchObject({ message: 'UserAgent disconnected' });
     expect(rejections).toBe(1);
     expect(invitation.session.state).toBe('failed');
     expect(transport.sent).toHaveLength(sentBeforeAdvance);
+
+  });
+
+  it.each([
+    { phase: 'Timer 100', complete: false },
+    { phase: 'Completed', complete: true },
+  ])('terminates an incoming INVITE server transaction in $phase on disconnect', async ({ complete }) => {
+    const { ua, transport, clock } = setup();
+    await ua.connect();
+    const invitation = receiveIncomingCall(ua, transport);
+    if (complete) invitation.reject(486, 'Busy Here');
+    expect(clock.pending()).toBeGreaterThan(0);
+
+    await ua.disconnect();
+    const sentAtDisconnect = transport.sent.length;
+
+    expect(clock.pending()).toBe(0);
+    clock.advance(64000);
+    expect(transport.sent).toHaveLength(sentAtDisconnect);
   });
 
   it('rejects an active hangup and releases dialog ownership on disconnect', async () => {
@@ -507,6 +549,33 @@ describe('UserAgent shutdown settlement', () => {
     await rejection;
 
     expect(transport.byeAttempts).toBe(0);
+    expect(ua.callState).toBe('idle');
+  });
+
+  it('does not send a local BYE after a terminating observer receives a remote BYE', async () => {
+    const transport = new DelayedAckTransport({ reliable: true, framing: 'stream' });
+    const { ua, clock } = setup({ transport, liveness: new RecordingLiveness() });
+    await ua.connect();
+    const invite = ua.invite('sip:bob@example.com');
+    await confirmCall(transport);
+    await invite;
+    clock.advance(32000); // Release the accepted INVITE transaction's Timer M.
+
+    ua.on('stateChanged', (event: { state: string }) => {
+      if (event.state === 'terminating') {
+        transport.emitData(serializeMessage(createRemoteBye(transport)));
+      }
+    });
+
+    let settlements = 0;
+    await ua.bye().then(() => {
+      settlements += 1;
+    });
+    clock.advance(0); // Release the remote BYE server transaction's Timer J.
+
+    expect(settlements).toBe(1);
+    expect(transport.byeAttempts).toBe(0);
+    expect(clock.pending()).toBe(0);
     expect(ua.callState).toBe('idle');
   });
 
@@ -713,6 +782,157 @@ describe('UserAgent shutdown settlement', () => {
     await flush();
 
     expect(transport.byeAttempts).toBe(0);
+  });
+
+  it('retains a failed-cleanup fork owner until a valid remote BYE ends it', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    const invitation = ua.invite('sip:bob@example.com');
+    await confirmCall(transport);
+    await invitation;
+
+    emitFork200(transport, 'bob-failed-cleanup');
+    await flush();
+    const cleanupBye = sentRequests(transport, 'BYE').at(-1)!;
+    respondTo(transport, cleanupBye, 486);
+    await flush();
+
+    const hangup = ua.bye();
+    const selectedBye = sentRequests(transport, 'BYE').at(-1)!;
+    respondTo(transport, selectedBye, 200);
+    await hangup;
+
+    const remoteBye = createRemoteBye(
+      transport,
+      'bob-failed-cleanup',
+      'failed-cleanup-remote-bye',
+    );
+    transport.emitData(serializeMessage(remoteBye));
+    await flush();
+    const response = transport.sent
+      .map((bytes) => parseMessage(bytes))
+      .filter((message) => message.ok
+        && message.value.kind === 'response'
+        && message.value.headers.get('Call-ID') === remoteBye.headers.get('Call-ID')
+        && message.value.headers.get('CSeq') === '1 BYE')
+      .at(-1);
+
+    expect(response?.ok).toBe(true);
+    if (response === undefined || !response.ok || response.value.kind !== 'response') {
+      throw new Error('missing failed-cleanup remote BYE response');
+    }
+    expect(response.value.statusCode).toBe(200);
+    expect(ua.callState).toBe('idle');
+  });
+
+  it('expires a failed-cleanup fork owner with the accepted INVITE lifetime', async () => {
+    const { ua, transport, clock } = setup({ liveness: new RecordingLiveness() });
+    await ua.connect();
+    const invitation = ua.invite('sip:bob@example.com');
+    await confirmCall(transport);
+    await invitation;
+
+    emitFork200(transport, 'bob-expiring-cleanup');
+    await flush();
+    const cleanupBye = sentRequests(transport, 'BYE').at(-1)!;
+    respondTo(transport, cleanupBye, 486);
+    await flush();
+    clock.advance(0); // Release the rejected cleanup BYE transaction's Timer K.
+
+    const owners = (ua as unknown as { dialogOwners: Map<string, unknown> }).dialogOwners;
+    expect([...owners.keys()].some((key) => key.includes('bob-expiring-cleanup'))).toBe(true);
+
+    clock.advance(32000); // Timer M bounds retained extra-fork ownership.
+
+    expect([...owners.keys()].some((key) => key.includes('bob-expiring-cleanup'))).toBe(false);
+    const expiredBye = createRemoteBye(
+      transport,
+      'bob-expiring-cleanup',
+      'expired-cleanup-remote-bye',
+    );
+    transport.emitData(serializeMessage(expiredBye));
+    await flush();
+    const response = transport.sent
+      .map((bytes) => parseMessage(bytes))
+      .filter((message) => message.ok
+        && message.value.kind === 'response'
+        && message.value.headers.get('CSeq') === '1 BYE')
+      .at(-1);
+    expect(response?.ok && response.value.kind === 'response' ? response.value.statusCode : 0).toBe(481);
+  });
+
+  it('releases a late-fork dialog owner after its cleanup BYE settles', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    const invitation = ua.invite('sip:bob@example.com');
+    await confirmCall(transport);
+    await invitation;
+    const invite = sentRequests(transport, 'INVITE')[0]!;
+
+    const hangup = ua.bye();
+    const selectedBye = sentRequests(transport, 'BYE').at(-1)!;
+    respondTo(transport, selectedBye, 200);
+    await hangup;
+
+    const headers = new Headers();
+    headers.set('Via', invite.headers.get('Via') ?? '');
+    headers.set('From', invite.headers.get('From') ?? '');
+    headers.set('To', `${invite.headers.get('To') ?? '<sip:bob@example.com>'};tag=bob-late`);
+    headers.set('Call-ID', invite.headers.get('Call-ID') ?? '');
+    headers.set('CSeq', invite.headers.get('CSeq') ?? '');
+    headers.set('Contact', '<sip:bob@192.0.2.3:5060>');
+    transport.emitData(serializeMessage(makeResponse(200, 'OK', headers)));
+    await flush();
+
+    const cleanupBye = sentRequests(transport, 'BYE').at(-1)!;
+    expect(cleanupBye).not.toBe(selectedBye);
+    respondTo(transport, cleanupBye, 200);
+    await flush();
+
+    const probe = createRemoteBye(transport, 'bob-late', 'released-late-fork');
+    transport.emitData(serializeMessage(probe));
+    await flush();
+    const response = transport.sent
+      .map((bytes) => parseMessage(bytes))
+      .filter((message) => message.ok
+        && message.value.kind === 'response'
+        && message.value.headers.get('Call-ID') === probe.headers.get('Call-ID')
+        && message.value.headers.get('CSeq') === '1 BYE')
+      .at(-1);
+
+    expect(response?.ok).toBe(true);
+    if (response === undefined || !response.ok || response.value.kind !== 'response') {
+      throw new Error('missing late-fork probe response');
+    }
+    expect(response.value.statusCode).toBe(481);
+  });
+
+  it('adds a To tag to an unmatched CANCEL 481 accepted by strict response identity', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    const headers = new Headers();
+    headers.set('Via', 'SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-unmatched-cancel');
+    headers.set('From', '<sip:bob@example.com>;tag=bob-cancel');
+    headers.set('To', '<sip:alice@example.com>');
+    headers.set('Call-ID', 'unmatched-cancel@example.com');
+    headers.set('CSeq', '1 CANCEL');
+    const cancel = makeRequest('CANCEL', 'sip:alice@example.com', headers);
+
+    transport.emitData(serializeMessage(cancel));
+    await flush();
+
+    const parsed = transport.sent
+      .map((bytes) => parseMessage(bytes))
+      .find((message) => message.ok
+        && message.value.kind === 'response'
+        && message.value.headers.get('CSeq') === '1 CANCEL');
+    expect(parsed?.ok).toBe(true);
+    if (parsed === undefined || !parsed.ok || parsed.value.kind !== 'response') {
+      throw new Error('missing unmatched CANCEL response');
+    }
+    expect(parsed.value.statusCode).toBe(481);
+    expect(parsed.value.headers.get('To')).toMatch(/;tag=/);
+    expect(responseMatchesRequestIdentity(cancel, parsed.value)).toBe(true);
   });
 });
 

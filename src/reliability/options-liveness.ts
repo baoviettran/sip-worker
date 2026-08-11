@@ -56,6 +56,7 @@ export class OptionsLiveness implements LivenessStrategy {
   private unsubscribe?: () => void;
   private outstanding?: TransactionKey;
   private probeIndex = 0;
+  private generation = 0;
 
   constructor(readonly options: OptionsLivenessOptions) {
     this.layer = options.layer;
@@ -68,12 +69,14 @@ export class OptionsLiveness implements LivenessStrategy {
   start(): void {
     if (this.started) return;
     this.started = true;
+    this.generation += 1;
     this.probeTimer = this.clock.setTimeout(() => this.sendProbe(), this.probeIntervalMs);
   }
 
   stop(): void {
     if (!this.started) return;
     this.started = false;
+    this.generation += 1;
     this.cancelProbeTimer();
     this.unsubscribeOwnership();
     this.outstanding = undefined;
@@ -81,6 +84,7 @@ export class OptionsLiveness implements LivenessStrategy {
 
   private sendProbe(): void {
     if (!this.started) return;
+    const generation = this.generation;
     // Preserve cadence: always reschedule the recurring probe timer, then only
     // skip the probe (no overlap) while a previous probe is still outstanding.
     this.probeTimer = this.clock.setTimeout(() => this.sendProbe(), this.probeIntervalMs);
@@ -93,6 +97,10 @@ export class OptionsLiveness implements LivenessStrategy {
       this.layer,
       request,
       (unsubscribe, key) => {
+        if (!this.started || generation !== this.generation) {
+          unsubscribe();
+          return;
+        }
         this.unsubscribe = unsubscribe;
         this.outstanding = key;
       },

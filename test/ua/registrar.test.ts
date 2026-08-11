@@ -111,6 +111,7 @@ function respond(
     minExpires?: string;
     challenge?: boolean;
     challengeHeader?: 'WWW-Authenticate' | 'Proxy-Authenticate';
+    stale?: boolean;
     contact?: string | null;
     identityMismatch?: 'call-id' | 'from-tag' | 'to-uri' | 'to-tag';
   } = {},
@@ -136,7 +137,8 @@ function respond(
   }
   if (over.minExpires !== undefined) headers.set('Min-Expires', over.minExpires);
   if (over.challenge === true) {
-    const challenge = `Digest realm="${REALM}", nonce="${NONCE}", qop="auth", algorithm=SHA-256`;
+    const stale = over.stale === true ? ', stale=true' : '';
+    const challenge = `Digest realm="${REALM}", nonce="${NONCE}", qop="auth", algorithm=SHA-256${stale}`;
     headers.set(over.challengeHeader ?? 'WWW-Authenticate', challenge);
   }
   const response = makeResponse(statusCode, statusCode >= 400 ? 'err' : statusCode === 200 ? 'OK' : 'ringing', headers);
@@ -438,6 +440,27 @@ describe('Registrar', () => {
     expect(h.registrar.state).toBe('failed');
     expect(h.authManager!.retriesByRequestSize).toBe(0);
   });
+  it('rejects the fourth stale challenge instead of looping REGISTER forever', async () => {
+    const h = setup();
+    const registration = h.registrar.register();
+    const outcome = registration.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await flush();
+
+    for (let challenge = 0; challenge < 4; challenge += 1) {
+      respond(h, 401, { challenge: true, stale: true });
+      await flush();
+    }
+
+    h.clock.advance(32000);
+    const settled = await outcome;
+
+    expect(settled).toMatchObject({ statusCode: 401, message: expect.stringContaining('budget exhausted') });
+    expect(h.sent).toHaveLength(4);
+    expect(h.registrar.state).toBe('failed');
+  });
 
   it('accepts a shorter granted expiry without an immediate retry', async () => {
     const h = setup();
@@ -680,6 +703,30 @@ describe('Registrar', () => {
     respond(h, 200);
     await registration;
     expect(h.authManager!.retriesByRequestSize).toBe(0);
+  });
+  it('retains the authenticated redirect target through a 423 retry', async () => {
+    const h = setup();
+    const registration = h.registrar.register();
+    await flush();
+
+    respond(h, 401, { challenge: true });
+    await flush();
+    respond(h, 302, { contact: '<sip:redirect-interval.example.com>' });
+    await flush();
+    const redirected = h.sent.at(-1)!;
+    expect(redirected.uri).toBe('sip:redirect-interval.example.com');
+
+    respond(h, 423, { minExpires: '900' });
+    await flush();
+    const intervalRetry = h.sent.at(-1)!;
+    const authorization = intervalRetry.headers.get('Authorization');
+    expect(intervalRetry.uri).toBe('sip:redirect-interval.example.com');
+    expect(intervalRetry.headers.get('Expires')).toBe('900');
+    expect(authorization).toContain('uri="sip:redirect-interval.example.com"');
+    expect(authorization).not.toBe(redirected.headers.get('Authorization'));
+
+    respond(h, 200);
+    await registration;
   });
 
   it('does not follow a 305 Use Proxy as a REGISTER redirect', async () => {

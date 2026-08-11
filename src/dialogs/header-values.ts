@@ -3,11 +3,104 @@ import type { Headers } from '../messages/headers.js';
 /** The RFC 3261 magic cookie that must appear in the top Via branch. */
 export const MAGIC_COOKIE = 'z9hG4bK';
 
-/** Extracts the `;tag=...` parameter from a header value (e.g. From/To). */
+/** Locate the header-parameter section without treating URI contents as parameters. */
+function headerParameterStart(value: string): number {
+  let quoted = false;
+  let escaped = false;
+  let angleStart = -1;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quoted && character === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (character === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (quoted) continue;
+    if (character === '<') {
+      angleStart = index;
+    } else if (character === '>' && angleStart !== -1) {
+      return index + 1;
+    }
+  }
+
+  // An unmatched name-addr is malformed; do not mine its URI for a tag.
+  return angleStart === -1 ? 0 : value.length;
+}
+
+interface LocatedTag {
+  readonly value: string;
+  /** Index of the semicolon introducing the tag parameter. */
+  readonly start: number;
+  /** Index immediately after the tag parameter, before the next delimiter. */
+  readonly end: number;
+}
+
+/**
+ * Locate the case-insensitive tag header parameter and its exact source span.
+ * Quoted display names, quoted parameter values, and name-addr URI parameters
+ * are deliberately excluded.
+ */
+function locateTag(value: string): LocatedTag | undefined {
+  const scanStart = headerParameterStart(value);
+  let quoted = false;
+  let escaped = false;
+  let parameterStart = -1;
+  let delimiterStart = -1;
+
+  for (let index = scanStart; index <= value.length; index += 1) {
+    const character = value[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quoted && character === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (character === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (quoted) continue;
+
+    if (character === ';') {
+      if (parameterStart !== -1) {
+        const candidate = value.slice(parameterStart, index).trim();
+        const match = candidate.match(/^tag\s*=\s*([!#$%&'*+\-.^_|\x60~0-9A-Za-z]+)\s*$/i);
+        if (match !== null) return { value: match[1]!, start: delimiterStart, end: index };
+      }
+      delimiterStart = index;
+      parameterStart = index + 1;
+      continue;
+    }
+
+    if (character === ',' || index === value.length) {
+      if (parameterStart !== -1) {
+        const candidate = value.slice(parameterStart, index).trim();
+        const match = candidate.match(/^tag\s*=\s*([!#$%&'*+\-.^_|\x60~0-9A-Za-z]+)\s*$/i);
+        if (match !== null) return { value: match[1]!, start: delimiterStart, end: index };
+      }
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Extract the case-insensitive tag header parameter from a From/To value.
+ * Quoted display names, quoted parameter values, and name-addr URI parameters
+ * are deliberately excluded.
+ */
 export function extractTag(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const match = value.match(/;tag=([^;,\s]+)/);
-  return match?.[1];
+  return value === undefined ? undefined : locateTag(value)?.value;
 }
 
 /** Extract the URI from an address, including a bare Contact / Record-Route URI. */
@@ -21,6 +114,25 @@ export function extractUri(value: string | undefined): string | undefined {
   // On a bare Contact addr-spec, known Contact header parameters are not URI
   // parameters. Keep URI parameters before them (for example, ;transport=tcp).
   return trimmed.match(/^(.*?);\s*(?:expires|q)\s*=/i)?.[1]?.trim() ?? trimmed;
+}
+
+/**
+ * Extract the URI identity from a From/To address.
+ *
+ * A bare addr-spec has no angle brackets to separate URI parameters from
+ * header parameters. Preserve every URI parameter while removing only the
+ * recognized `tag` header parameter used to form the dialog identity.
+ */
+export function extractAddressUri(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  const uri = extractUri(trimmed);
+  if (uri === undefined || headerParameterStart(trimmed) !== 0) return uri;
+  const tag = locateTag(trimmed);
+  if (tag === undefined) return uri;
+  return extractUri(
+    `${trimmed.slice(0, tag.start)}${trimmed.slice(tag.end)}`,
+  );
 }
 
 /** Whether a route set entry is a strict (non-loose) router, i.e. has no `;lr`. */

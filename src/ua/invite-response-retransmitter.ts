@@ -8,6 +8,7 @@
 import type { SipResponseMessage } from '../messages/message.js';
 import { serializeMessage } from '../messages/serializer.js';
 import type { Clock, Transport } from '../transport/transport.js';
+import { TransportError } from '../errors.js';
 import { cancel, schedule } from '../transactions/timers.js';
 
 export interface RetransmitterOptions {
@@ -17,6 +18,7 @@ export interface RetransmitterOptions {
   readonly T1: number;
   readonly T2: number;
   readonly onTimeout?: () => void;
+  readonly onError?: (error: TransportError) => void;
 }
 
 export class InviteResponseRetransmitter {
@@ -26,6 +28,7 @@ export class InviteResponseRetransmitter {
   private readonly T1: number;
   private readonly T2: number;
   private readonly timeoutCallback?: () => void;
+  private readonly errorCallback?: (error: TransportError) => void;
   private readonly responseBytes: Uint8Array;
 
   private currentInterval: number;
@@ -40,6 +43,7 @@ export class InviteResponseRetransmitter {
     this.T1 = options.T1;
     this.T2 = options.T2;
     this.timeoutCallback = options.onTimeout;
+    this.errorCallback = options.onError;
     this.responseBytes = serializeMessage(this.response);
     this.currentInterval = this.T1;
   }
@@ -69,13 +73,31 @@ export class InviteResponseRetransmitter {
     if (this.stopped) return;
 
     // Resend
-    void this.transport.send(this.responseBytes);
+    this.send();
+    if (this.stopped) return;
 
     // Double interval, cap at T2
     this.currentInterval = Math.min(2 * this.currentInterval, this.T2);
 
     // Schedule next retransmit
     this.timerId = schedule(this.clock, this.currentInterval, () => this.onTimer());
+  }
+
+  private send(): void {
+    const onError = (reason: unknown): void => {
+      if (this.stopped) return;
+      const error = reason instanceof TransportError
+        ? reason
+        : new TransportError(String(reason));
+      this.stop();
+      this.errorCallback?.(error);
+    };
+
+    try {
+      void this.transport.send(this.responseBytes).catch(onError);
+    } catch (error) {
+      onError(error);
+    }
   }
 
   private handleTimeout(): void {

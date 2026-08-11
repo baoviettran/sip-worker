@@ -15,6 +15,7 @@ import { STUB_SDP } from '../../src/media/index.js';
 import type { MediaCommand, MediaMessage } from '../../src/media/index.js';
 import type { SessionState, SessionEvent } from '../../src/ua/session.js';
 import { Invitation, type InvitationOptions } from '../../src/ua/invitation.js';
+import { TransportError } from '../../src/errors.js';
 
 const REMOTE_URI = 'sip:alice@example.com';
 const LOCAL_URI = 'sip:bob@example.com';
@@ -218,6 +219,85 @@ describe('Invitation (incoming SIP call session)', () => {
     expect(h.invitation.session.state).toBe('confirmed');
   });
 
+  it('settles a valid ACK once before throwing and re-entrant confirmed observers', async () => {
+    const h = setup();
+    let settlements = 0;
+    const answer = h.invitation.answer(STUB_SDP).then(
+      () => { settlements += 1; return 'resolved'; },
+      (error: Error) => { settlements += 1; return error.message; },
+    );
+    await flush();
+
+    h.invitation.session.on((event) => {
+      if (event.state !== 'confirmed') return;
+      h.invitation.dispose(new Error('observer disposal stole ACK'));
+      throw new Error('confirmed observer failed');
+    });
+
+    const ackHeaders = new Headers();
+    ackHeaders.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-ack-atomic');
+    ackHeaders.set('Max-Forwards', '70');
+    ackHeaders.set('From', `<${REMOTE_URI}>;tag=alice-1`);
+    ackHeaders.set('To', `<${LOCAL_URI}>;tag=${h.invitation.toTag}`);
+    ackHeaders.set('Call-ID', 'call-123@example.com');
+    ackHeaders.set('CSeq', '1 ACK');
+
+    expect(() => routeRequest(h, makeRequest('ACK', REMOTE_URI, ackHeaders))).not.toThrow();
+    expect(await answer).toBe('resolved');
+    await flush();
+    expect(settlements).toBe(1);
+  });
+
+  it('settles a valid CANCEL once before throwing and re-entrant terminated observers', async () => {
+    const h = setup();
+    h.media.autoReplySetRemote = false;
+    let settlements = 0;
+    const answer = h.invitation.answer(STUB_SDP).then(
+      () => { settlements += 1; return undefined; },
+      (error: unknown) => { settlements += 1; return error; },
+    );
+
+    h.invitation.session.on((event) => {
+      if (event.state !== 'terminated') return;
+      h.invitation.dispose(new Error('observer disposal stole CANCEL'));
+      throw new Error('terminated observer failed');
+    });
+
+    const cancelHeaders = new Headers();
+    cancelHeaders.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-inv-1');
+    cancelHeaders.set('Max-Forwards', '70');
+    cancelHeaders.set('From', `<${REMOTE_URI}>;tag=alice-1`);
+    cancelHeaders.set('To', `<${LOCAL_URI}>`);
+    cancelHeaders.set('Call-ID', 'call-123@example.com');
+    cancelHeaders.set('CSeq', '1 CANCEL');
+
+    expect(() => routeRequest(h, makeRequest('CANCEL', LOCAL_URI, cancelHeaders))).not.toThrow();
+    await expect(answer).resolves.toMatchObject({ statusCode: 487 });
+    await flush();
+    expect(settlements).toBe(1);
+  });
+
+  it('settles an ACK-timeout failure once before throwing and re-entrant failed observers', async () => {
+    const h = setup();
+    let settlements = 0;
+    const answer = h.invitation.answer(STUB_SDP).then(
+      () => { settlements += 1; return 'resolved'; },
+      (error: Error) => { settlements += 1; return error.message; },
+    );
+    await flush();
+
+    h.invitation.session.on((event) => {
+      if (event.state !== 'failed') return;
+      h.invitation.dispose(new Error('observer disposal stole failure'));
+      throw new Error('failed observer failed');
+    });
+
+    expect(() => h.clock.advance(32000)).not.toThrow();
+    expect(await answer).toBe('ACK timeout');
+    await flush();
+    expect(settlements).toBe(1);
+  });
+
   it('ignores an ACK whose numeric CSeq differs from the accepted INVITE', async () => {
     const h = setup();
     const answer = h.invitation.answer(STUB_SDP);
@@ -322,6 +402,58 @@ describe('Invitation (incoming SIP call session)', () => {
     // Should fail
     await expect(answerPromise).rejects.toThrow('ACK timeout');
     expect(h.invitation.session.state).toBe('failed');
+  });
+
+  it('rejects answer promptly when the initial 200 send rejects asynchronously', async () => {
+    const h = setup();
+    h.transport.send = async () => {
+      throw new TransportError('initial 200 send failed');
+    };
+    let outcome: unknown = 'pending';
+    const answer = h.invitation.answer(STUB_SDP);
+    void answer.then(
+      () => { outcome = 'resolved'; },
+      (error: unknown) => { outcome = error; },
+    );
+
+    await flush();
+    expect(outcome).toBeInstanceOf(TransportError);
+    expect(outcome).toMatchObject({ message: 'initial 200 send failed' });
+    expect(h.invitation.session.state).toBe('failed');
+    expect(h.recorded.filter((event) => event.state === 'failed')).toHaveLength(1);
+  });
+
+  it('rejects answer promptly when a 200 retransmission send rejects', async () => {
+    const h = setup();
+    const send = h.transport.send.bind(h.transport);
+    let acceptanceSends = 0;
+    h.transport.send = async (bytes) => {
+      const parsed = parseMessage(bytes);
+      if (parsed.ok
+        && parsed.value.kind === 'response'
+        && parsed.value.statusCode === 200
+        && parsed.value.headers.get('CSeq') === '1 INVITE') {
+        acceptanceSends += 1;
+        if (acceptanceSends > 1) throw new TransportError('200 retransmission failed');
+      }
+      return send(bytes);
+    };
+    let outcome: unknown = 'pending';
+    const answer = h.invitation.answer(STUB_SDP);
+    void answer.then(
+      () => { outcome = 'resolved'; },
+      (error: unknown) => { outcome = error; },
+    );
+    await flush();
+    expect(outcome).toBe('pending');
+
+    h.clock.advance(500);
+    await flush();
+
+    expect(outcome).toBeInstanceOf(TransportError);
+    expect(outcome).toMatchObject({ message: '200 retransmission failed' });
+    expect(h.invitation.session.state).toBe('failed');
+    expect(h.recorded.filter((event) => event.state === 'failed')).toHaveLength(1);
   });
 
   it('rejects INVITE with 486 → no retransmission', async () => {
@@ -514,6 +646,41 @@ describe('Invitation (incoming SIP call session)', () => {
         && parsed.value.headers.get('CSeq') === '1 INVITE');
     expect(inviteAcceptances).toHaveLength(1);
     expect(h.invitation.session.state).toBe('terminated');
+    expect(h.recorded.some((event) => event.state === 'failed')).toBe(false);
+  });
+
+  it('does not start retransmission after a matching ACK arrives during the initial 200 send', async () => {
+    const h = setup();
+    const captureSend = h.transport.onSend;
+    let sentAck = false;
+    h.transport.onSend = (bytes) => {
+      captureSend?.(bytes);
+      const parsed = parseMessage(bytes);
+      if (sentAck
+        || !parsed.ok
+        || parsed.value.kind !== 'response'
+        || parsed.value.statusCode !== 200
+        || parsed.value.headers.get('CSeq') !== '1 INVITE') return;
+      sentAck = true;
+
+      const ackHeaders = new Headers();
+      ackHeaders.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-ack-during-200');
+      ackHeaders.set('Max-Forwards', '70');
+      ackHeaders.set('From', `<${REMOTE_URI}>;tag=alice-1`);
+      ackHeaders.set('To', `<${LOCAL_URI}>;tag=${h.invitation.toTag}`);
+      ackHeaders.set('Call-ID', 'call-123@example.com');
+      ackHeaders.set('CSeq', '1 ACK');
+      routeRequest(h, makeRequest('ACK', REMOTE_URI, ackHeaders));
+    };
+
+    await h.invitation.answer(STUB_SDP);
+    expect(h.invitation.session.state).toBe('confirmed');
+
+    h.clock.advance(32000);
+    await flush();
+
+    expect(okResponses(h.sent)).toHaveLength(1);
+    expect(h.invitation.session.state).toBe('confirmed');
     expect(h.recorded.some((event) => event.state === 'failed')).toBe(false);
   });
 

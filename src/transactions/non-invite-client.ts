@@ -73,9 +73,12 @@ export class NonInviteClientTransaction {
     if (this.started) return;
     this.started = true;
     this.sendRequest();
-    this.retransmitInterval = this.timers.T1;
+    if (this.currentState !== 'Trying' && this.currentState !== 'Proceeding') return;
     this.armTimerF();
-    if (!this.reliable) this.armTimerE(this.retransmitInterval);
+    if (this.currentState === 'Trying') {
+      this.retransmitInterval = this.timers.T1;
+      if (!this.reliable) this.armTimerE(this.retransmitInterval);
+    }
   }
 
   receive(response: SipResponseMessage): void {
@@ -137,10 +140,15 @@ export class NonInviteClientTransaction {
   }
 
   private sendBytes(bytes: Uint8Array): void {
-    this.transport.send(bytes).catch((err: unknown) => {
+    const onError = (err: unknown): void => {
       const error = err instanceof TransportError ? err : new TransportError(String(err));
       this.terminate(error);
-    });
+    };
+    try {
+      void this.transport.send(bytes).catch(onError);
+    } catch (error) {
+      onError(error);
+    }
   }
 
   private armTimerE(delay: number): void {

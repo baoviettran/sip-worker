@@ -167,6 +167,7 @@ function respond(
     toTag?: string;
     challenge?: boolean;
     identityMismatch?: 'call-id' | 'from-tag' | 'to-uri' | 'to-tag';
+    stale?: boolean;
   } = {},
 ): void {
   const request = h.sent[h.sent.length - 1];
@@ -189,7 +190,8 @@ function respond(
     headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
   }
   if (over.challenge === true) {
-    headers.set('WWW-Authenticate', `Digest realm="${REALM}", nonce="${NOAUTH_NONCE}", qop="auth", algorithm=SHA-256`);
+    const stale = over.stale === true ? ', stale=true' : '';
+    headers.set('WWW-Authenticate', `Digest realm="${REALM}", nonce="${NOAUTH_NONCE}", qop="auth", algorithm=SHA-256${stale}`);
   }
   let message: SipResponseMessage = makeResponse(
     statusCode,
@@ -504,6 +506,86 @@ describe('Inviter (outgoing SIP call session)', () => {
     expect(h.inviter.session.state).toBe('confirmed');
   });
 
+  it('keeps the selected call healthy when an extra-fork cleanup BYE is rejected', async () => {
+    const h = setup();
+    const invite = await confirmCall(h);
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-2' });
+    await drainMicrotasks();
+    const bye = h.sent.filter((request) => request.method === 'BYE').at(-1)!;
+    receive(h, bye, { statusCode: 486 });
+    await drainMicrotasks();
+
+    expect(h.inviter.session.state).toBe('confirmed');
+    expect(h.inviter.dialog?.remoteTag).toBe('bob-1');
+  });
+
+  it('does not apply SDP from an extra fork to the selected call', async () => {
+    const h = setup();
+    const invite = await confirmCall(h);
+    const forkSdp = 'v=0\r\no=fork-b 2 2 IN IP4 192.0.2.22\r\ns=-\r\nt=0 0\r\n';
+    receive(h, invite, { sdp: forkSdp, toTag: 'bob-2' });
+    await drainMicrotasks();
+    const bye = h.sent.filter((request) => request.method === 'BYE').at(-1)!;
+    receive(h, bye);
+    await drainMicrotasks();
+
+    expect(h.media.setRemoteSdps).not.toContain(forkSdp);
+    expect(h.media.setRemoteSdps.at(-1)).toBe(STUB_SDP);
+    expect(h.inviter.session.state).toBe('confirmed');
+    expect(h.inviter.dialog?.remoteTag).toBe('bob-1');
+  });
+
+  it('keeps the selected call healthy when an extra-fork ACK send rejects', async () => {
+    const h = setup();
+    const invite = await confirmCall(h);
+    const captureSend = h.transport.onSend;
+    h.transport.onSend = (bytes) => {
+      captureSend?.(bytes);
+      const parsed = parseMessage(bytes);
+      if (parsed.ok
+        && parsed.value.kind === 'request'
+        && parsed.value.method === 'ACK'
+        && parsed.value.headers.get('To')?.includes('tag=bob-2')) {
+        throw new TransportError('extra-fork ACK failed');
+      }
+    };
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-2' });
+    await drainMicrotasks();
+
+    const bye = h.sent.filter((request) => request.method === 'BYE').at(-1);
+    expect(bye).toBeDefined();
+    if (bye === undefined) throw new Error('missing extra-fork cleanup BYE');
+    receive(h, bye);
+    await drainMicrotasks();
+
+    expect(h.inviter.session.state).toBe('confirmed');
+    expect(h.inviter.dialog?.remoteTag).toBe('bob-1');
+  });
+
+  it('ACKs and cleans up a late fork after selected-dialog hangup completes', async () => {
+    const h = setup();
+    const invite = await confirmCall(h);
+    const hangup = h.inviter.hangup();
+    const selectedBye = h.sent.filter((request) => request.method === 'BYE').at(-1)!;
+    receive(h, selectedBye);
+    await hangup;
+    expect(h.inviter.session.state).toBe('terminated');
+
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-late' });
+    await drainMicrotasks();
+
+    const lateAck = acks(h).find((ack) =>
+      ack.msg.headers.get('To')?.includes('tag=bob-late'),
+    );
+    expect(lateAck).toBeDefined();
+    const byes = h.sent.filter((request) => request.method === 'BYE');
+    expect(byes).toHaveLength(2);
+    const cleanupBye = byes.at(-1)!;
+    receive(h, cleanupBye);
+    await drainMicrotasks();
+    expect(h.inviter.session.state).toBe('terminated');
+  });
+
   it('walks the full trace to confirmed with a direct 2xx ACK', async () => {
     const h = setup();
     const invite = h.inviter.invite();
@@ -689,6 +771,27 @@ describe('Inviter (outgoing SIP call session)', () => {
     expect(h.inviter.session.state).toBe('failed');
     expect(h.authManager!.retriesByRequestSize).toBe(0);
   });
+  it('rejects the fourth stale challenge instead of looping INVITE forever', async () => {
+    const h = setup({ credentials: true });
+    const invite = h.inviter.invite();
+    const outcome = invite.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await flush();
+
+    for (let challenge = 0; challenge < 4; challenge += 1) {
+      respond(h, 401, { challenge: true, stale: true });
+      await flush();
+    }
+
+    h.clock.advance(32000);
+    const settled = await outcome;
+
+    expect(settled).toMatchObject({ statusCode: 401, message: expect.stringContaining('budget exhausted') });
+    expect(h.sent.filter((request) => request.method === 'INVITE')).toHaveLength(4);
+    expect(h.inviter.session.state).toBe('failed');
+  });
 
   it('releases the logical INVITE exchange after an authenticated terminal failure', async () => {
     const h = setup({ credentials: true });
@@ -763,6 +866,26 @@ describe('Inviter (outgoing SIP call session)', () => {
 
     respond(h, 200, { toTag: 'bob-1' });
     await bye;
+    expect(h.inviter.session.state).toBe('terminated');
+  });
+
+  it('recovers after a rejected local BYE so a later hangup can succeed', async () => {
+    const h = setup();
+    await confirmCall(h);
+
+    const firstHangup = h.inviter.hangup();
+    const firstBye = h.sent.at(-1)!;
+    receive(h, firstBye, { statusCode: 486 });
+    await expect(firstHangup).rejects.toMatchObject({ statusCode: 486 });
+    expect(h.inviter.session.state).toBe('confirmed');
+
+    const secondHangup = h.inviter.hangup();
+    const secondBye = h.sent.at(-1)!;
+    expect(secondBye).not.toBe(firstBye);
+    expect(secondBye.method).toBe('BYE');
+    receive(h, secondBye);
+    await secondHangup;
+
     expect(h.inviter.session.state).toBe('terminated');
   });
 

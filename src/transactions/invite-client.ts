@@ -78,9 +78,12 @@ export class InviteClientTransaction {
     if (this.started) return;
     this.started = true;
     this.sendRequest();
-    this.retransmitInterval = this.timers.T1;
+    if (this.currentState !== 'Calling' && this.currentState !== 'Proceeding') return;
     this.armTimerB();
-    if (!this.reliable) this.armTimerA(this.retransmitInterval);
+    if (this.currentState === 'Calling') {
+      this.retransmitInterval = this.timers.T1;
+      if (!this.reliable) this.armTimerA(this.retransmitInterval);
+    }
   }
 
   receive(response: SipResponseMessage): void {
@@ -163,10 +166,15 @@ export class InviteClientTransaction {
   }
 
   private sendBytes(bytes: Uint8Array): void {
-    this.transport.send(bytes).catch((err: unknown) => {
+    const onError = (err: unknown): void => {
       const error = err instanceof TransportError ? err : new TransportError(String(err));
       this.terminate(error);
-    });
+    };
+    try {
+      void this.transport.send(bytes).catch(onError);
+    } catch (error) {
+      onError(error);
+    }
   }
 
   private armTimerA(delay: number): void {

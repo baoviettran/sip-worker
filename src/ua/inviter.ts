@@ -23,7 +23,7 @@ import type { Clock } from '../transport/index.js';
 import type { AuthManager, AuthFailure } from '../auth/manager.js';
 import type { WorkerMediaController } from '../media/worker-controller.js';
 import { Session } from './session.js';
-import { DialogSet } from './dialog-set.js';
+import { DialogSet, type DialogSuccessResult } from './dialog-set.js';
 import { responseMatchesRequestIdentity } from './response-identity.js';
 
 export interface InviterOptions {
@@ -38,6 +38,7 @@ export interface InviterOptions {
   readonly authManager?: AuthManager;
   readonly credentials?: { readonly username: string; readonly password: string };
   readonly onDialogCreated?: (dialog: Dialog) => void;
+  readonly onDialogReleased?: (dialog: Dialog) => void;
 }
 
 /** Extract the numeric CSeq from a message. */
@@ -64,6 +65,7 @@ export class Inviter {
   private readonly authManager?: AuthManager;
   private readonly credentials?: { readonly username: string; readonly password: string };
   private readonly onDialogCreated: ((dialog: Dialog) => void) | undefined;
+  private readonly onDialogReleased: ((dialog: Dialog) => void) | undefined;
 
   private readonly sessionId: string;
   private readonly callId: string;
@@ -78,8 +80,10 @@ export class Inviter {
   private dialogSet: DialogSet | undefined;
   private hangingUp = false;
   private hangupDeferred: { resolve: () => void; reject: (reason: unknown) => void } | undefined;
+  private unsubscribeHangup: (() => void) | undefined;
   private disposed = false;
   private requestVersion = 0;
+  private hangupVersion = 0;
   private readonly cleanupOperations = new Set<CleanupOperation>();
 
   constructor(options: InviterOptions) {
@@ -94,6 +98,7 @@ export class Inviter {
     this.authManager = options.authManager;
     this.credentials = options.credentials;
     this.onDialogCreated = options.onDialogCreated;
+    this.onDialogReleased = options.onDialogReleased;
 
     // Stable per-session identifiers
     this.sessionId = options.idGenerator.branch();
@@ -141,9 +146,17 @@ export class Inviter {
     this.hangingUp = true;
     const dialog = this.dialog;
     return new Promise<void>((resolve, reject) => {
-      this.hangupDeferred = { resolve, reject };
+      const deferred = { resolve, reject };
+      const hangupVersion = this.hangupVersion;
+      this.hangupDeferred = deferred;
       this.session.transition('terminating');
-      if (this.disposed) return;
+      if (
+        this.disposed
+        || !this.hangingUp
+        || this.hangupDeferred !== deferred
+        || this.hangupVersion !== hangupVersion
+        || this.session.state !== 'terminating'
+      ) return;
       if (dialog === undefined) {
         this.failHangup(new SipError(0, 'hangup() called before call was confirmed'));
         return;
@@ -155,6 +168,11 @@ export class Inviter {
   /** The selected (application) dialog from the first 2xx response. */
   get dialog(): Dialog | undefined {
     return this.dialogSet?.selectedDialog;
+  }
+
+  /** Every dialog currently owned by this forked INVITE. */
+  get dialogs(): readonly Dialog[] {
+    return this.dialogSet?.allDialogs ?? [];
   }
 
   private async startInvite(): Promise<void> {
@@ -200,7 +218,7 @@ export class Inviter {
   }
 
   private attachListener(request: SipRequestMessage): void {
-    this.teardown();
+    this.teardownInvite();
     const requestVersion = this.requestVersion;
     let inviteKey: TransactionKey | undefined;
     const unsubscribeStateless = this.layer.subscribe((event: TransactionLayerEvent) => {
@@ -240,6 +258,9 @@ export class Inviter {
           this.onResponse(request, event.response);
         } else if (event.type === 'timeout' || event.type === 'transportError') {
           this.fail(new SipError(0, `INVITE ${event.type}`));
+        } else if (event.type === 'terminated') {
+          this.dialogSet?.expireExtraOwners();
+          this.teardownInvite();
         }
       },
     );
@@ -293,29 +314,31 @@ export class Inviter {
         this.layer.getTransport(),
         (dialog) => this.sendByeForDialog(dialog),
         (dialog) => this.onDialogCreated?.(dialog),
+        (dialog) => this.onDialogReleased?.(dialog),
       );
     }
 
+    let result: DialogSuccessResult;
     try {
-      await this.dialogSet.handleSuccess(response);
+      result = await this.dialogSet.handleSuccess(response);
     } catch (err) {
       // Malformed 2xx (missing To tag/Contact) - fail the invite if still pending
       if (this.disposed) return;
-      this.fail(err);
+      if (this.inviteDeferred !== undefined) this.fail(err);
       return;
     }
     if (this.disposed) return;
 
-    // Set remote SDP from every 2xx (the selected dialog's answer)
+    // Only the selected dialog owns the application media answer.
     const sdp = DialogSet.sdpFromBody(response);
-    if (sdp.length > 0) {
+    if (result.selected && result.created && sdp.length > 0) {
       void this.controller.setRemote(this.sessionId, sdp);
     }
 
     // Transition to confirmed and resolve the invite promise once, on the
     // first (selected) dialog. Repeated/forked 2xx produce no state change.
     const deferred = this.inviteDeferred;
-    if (deferred !== undefined && this.dialogSet.hasSelection) {
+    if (deferred !== undefined && result.selected) {
       this.inviteDeferred = undefined;
       this.settleAuthExchange();
       deferred.resolve();
@@ -348,9 +371,9 @@ export class Inviter {
   }
 
   /**
-   * Send a BYE for the selected (application) dialog from hangup(). Replaces
-   * the INVITE listener with a BYE listener, transitions to terminated on a
-   * 2xx, and settles the hangup promise.
+   * Send a BYE for the selected (application) dialog from hangup(). Its owned
+   * listener is independent of the retained fork-response listener. A 2xx
+   * transitions the selected session to terminated and settles hangup().
    */
   private sendBye(dialog: Dialog): void {
     const bye = dialog.createRequest('BYE');
@@ -419,17 +442,17 @@ export class Inviter {
   }
 
   private attachByeListener(request: SipRequestMessage): void {
-    this.teardown();
-    const requestVersion = this.requestVersion;
+    this.teardownHangup();
+    const hangupVersion = this.hangupVersion;
     sendOwnedRequest(
       this.layer,
       request,
       (disposeRequest) => {
-        if (this.disposed || requestVersion !== this.requestVersion) {
+        if (this.disposed || hangupVersion !== this.hangupVersion) {
           disposeRequest();
           return;
         }
-        this.unsubscribe = disposeRequest;
+        this.unsubscribeHangup = disposeRequest;
       },
       (event: TransactionLayerEvent) => {
         if (event.type === 'response') {
@@ -452,14 +475,17 @@ export class Inviter {
   /** Handle a request addressed to the confirmed dialog. */
   handleIncomingRequest(transaction: ServerTransaction, request: SipRequestMessage): void {
     if (this.disposed) return;
-    const dialog = this.dialog;
-    if (dialog === undefined || request.method !== 'BYE' || !dialog.matchesRequest(request) || !dialog.receiveRequest(request)) {
+    if (request.method !== 'BYE') {
+      this.layer.sendResponse(transaction.key, this.requestResponse(request, 481, 'Call/Transaction Does Not Exist'));
+      return;
+    }
+    const match = this.dialogSet?.receiveRequest(request);
+    if (match === undefined) {
       this.layer.sendResponse(transaction.key, this.requestResponse(request, 481, 'Call/Transaction Does Not Exist'));
       return;
     }
     this.layer.sendResponse(transaction.key, this.requestResponse(request, 200, 'OK'));
-    if (this.disposed) return;
-    this.teardown();
+    if (this.disposed || !match.selected) return;
     const inviteDeferred = this.inviteDeferred;
     this.inviteDeferred = undefined;
     if (inviteDeferred !== undefined) {
@@ -518,24 +544,40 @@ export class Inviter {
   }
 
   private settleHangup(): void {
-    this.teardown();
+    this.teardownHangup();
     const deferred = this.hangupDeferred;
     this.hangupDeferred = undefined;
+    this.hangingUp = false;
     if (deferred !== undefined) deferred.resolve();
   }
 
   private failHangup(reason: unknown): void {
-    this.teardown();
+    this.teardownHangup();
     const deferred = this.hangupDeferred;
     this.hangupDeferred = undefined;
+    this.hangingUp = false;
     if (deferred !== undefined) deferred.reject(reason);
+    if (!this.disposed && this.session.state === 'terminating') this.session.transition('confirmed');
   }
 
   private teardown(): void {
+    this.teardownInvite();
+    this.teardownHangup();
+  }
+
+  private teardownInvite(): void {
     this.requestVersion += 1;
     if (this.unsubscribe !== undefined) {
       this.unsubscribe();
       this.unsubscribe = undefined;
+    }
+  }
+
+  private teardownHangup(): void {
+    this.hangupVersion += 1;
+    if (this.unsubscribeHangup !== undefined) {
+      this.unsubscribeHangup();
+      this.unsubscribeHangup = undefined;
     }
   }
 }

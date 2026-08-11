@@ -27,20 +27,24 @@ function makeInvite(overrides: Partial<SipRequestMessage> = {}): SipRequestMessa
   };
 }
 
-function setup(overrides: Partial<{ reliable: boolean }> = {}): Harness {
+function setup(overrides: Partial<{
+  reliable: boolean;
+  onEmit: (event: TransactionLayerEvent, transaction: InviteServerTransaction) => void;
+}> = {}): Harness {
   const clock = new FakeClock();
   const transport = new FakeTransport({ reliable: overrides.reliable ?? false, framing: 'datagram' });
   void transport.connect();
   const request = makeInvite();
   const events: TransactionLayerEvent[] = [];
-  const tx = new InviteServerTransaction({
+  let tx!: InviteServerTransaction;
+  tx = new InviteServerTransaction({
     request,
     key: 'branch|example.com:5060|INVITE',
     transport,
     clock,
     timers: TIMERS,
     reliable: overrides.reliable ?? false,
-    emit: (e) => events.push(e),
+    emit: (event) => { events.push(event); overrides.onEmit?.(event, tx); },
   });
   return { clock, transport, events, tx };
 }
@@ -70,6 +74,20 @@ describe('InviteServerTransaction', () => {
     expect(h.transport.sent.length).toBe(0);
     h.clock.advance(1);
     expect(h.transport.sent.length).toBe(1);
+  });
+  it('does not arm Timer 100 after request emission terminates re-entrantly', () => {
+    const h = setup({
+      onEmit: (event, transaction) => {
+        if (event.type === 'request') transaction.terminate();
+      },
+    });
+
+    start(h);
+
+    expect(h.tx.state).toBe('Terminated');
+    expect(h.clock.pending()).toBe(0);
+    h.clock.advance(200);
+    expect(h.transport.sent).toHaveLength(0);
   });
 
   it('automatic-100 timer sends and caches 100 Trying', () => {
@@ -214,6 +232,21 @@ describe('InviteServerTransaction', () => {
     expect(h.events).toContainEqual({ type: 'timeout', key: 'branch|example.com:5060|INVITE' });
   });
 
+  it.each([200, 486])('normalizes a synchronous send throw and retains the terminating timer for %i', (statusCode) => {
+    const h = setup({ reliable: true });
+    start(h);
+    h.transport.send = () => {
+      throw new Error('synchronous send failure');
+    };
+
+    expect(() => h.tx.sendResponse(response(statusCode))).not.toThrow();
+    expect(h.events.filter((event) => event.type === 'transportError')).toHaveLength(1);
+    expect(h.tx.state).toBe(statusCode === 200 ? 'Accepted' : 'Completed');
+
+    h.clock.advance(statusCode === 200 ? TIMERS.L : TIMERS.H);
+    expect(h.tx.state).toBe('Terminated');
+  });
+
   it('send failure emits transportError without discarding state; RFC timers still terminate', async () => {
     const clock = new FakeClock();
     const transport = new FakeTransport({ reliable: false, framing: 'datagram' });
@@ -238,5 +271,31 @@ describe('InviteServerTransaction', () => {
     // Timer H still terminates.
     clock.advance(TIMERS.H);
     expect(tx.state).toBe('Terminated');
+
+  });
+
+  it.each([200, 486])('does not arm post-send timers after re-entrant termination for %i', (statusCode) => {
+    const h = setup();
+    start(h);
+    h.transport.onSend = () => h.tx.terminate();
+
+    h.tx.sendResponse(response(statusCode));
+
+    expect(h.tx.state).toBe('Terminated');
+    expect(h.clock.pending()).toBe(0);
+  });
+
+  it('does not re-arm Timer G after a retransmit send terminates re-entrantly', () => {
+    const h = setup();
+    start(h);
+    h.tx.sendResponse(response(486));
+    h.transport.onSend = () => {
+      if (h.transport.sent.length === 2) h.tx.terminate();
+    };
+
+    h.clock.advance(TIMERS.T1);
+
+    expect(h.tx.state).toBe('Terminated');
+    expect(h.clock.pending()).toBe(0);
   });
 });

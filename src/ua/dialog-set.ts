@@ -16,6 +16,12 @@ export interface DialogSetTransport {
   send(bytes: Uint8Array): Promise<void>;
 }
 
+/** Whether a handled 2xx selected a newly created application dialog. */
+export interface DialogSuccessResult {
+  readonly selected: boolean;
+  readonly created: boolean;
+}
+
 /**
  * Record for a single dialog established from a forked 2xx response.
  *
@@ -28,6 +34,8 @@ interface DialogRecord {
   readonly ackBytes: Uint8Array;
   /** Whether a BYE has already been sent for this (extra) dialog. */
   cleanupStarted: boolean;
+  /** Whether the external dialog-routing owner has been released. */
+  ownerReleased: boolean;
 }
 
 /**
@@ -55,7 +63,8 @@ export class DialogSet {
     private readonly idGenerator: IdGenerator,
     private readonly transport: DialogSetTransport,
     private readonly sendByeFn: SendByeFn,
-    private readonly onDialogSelected: (dialog: Dialog) => void = () => {},
+    private readonly onDialogCreated: (dialog: Dialog) => void = () => {},
+    private readonly onDialogReleased: (dialog: Dialog) => void = () => {},
   ) {}
 
   /**
@@ -67,7 +76,7 @@ export class DialogSet {
    *
    * Rejects if the response lacks a To tag.
    */
-  async handleSuccess(response: SipResponseMessage): Promise<void> {
+  async handleSuccess(response: SipResponseMessage): Promise<DialogSuccessResult> {
     // Extract remote To tag
     const toHeader = response.headers.get('To');
     if (!toHeader) {
@@ -87,8 +96,13 @@ export class DialogSet {
     // Repeated 2xx for an existing dialog - resend that dialog's cached ACK
     const existing = this.dialogs.get(remoteTag);
     if (existing !== undefined) {
-      await this.transport.send(existing.ackBytes);
-      return;
+      const selected = remoteTag === this.selectedTag;
+      try {
+        await this.transport.send(existing.ackBytes);
+      } catch (error) {
+        if (selected) throw error;
+      }
+      return { selected, created: false };
     }
 
     // New dialog from this 2xx. Each fork has a distinct To tag, so generate
@@ -96,25 +110,69 @@ export class DialogSet {
     const dialog = Dialog.fromUac(this.request, response, this.idGenerator);
     const ack = dialog.createAck(response);
     const ackBytes = serializeMessage(ack);
-    const record: DialogRecord = { dialog, ackBytes, cleanupStarted: false };
+    const record: DialogRecord = {
+      dialog,
+      ackBytes,
+      cleanupStarted: false,
+      ownerReleased: false,
+    };
 
-    // Publish the first dialog before sending its ACK so a remote request that
-    // arrives synchronously from the send path can be routed to its owner.
-    if (this.selectedTag === undefined) {
-      this.dialogs.set(remoteTag, record);
-      this.selectedTag = remoteTag;
-      this.onDialogSelected(dialog);
-      await this.transport.send(ackBytes);
-      return;
-    }
-
-    await this.transport.send(ackBytes);
+    // Publish every dialog and its owner before ACK I/O, which may synchronously
+    // deliver an in-dialog request through the peer transport.
+    const selected = this.selectedTag === undefined;
     this.dialogs.set(remoteTag, record);
+    if (selected) this.selectedTag = remoteTag;
+    this.onDialogCreated(dialog);
+
+    try {
+      await this.transport.send(ackBytes);
+    } catch (error) {
+      if (selected) throw error;
+    }
+    if (selected) return { selected: true, created: true };
 
     // Additional forked dialog - clean it up with BYE (but only once)
     if (!record.cleanupStarted) {
       record.cleanupStarted = true;
-      await this.sendByeFn(dialog);
+      try {
+        await this.sendByeFn(dialog);
+        this.releaseOwner(record);
+      } catch {
+        // Retain routing until a remote BYE or the accepted lifetime expires.
+      }
+    }
+    return { selected: false, created: true };
+  }
+
+  /** Match and accept an in-dialog request across selected and extra forks. */
+  receiveRequest(request: SipRequestMessage): { dialog: Dialog; selected: boolean } | undefined {
+    for (const [tag, record] of this.dialogs) {
+      if (!record.dialog.matchesRequest(request)) continue;
+      if (!record.dialog.receiveRequest(request)) return undefined;
+      if (request.method === 'BYE') {
+        record.cleanupStarted = true;
+        this.releaseOwner(record);
+      }
+      return { dialog: record.dialog, selected: tag === this.selectedTag };
+    }
+    return undefined;
+  }
+
+  /** Release retained extra-fork owners when the INVITE accepted lifetime ends. */
+  expireExtraOwners(): void {
+    for (const [tag, record] of this.dialogs) {
+      if (tag !== this.selectedTag) this.releaseOwner(record);
+    }
+  }
+
+  /** Release a published routing owner exactly once when its dialog ends. */
+  private releaseOwner(record: DialogRecord): void {
+    if (record.ownerReleased) return;
+    record.ownerReleased = true;
+    try {
+      this.onDialogReleased(record.dialog);
+    } catch {
+      // Internal ownership cleanup must not affect SIP settlement.
     }
   }
 

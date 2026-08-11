@@ -77,6 +77,7 @@ export class InviteServerTransaction {
     if (!this.started) {
       this.started = true;
       this.emit({ type: 'request', transaction: this.snapshot(), request });
+      if (this.currentState !== 'Proceeding') return;
       this.armTimer100();
       return;
     }
@@ -107,6 +108,7 @@ export class InviteServerTransaction {
       if (this.currentState === 'Proceeding') {
         this.currentState = 'Accepted';
         this.sendBytes(serializeMessage(response));
+        if (this.currentState !== 'Accepted') return;
         this.armTimerL();
       } else if (this.currentState === 'Accepted') {
         this.sendBytes(serializeMessage(response));
@@ -116,7 +118,9 @@ export class InviteServerTransaction {
         this.currentState = 'Completed';
         this.cachedResponse = serializeMessage(response);
         this.sendBytes(this.cachedResponse);
+        if (this.currentState !== 'Completed') return;
         if (!this.reliable) this.startG();
+        if (this.currentState !== 'Completed') return;
         this.armTimerH();
       }
     }
@@ -149,10 +153,15 @@ export class InviteServerTransaction {
     // A failed send surfaces a transportError but never discards INVITE server
     // state prematurely: the RFC timers still terminate the transaction (and
     // the server must stay alive to receive the ACK).
-    this.transport.send(bytes).catch((err: unknown) => {
+    const onError = (err: unknown): void => {
       const error = err instanceof TransportError ? err : new TransportError(String(err));
       this.emit({ type: 'transportError', key: this.key, error });
-    });
+    };
+    try {
+      void this.transport.send(bytes).catch(onError);
+    } catch (error) {
+      onError(error);
+    }
   }
 
   private armTimer100(): void {
@@ -180,6 +189,7 @@ export class InviteServerTransaction {
   private onTimerG(): void {
     if (this.currentState !== 'Completed') return;
     this.resendCached();
+    if (this.currentState !== 'Completed') return;
     this.retransmitInterval = Math.min(2 * this.retransmitInterval, this.timers.T2);
     this.timerG = schedule(this.clock, this.retransmitInterval, () => this.onTimerG());
   }
