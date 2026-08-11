@@ -22,6 +22,7 @@ import type { TransactionLayerEvent } from '../transactions/types.js';
 import { sendOwnedRequest } from '../transactions/request-ownership.js';
 import type { Clock } from '../transport/index.js';
 import type { RegistrationIdentity, RegisterState } from './registration-types.js';
+import { responseMatchesRequestIdentity } from './response-identity.js';
 
 export interface RegistrarOptions {
   readonly registrarUri: string;
@@ -267,8 +268,7 @@ export class Registrar {
   }
 
   private onResponse(base: SipRequestMessage, response: SipResponseMessage): void {
-    // Only answer responses that match this attempt's chain (same CSeq).
-    if (numeric(response.headers) !== numeric(base.headers)) return;
+    if (!responseMatchesRequestIdentity(base, response)) return;
     const code = response.statusCode;
     if (code === 401 || code === 407) {
       this.handleAuth(base, response);

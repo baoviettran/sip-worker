@@ -162,7 +162,12 @@ function flush(): Promise<void> { return new Promise((resolve) => setTimeout(res
 function respond(
   h: Harness,
   statusCode: number,
-  over: { sdp?: string; toTag?: string; challenge?: boolean } = {},
+  over: {
+    sdp?: string;
+    toTag?: string;
+    challenge?: boolean;
+    identityMismatch?: 'call-id' | 'from-tag' | 'to-uri' | 'to-tag';
+  } = {},
 ): void {
   const request = h.sent[h.sent.length - 1];
   if (request === undefined) throw new Error('no outbound request to answer');
@@ -175,6 +180,10 @@ function respond(
   headers.set('Call-ID', request.headers.get('Call-ID') ?? 'call@example.com');
   headers.set('CSeq', request.headers.get('CSeq') ?? '1 INVITE');
   headers.set('Max-Forwards', '70');
+  if (over.identityMismatch === 'call-id') headers.set('Call-ID', 'forged-call@example.com');
+  if (over.identityMismatch === 'from-tag') headers.set('From', `<${AOR}>;tag=forged-from`);
+  if (over.identityMismatch === 'to-uri') headers.set('To', '<sip:mallory@example.com>;tag=bob-1');
+  if (over.identityMismatch === 'to-tag') headers.set('To', `<${toUri}>`);
   // A 2xx INVITE response must carry a Contact header (RFC 3261 12.1.1)
   if (statusCode >= 200 && statusCode < 300) {
     headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
@@ -225,7 +234,8 @@ function responseFor(
   headers.set('Via', request.headers.get('Via')!);
   headers.set('From', request.headers.get('From')!);
   const toUri = request.headers.get('To')?.match(/<([^>]+)>/)?.[1] ?? REMOTE_URI;
-  headers.set('To', `<${toUri}>;tag=${over.toTag ?? 'server'}`);
+  const requestToTag = request.headers.get('To')?.match(/;tag=([^;,\s]+)/)?.[1];
+  headers.set('To', `<${toUri}>;tag=${over.toTag ?? requestToTag ?? 'server'}`);
   headers.set('Call-ID', request.headers.get('Call-ID')!);
   headers.set('CSeq', request.headers.get('CSeq')!);
   if (statusCode >= 200 && statusCode < 300) {
@@ -537,6 +547,99 @@ describe('Inviter (outgoing SIP call session)', () => {
     expect(trace).toContain('confirmed');
   });
 
+  it.each([
+    ['Call-ID', 'call-id'],
+    ['From tag', 'from-tag'],
+    ['To URI', 'to-uri'],
+    ['To tag', 'to-tag'],
+  ] as const)('ignores a forged 401 with mismatched %s', async (_label, identityMismatch) => {
+    const h = setup({ credentials: true });
+    const invitation = h.inviter.invite();
+    const outcome = invitation.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await flush();
+
+    respond(h, 401, { challenge: true, identityMismatch });
+    await flush();
+    const settled = await Promise.race([outcome, PENDING]);
+    const inviteAttempts = h.sent.filter((request) => request.method === 'INVITE').length;
+    const retryBudgets = h.authManager!.retriesByRequestSize;
+    const state = h.inviter.session.state;
+
+    h.inviter.dispose(new Error('test cleanup'));
+    await outcome;
+
+    expect(settled).toBe(PENDING);
+    expect(inviteAttempts).toBe(1);
+    expect(retryBudgets).toBe(0);
+    expect(state).toBe('inviting');
+  });
+
+  it('does not confirm from a forged 200 with the matching transaction key', async () => {
+    const h = setup();
+    const invitation = h.inviter.invite();
+    const outcome = invitation.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await flush();
+
+    respond(h, 200, { sdp: STUB_SDP, identityMismatch: 'call-id' });
+    await flush();
+    const settled = await Promise.race([outcome, PENDING]);
+    const state = h.inviter.session.state;
+
+    h.inviter.dispose(new Error('test cleanup'));
+    await outcome;
+
+    expect(settled).toBe(PENDING);
+    expect(state).toBe('inviting');
+  });
+
+  it('does not fail from a forged terminal response with the matching transaction key', async () => {
+    const h = setup();
+    const invitation = h.inviter.invite();
+    const outcome = invitation.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await flush();
+
+    respond(h, 486, { identityMismatch: 'from-tag' });
+    await flush();
+    const settled = await Promise.race([outcome, PENDING]);
+    const state = h.inviter.session.state;
+
+    h.inviter.dispose(new Error('test cleanup'));
+    await outcome;
+
+    expect(settled).toBe(PENDING);
+    expect(state).toBe('inviting');
+  });
+
+  it('does not enter ringing from a forged provisional response', async () => {
+    const h = setup();
+    const invitation = h.inviter.invite();
+    const outcome = invitation.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await flush();
+
+    respond(h, 180, { identityMismatch: 'to-uri' });
+    await flush();
+    const settled = await Promise.race([outcome, PENDING]);
+    const state = h.inviter.session.state;
+
+    h.inviter.dispose(new Error('test cleanup'));
+    await outcome;
+
+    expect(settled).toBe(PENDING);
+    expect(state).toBe('inviting');
+  });
+
   it('answers a 401 with a transactional ACK then an authenticated re-INVITE', async () => {
     const h = setup({ credentials: true });
     const invite = h.inviter.invite();
@@ -661,6 +764,70 @@ describe('Inviter (outgoing SIP call session)', () => {
     respond(h, 200, { toTag: 'bob-1' });
     await bye;
     expect(h.inviter.session.state).toBe('terminated');
+  });
+
+  it('does not settle hangup from a forged BYE response', async () => {
+    const h = setup();
+    await confirmCall(h);
+    const hangup = h.inviter.hangup();
+    const outcome = hangup.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    const bye = h.sent[h.sent.length - 1]!;
+
+    receive(h, bye, { toTag: 'forged-remote' });
+    const settled = await Promise.race([outcome, PENDING]);
+    const state = h.inviter.session.state;
+
+    h.inviter.dispose(new Error('test cleanup'));
+    await outcome;
+
+    expect(settled).toBe(PENDING);
+    expect(state).toBe('terminating');
+  });
+
+  it('ignores a forged stateless INVITE 2xx after confirmation', async () => {
+    const h = setup();
+    const invite = await confirmCall(h);
+    const acknowledgements = acks(h).length;
+    const byes = h.sent.filter((request) => request.method === 'BYE').length;
+    const forged = responseFor(invite, { sdp: STUB_SDP, toTag: 'forged-fork' });
+    forged.headers.set('To', '<sip:mallory@example.com>;tag=forged-fork');
+
+    h.clock.advance(32000);
+
+    h.layer.receive(forged);
+    expect(h.events.at(-1)).toEqual(expect.objectContaining({ type: 'statelessResponse' }));
+    await drainMicrotasks();
+
+    expect(h.inviter.session.state).toBe('confirmed');
+    expect(acks(h)).toHaveLength(acknowledgements);
+    expect(h.sent.filter((request) => request.method === 'BYE')).toHaveLength(byes);
+  });
+
+  it('does not settle fork cleanup from a forged BYE response', async () => {
+    const h = setup();
+    const cleanups = observeForkCleanups(h);
+    const invite = await confirmCall(h);
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-2' });
+    await drainMicrotasks();
+    const cleanup = cleanups[0]!;
+    const outcome = cleanup.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    const bye = h.sent.filter((request) => request.method === 'BYE').at(-1)!;
+
+    receive(h, bye, { toTag: 'forged-remote' });
+    const settled = await Promise.race([outcome, PENDING]);
+    const state = h.inviter.session.state;
+
+    h.inviter.dispose(new Error('test cleanup'));
+    await outcome;
+
+    expect(settled).toBe(PENDING);
+    expect(state).toBe('confirmed');
   });
 
   it('resends a byte-identical cached ACK on a repeated same-dialog 200', async () => {

@@ -127,7 +127,8 @@ function echoResponse(request: SipRequestMessage, code: number, reason: string, 
   const headers = new Headers();
   headers.set('Via', request.headers.get('Via') ?? '');
   headers.set('From', request.headers.get('From') ?? '');
-  headers.set('To', request.headers.get('To') ?? '');
+  const to = request.headers.get('To') ?? '';
+  headers.set('To', /;tag=/.test(to) ? to : `${to};tag=server`);
   headers.set('Call-ID', request.headers.get('Call-ID') ?? '');
   headers.set('CSeq', request.headers.get('CSeq') ?? '');
   for (const [name, value] of extra) headers.set(name, value);

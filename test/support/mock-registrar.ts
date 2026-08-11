@@ -109,7 +109,7 @@ export class MockRegistrar {
     const headers = new Headers();
     headers.set('Via', request.headers.get('Via') ?? '');
     headers.set('From', request.headers.get('From') ?? '');
-    headers.set('To', request.headers.get('To') ?? '');
+    headers.set('To', `${request.headers.get('To') ?? ''};tag=registrar`);
     headers.set('Call-ID', request.headers.get('Call-ID') ?? '');
     headers.set('CSeq', request.headers.get('CSeq') ?? '');
     if (isUnregister) {

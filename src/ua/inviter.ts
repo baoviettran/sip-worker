@@ -14,7 +14,7 @@
 import { Headers, makeRequest, makeResponse, bodyText } from '../messages/index.js';
 import type { SipRequestMessage, SipResponseMessage } from '../messages/message.js';
 import { SipError } from '../errors.js';
-import { makeBranch, extractTag } from '../dialogs/header-values.js';
+import { makeBranch } from '../dialogs/header-values.js';
 import { Dialog, type IdGenerator } from '../dialogs/dialog.js';
 import { clientKey, type TransactionLayer } from '../transactions/coordinator.js';
 import type { TransactionKey, TransactionLayerEvent, ServerTransaction } from '../transactions/types.js';
@@ -24,6 +24,7 @@ import type { AuthManager, AuthFailure } from '../auth/manager.js';
 import type { WorkerMediaController } from '../media/worker-controller.js';
 import { Session } from './session.js';
 import { DialogSet } from './dialog-set.js';
+import { responseMatchesRequestIdentity } from './response-identity.js';
 
 export interface InviterOptions {
   readonly to: string;
@@ -210,16 +211,11 @@ export class Inviter {
       const response = event.response;
       if (
         clientKey(response) === inviteKey
-        && cseqNumber(response) === cseqNumber(request)
-        && response.headers.get('CSeq')?.trim().split(/\s+/)[1] === 'INVITE'
+        && responseMatchesRequestIdentity(request, response)
         && response.statusCode >= 200
         && response.statusCode < 300
       ) {
-        const callId = response.headers.get('Call-ID');
-        const fromTag = extractTag(response.headers.get('From'));
-        if (callId === this.callId && fromTag === this.fromTag) {
-          void this.onSuccess(response);
-        }
+        void this.onSuccess(response);
       }
     });
     this.unsubscribe = unsubscribeStateless;
@@ -250,8 +246,7 @@ export class Inviter {
   }
 
   private onResponse(base: SipRequestMessage, response: SipResponseMessage): void {
-    // Match responses to this attempt by CSeq
-    if (cseqNumber(response) !== cseqNumber(base)) return;
+    if (!responseMatchesRequestIdentity(base, response)) return;
 
     const code = response.statusCode;
 
@@ -404,7 +399,7 @@ export class Inviter {
           },
           (event: TransactionLayerEvent) => {
             if (event.type === 'response') {
-              if (cseqNumber(event.response) === cseqNumber(bye)) {
+              if (responseMatchesRequestIdentity(bye, event.response)) {
                 const code = event.response.statusCode;
                 if (code >= 200 && code < 300) {
                   settle(true);
@@ -438,7 +433,7 @@ export class Inviter {
       },
       (event: TransactionLayerEvent) => {
         if (event.type === 'response') {
-          if (cseqNumber(event.response) === cseqNumber(request)) {
+          if (responseMatchesRequestIdentity(request, event.response)) {
             const code = event.response.statusCode;
             if (code >= 200 && code < 300) {
               this.settleHangup();

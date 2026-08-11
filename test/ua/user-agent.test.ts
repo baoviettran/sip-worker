@@ -370,7 +370,7 @@ describe('UserAgent liveness wiring', () => {
       const resp = new Headers();
       resp.set('Via', req.headers.get('Via') ?? '');
       resp.set('From', req.headers.get('From') ?? '');
-      resp.set('To', req.headers.get('To') ?? '');
+      resp.set('To', `${req.headers.get('To') ?? ''};tag=server`);
       resp.set('Call-ID', req.headers.get('Call-ID') ?? '');
       resp.set('CSeq', req.headers.get('CSeq') ?? '');
       resp.set('Contact', req.headers.get('Contact') ?? '');

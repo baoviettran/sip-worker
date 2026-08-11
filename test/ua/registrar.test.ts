@@ -105,16 +105,28 @@ function responseFor(request: SipRequestMessage, statusCode = 200): ReturnType<t
 function respond(
   h: Harness,
   statusCode: number,
-  over: { expires?: string; contactExpires?: string; minExpires?: string; challenge?: boolean; challengeHeader?: 'WWW-Authenticate' | 'Proxy-Authenticate'; contact?: string | null } = {},
+  over: {
+    expires?: string;
+    contactExpires?: string;
+    minExpires?: string;
+    challenge?: boolean;
+    challengeHeader?: 'WWW-Authenticate' | 'Proxy-Authenticate';
+    contact?: string | null;
+    identityMismatch?: 'call-id' | 'from-tag' | 'to-uri' | 'to-tag';
+  } = {},
 ): void {
   const request = h.sent[h.sent.length - 1];
   if (request === undefined) throw new Error('no outbound request to answer');
   const headers = new Headers();
   headers.set('Via', `SIP/2.0/UDP 192.0.2.1:5060;branch=${branchOf(request)}`);
   headers.set('From', request.headers.get('From') ?? `<${AOR}>;tag=fg7b0a`);
-  headers.set('To', request.headers.get('To') ?? `<${AOR}>;tag=reg-1`);
+  headers.set('To', `${request.headers.get('To') ?? `<${AOR}>`};tag=reg-server`);
   headers.set('Call-ID', request.headers.get('Call-ID') ?? 'call@example.com');
   headers.set('CSeq', request.headers.get('CSeq') ?? '1 REGISTER');
+  if (over.identityMismatch === 'call-id') headers.set('Call-ID', 'forged-call@example.com');
+  if (over.identityMismatch === 'from-tag') headers.set('From', `<${AOR}>;tag=forged-from`);
+  if (over.identityMismatch === 'to-uri') headers.set('To', '<sip:mallory@example.com>;tag=reg-server');
+  if (over.identityMismatch === 'to-tag') headers.set('To', request.headers.get('To') ?? `<${AOR}>`);
   // `contact: null` omits the Contact header (e.g. a Contact-less redirect to
   // exercise the no-Contact fail path); otherwise default to the UA Contact.
   if (over.contact !== null) headers.set('Contact', over.contact ?? CONTACT);
@@ -271,6 +283,64 @@ describe('Registrar', () => {
     respond(h, 200);
     await registration;
     expect(h.registrar.state).toBe('registered');
+  });
+
+  it.each([
+    ['Call-ID', 'call-id'],
+    ['From tag', 'from-tag'],
+    ['To URI', 'to-uri'],
+    ['To tag', 'to-tag'],
+  ] as const)('ignores a forged auth response with mismatched %s', async (_label, identityMismatch) => {
+    const h = setup();
+    const registration = h.registrar.register();
+    const outcome = registration.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await flush();
+
+    respond(h, 401, { challenge: true, identityMismatch });
+    await flush();
+    const settled = await Promise.race([outcome, PENDING]);
+    const attempts = h.sent.length;
+    const retryBudgets = h.authManager!.retriesByRequestSize;
+    const state = h.registrar.state;
+
+    h.registrar.dispose(new Error('test cleanup'));
+    await outcome;
+
+    expect(settled).toBe(PENDING);
+    expect(attempts).toBe(1);
+    expect(retryBudgets).toBe(0);
+    expect(state).toBe('registering');
+  });
+
+  it.each([
+    ['success', 200, { identityMismatch: 'call-id' }],
+    ['interval retry', 423, { minExpires: '600', identityMismatch: 'from-tag' }],
+    ['redirect', 302, { contact: '<sip:redirect.example.com>', identityMismatch: 'to-uri' }],
+    ['terminal failure', 403, { identityMismatch: 'to-tag' }],
+  ] as const)('ignores a forged %s response before mutating registration state', async (_label, statusCode, over) => {
+    const h = setup();
+    const registration = h.registrar.register();
+    const outcome = registration.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await flush();
+
+    respond(h, statusCode, over);
+    await flush();
+    const settled = await Promise.race([outcome, PENDING]);
+    const attempts = h.sent.length;
+    const state = h.registrar.state;
+
+    h.registrar.dispose(new Error('test cleanup'));
+    await outcome;
+
+    expect(settled).toBe(PENDING);
+    expect(attempts).toBe(1);
+    expect(state).toBe('registering');
   });
 
   it('answers a 401 via Authorization and resolves after the authenticated 200', async () => {
