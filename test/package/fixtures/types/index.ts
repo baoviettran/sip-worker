@@ -15,6 +15,8 @@ import {
   WorkerSupervisor,
   WorkerMediaController,
   TypedEventEmitter,
+  WorkerRegistrationError as RootWorkerRegistrationError,
+  WorkerClosedError as RootWorkerClosedError,
   parseMessage,
   serializeMessage,
   makeRequest,
@@ -122,9 +124,12 @@ import {
   WorkerSupervisor as SupCls,
   WorkerRuntime,
   WorkerRestartError,
+  WorkerRegistrationError,
+  WorkerClosedError,
 } from 'sip-worker/bridge';
 import type {
   RegistrationSnapshot,
+  SerializedError,
   SupervisorEvent,
   SupervisorToWorker,
   WorkerToSupervisor,
@@ -343,6 +348,15 @@ void runtimeLegacyPort;
 void new WorkerRuntime(runtimeOptions);
 declare const restart: WorkerRestartError;
 void restart;
+declare const regFailed: WorkerRegistrationError;
+void regFailed;
+declare const workerClosed: WorkerClosedError;
+void workerClosed;
+declare const serializedErr: SerializedError;
+void serializedErr;
+// Root-level re-exports of the new error classes are importable.
+void RootWorkerRegistrationError;
+void RootWorkerClosedError;
 declare const supToWorker: SupervisorToWorker;
 declare const workerToSup: WorkerToSupervisor;
 declare const supEvent: SupervisorEvent;

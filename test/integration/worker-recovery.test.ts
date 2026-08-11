@@ -258,4 +258,76 @@ describe('worker recovery (integration)', () => {
     // The beat's runtime also rejected ready().
     await expect(beats[0]!.runtime.ready()).rejects.toBeInstanceOf(Error);
   });
+
+  it('checkpoints the advanced CSeq at send time so a replacement never reuses it', async () => {
+    const clock = new FakeClock();
+
+    // A beat whose registrar captures the REGISTER but never responds, opening a
+    // window between send and 200 OK where the worker can die.
+    let firstSendCSeq: number | undefined;
+    class SilentBeat extends FakeWorkerBeat {
+      constructor() {
+        super(clock);
+        // Silence the registrar so the REGISTER gets on the wire but no 200 OK.
+        this.server.stop();
+        this.server.setResponding(false);
+        this.server.start();
+      }
+    }
+
+    const beats: SilentBeat[] = [];
+    const factory: WorkerFactory = {
+      spawn: () => {
+        const beat = new SilentBeat();
+        beats.push(beat);
+        return { port: beat.port, terminate: () => beat.terminate() };
+      },
+    };
+
+    const supervisor = new WorkerSupervisor({
+      factory,
+      clock,
+      registration: snapshot,
+      heartbeatIntervalMs: HEARTBEAT_MS,
+      heartbeatTimeoutMs: TIMEOUT_MS,
+    });
+    const events: string[] = [];
+    supervisor.subscribe((e) => events.push(e.type));
+
+    supervisor.start();
+    // The runtime's performRegister calls ua.register() synchronously, which
+    // advances nextCSeq from 18 to 19 and posts a pre-send registrationIdentity
+    // checkpoint BEFORE the 200 OK arrives. Yield microtasks so the checkpoint
+    // message reaches the supervisor.
+    await Promise.resolve();
+    await Promise.resolve();
+    // The first beat sent REGISTER at CSeq 18 (the snapshot's nextCSeq); the
+    // registrar advanced its counter to 19 and the runtime checkpointed that.
+    firstSendCSeq = beats[0]!.latestCSeq;
+    expect(firstSendCSeq).toBe(18);
+
+    // Kill the worker in the send→200OK window: the register exchange is in
+    // flight, no 200 OK has arrived, but the supervisor has already received
+    // the pre-send identity checkpoint (nextCSeq 19).
+    beats[0]!.kill();
+    // Advance past the heartbeat deadline to declare generation 1 dead.
+    clock.advance(HEARTBEAT_MS + TIMEOUT_MS);
+    expect(events).toEqual(['workerDied', 'workerRestarted']);
+    expect(beats.length).toBe(2);
+
+    // The replacement bootstraps from the CHECKPOINTED CSeq (19), not the
+    // pre-send value (18) — proving the pre-send identity checkpoint reached
+    // the supervisor before the death window opened.
+    const replaced = beats[1]!.runtime.bootstrapSnapshot;
+    expect(replaced).toBeDefined();
+    expect(replaced!.callId).toBe('reg-a');
+    expect(replaced!.nextCSeq).toBe(19);
+
+    // The replacement's first REGISTER carries CSeq 19 (not 18) on the wire.
+    // Let the replacement register against a responding registrar.
+    beats[1]!.server.setResponding(true);
+    await beats[1]!.waitRegistered();
+    expect(beats[1]!.latestCSeq).toBe(19);
+    expect(beats[1]!.callIds[0]).toBe('reg-a');
+  });
 });

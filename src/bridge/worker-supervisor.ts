@@ -310,12 +310,15 @@ export class WorkerSupervisor {
   /** Handle a registration failure from the worker: reject waiters + emit. */
   private onRegistrationFailed(gen: number, cause: SerializedError): void {
     const error: WorkerRegistrationErrorType = new WorkerRegistrationError(gen, cause);
-    // Reject every waiter parked on the failing generation.
+    // Reject every waiter parked on the failing generation (collect first to
+    // avoid mutating the Set during iteration).
+    const toReject: Waiter[] = [];
     for (const waiter of this.waiters) {
-      if (waiter.gen === gen) {
-        this.waiters.delete(waiter);
-        waiter.reject(error);
-      }
+      if (waiter.gen === gen) toReject.push(waiter);
+    }
+    for (const waiter of toReject) {
+      this.waiters.delete(waiter);
+      waiter.reject(error);
     }
     this.emitRegistrationFailed(gen, error);
   }
@@ -324,12 +327,15 @@ export class WorkerSupervisor {
   private death(current: Current, cause: unknown): void {
     const error: WorkerRestartErrorType = new WorkerRestartError(current.gen, `worker ${current.gen} died`, cause);
 
-    // Reject every deferred belonging to the dead generation.
+    // Reject every deferred belonging to the dead generation (collect first to
+    // avoid mutating the Set during iteration).
+    const toReject: Waiter[] = [];
     for (const waiter of this.waiters) {
-      if (waiter.gen === current.gen) {
-        this.waiters.delete(waiter);
-        waiter.reject(error);
-      }
+      if (waiter.gen === current.gen) toReject.push(waiter);
+    }
+    for (const waiter of toReject) {
+      this.waiters.delete(waiter);
+      waiter.reject(error);
     }
 
     // Terminate/detach the dead worker so its messages stop arriving.

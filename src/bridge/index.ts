@@ -1,6 +1,11 @@
-export { WorkerRestartError } from './worker-protocol.js';
+export {
+  WorkerClosedError,
+  WorkerRegistrationError,
+  WorkerRestartError,
+} from './worker-protocol.js';
 export type {
   RegistrationSnapshot,
+  SerializedError,
   SupervisorEvent,
   SupervisorToWorker,
   WorkerPort,

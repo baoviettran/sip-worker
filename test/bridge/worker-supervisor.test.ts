@@ -407,18 +407,45 @@ describe('WorkerSupervisor registration failure', () => {
 });
 
 describe('WorkerSupervisor death after send (pre-send identity checkpoint)', () => {
-  it('checkpoints the sent REGISTER CSeq before the worker may die', () => {
+  it('retains the identity-report checkpoint so death after a full register never reuses a CSeq', () => {
     const h = setup({ callId: 'reg-a', nextCSeq: 18 });
     boot(h); // identity report advances snapshot to nextCSeq 19
-    // Worker dies after a send; the supervisor must already have checkpointed
-    // the advanced identity from the registrationIdentity report, so the
-    // replacement never reuses CSeq 18.
+    // Worker dies after a full register cycle; the supervisor must already have
+    // checkpointed the advanced identity from the registrationIdentity report, so
+    // the replacement never reuses CSeq 18. (The pre-send checkpoint — death
+    // between send and 200 OK — is covered end-to-end by the integration test
+    // "checkpoints the advanced CSeq at send time so a replacement never reuses
+    // it".)
     killAndAdvance(h);
     const replaced = h.factory.worker(2).bootstrap;
     expect(replaced).toBeDefined();
     if (replaced?.type === 'bootstrap') {
       expect(replaced.registration.callId).toBe('reg-a');
       // Checkpointed at 19 — the replacement resumes from 19, not 18.
+      expect(replaced.registration.nextCSeq).toBe(19);
+    }
+  });
+
+  it('checkpoints a pre-send registrationIdentity before the worker dies mid-exchange', () => {
+    const h = setup({ callId: 'reg-a', nextCSeq: 18 });
+    // Bootstrap delivered but NO `registered` yet: simulate the pre-send
+    // checkpoint by delivering a registrationIdentity (as the runtime now does at
+    // send time, before the 200 OK). Then kill the worker mid-exchange.
+    const gen = h.factory.current.bootstrap?.generation;
+    h.factory.current.port.deliver({
+      type: 'registrationIdentity',
+      generation: gen!,
+      callId: 'reg-a',
+      nextCSeq: 19,
+    });
+    // No `registered` has arrived — the exchange is in flight. Kill the worker.
+    killAndAdvance(h);
+    const replaced = h.factory.worker(2).bootstrap;
+    expect(replaced).toBeDefined();
+    if (replaced?.type === 'bootstrap') {
+      // The pre-send checkpoint (19) reached the supervisor before death, so the
+      // replacement resumes from 19 even though no 200 OK ever arrived.
+      expect(replaced.registration.callId).toBe('reg-a');
       expect(replaced.registration.nextCSeq).toBe(19);
     }
   });
@@ -667,8 +694,10 @@ describe('WorkerSupervisor bounded restart policy', () => {
     expect(h.events.map((e) => e.type)).toContain('workerRestarted');
   });
 
-  it('resumes restarting after the sliding window evicts old restart timestamps', () => {
-    // maxRestarts=1 within a 5s window: one restart allowed per 5s.
+  it('clears the restart window via stop/start so restarting resumes after the bound', () => {
+    // maxRestarts=1 within a 5s window: one restart allowed per 5s. After the
+    // bound is hit, stop/start resets the window (operator intervention) so a
+    // fresh generation can restart again.
     const h = setup({}, { maxRestarts: 1, restartWindowMs: 5000 });
     boot(h);
     // Death 1 -> gen 2 (restart 1).

@@ -67,10 +67,13 @@ export type {
 export {
   WorkerRuntime,
   WorkerSupervisor,
+  WorkerClosedError,
+  WorkerRegistrationError,
   WorkerRestartError,
 } from './bridge/index.js';
 export type {
   RegistrationSnapshot,
+  SerializedError,
   SupervisedWorker,
   SupervisorEvent,
   SupervisorToWorker,

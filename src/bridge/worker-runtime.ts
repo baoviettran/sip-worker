@@ -128,7 +128,17 @@ export class WorkerRuntime {
     const gen = this.generation;
     try {
       await ua.connect();
-      await ua.register();
+      // Pre-send identity checkpoint: call ua.register() WITHOUT awaiting first,
+      // so the registrar's synchronous nextRequest() runs and advances nextCSeq
+      // BEFORE the exchange's first await yields. We then read ua.identity and
+      // report it to the supervisor immediately — before any death window opens
+      // (the REGISTER is on the wire but the 200 OK has not arrived). This
+      // guarantees the supervisor's retained snapshot holds the ADVANCED CSeq,
+      // so a replacement never reuses a CSeq even if this worker dies between
+      // send and 200 OK.
+      const registerPromise = ua.register();
+      this.checkpointIdentity(ua, gen);
+      await registerPromise;
     } catch (error) {
       // Surface the failure to the supervisor as a redacted, serialized error so
       // the caller's promise rejects with typed generation context. The runtime
@@ -140,6 +150,25 @@ export class WorkerRuntime {
       throw this.redact(error);
     }
     this.report(ua);
+  }
+
+  /**
+   * Report the live identity (Call-ID + next CSeq) to the supervisor as a
+   * pre-send checkpoint. Called immediately after the synchronous part of
+   * `ua.register()` so the supervisor retains the advanced CSeq before the
+   * exchange settles. Guarded by `closed` and generation match so a teardown
+   * during the call does not emit a stale report.
+   */
+  private checkpointIdentity(ua: UserAgent, gen: number): void {
+    if (this.closed || this.generation !== gen) return;
+    const identity = ua.identity;
+    if (identity === undefined) return;
+    this.port.postMessage({
+      type: 'registrationIdentity',
+      generation: gen,
+      callId: identity.callId,
+      nextCSeq: identity.nextCSeq,
+    });
   }
 
   /** Report readiness + identity after a successful register. */
