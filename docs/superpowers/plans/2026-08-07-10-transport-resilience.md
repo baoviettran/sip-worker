@@ -19,17 +19,17 @@
 
 **Files:** Modify `src/transport/transport.ts`, `src/transactions/coordinator.ts`, `src/ua/user-agent.ts`, `src/ua/registrar.ts`, `src/dialogs/dialog.ts`; Test transport, UA, reliability suites.
 
-- [ ] Add tests asserting UDP/TCP/WS/WSS Via tokens and active transaction failure on disconnect.
-- [ ] Add transport token capability and inject caller-supplied sent-by/rport into request builders; add TransactionLayer disposal and terminal-error fan-out.
-- [ ] Run `npm test -- --run test/transport test/ua test/reliability`; expect all focused tests pass.
-- [ ] Commit `fix: make SIP transport identity and loss explicit`.
+- [x] Add tests asserting UDP/TCP/WS/WSS Via tokens and active transaction failure on disconnect.
+- [x] Add transport token capability and inject caller-supplied sent-by/rport into request builders; add TransactionLayer disposal and terminal-error fan-out.
+- [x] Run `npm test -- --run test/transport test/ua test/reliability`; expect all focused tests pass.
+- [x] Commit `fix: make SIP transport identity and loss explicit`.
 
 ### Task 2: Adapter hardening
 
 **Files:** Modify `src/transport/node/udp.ts`, `src/transport/node/tcp.ts`, `src/transport/node/ws.ts`, `src/transport/browser/ws.ts`, `src/reliability/*.ts`; Test matching suites.
 
-- [ ] Add failing tests for foreign UDP datagrams, throwing connect/ping, TCP half-close, and liveness factory throw.
-- [ ] Validate configured UDP peer, close on synchronous failures, wait for actual TCP close, and convert liveness failures to typed callbacks.
-- [ ] Run `npm test -- --run test/transport test/reliability`; expect all focused tests pass.
-- [ ] Commit `fix: harden transport and liveness failure paths`.
+- [x] Add failing tests for foreign UDP datagrams, throwing connect/ping, TCP half-close, and liveness factory throw.
+- [x] Validate configured UDP peer, close on synchronous failures, wait for actual TCP close, and convert liveness failures to typed callbacks.
+- [x] Run `npm test -- --run test/transport test/reliability`; expect all focused tests pass.
+- [x] Commit `fix: harden transport and liveness failure paths`.
 
