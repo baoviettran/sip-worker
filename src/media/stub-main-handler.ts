@@ -9,6 +9,7 @@ import { STUB_SDP } from './protocol.js';
 export class StubMainMediaHandler {
   private readonly offersBySession = new Map<string, string>();
   private readonly remoteBySession = new Map<string, string>();
+  private readonly closedSessionsSet = new Set<string>();
   private readonly detach: () => void;
   private closed = false;
 
@@ -26,6 +27,11 @@ export class StubMainMediaHandler {
   /** The most recent remote SDP this handler received for the session. */
   remoteSdp(sessionId: string): string | undefined {
     return this.remoteBySession.get(sessionId);
+  }
+
+  /** Session ids the handler has been told are done, in arrival order. */
+  closedSessions(): readonly string[] {
+    return [...this.closedSessionsSet];
   }
 
   /** Stop listening; further commands are ignored. */
@@ -49,6 +55,13 @@ export class StubMainMediaHandler {
     if (message.type === 'setRemote') {
       this.remoteBySession.set(message.sessionId, message.remoteSdp);
       this.reply({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId });
+      return;
+    }
+    if (message.type === 'closeSession') {
+      // Fire-and-forget: record the close, drop per-session state, emit no reply.
+      this.closedSessionsSet.add(message.sessionId);
+      this.offersBySession.delete(message.sessionId);
+      this.remoteBySession.delete(message.sessionId);
       return;
     }
   }

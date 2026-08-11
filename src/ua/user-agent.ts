@@ -325,7 +325,10 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       if (terminal && selectedDialog !== undefined && this.dialogOwners.get(selectedDialog.id) === inviter) {
         this.dialogOwners.delete(selectedDialog.id);
       }
-      if (terminal) this.detachOwnerSession(inviter);
+      if (terminal) {
+        this.closeMediaSession(inviter);
+        this.detachOwnerSession(inviter);
+      }
     };
     inviter.session.on(sessionListener);
     this.ownerSessionUnsubscribers.set(inviter, () => inviter.session.off(sessionListener));
@@ -502,6 +505,24 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     detach();
   }
 
+  /**
+   * Tell the media controller the session is done. Guarded for an absent
+   * `mediaController` (UA may run without one) and for an absent
+   * `closeSession` method (callers may inject a minimal controller that only
+   * implements offer/answer), so a stubbed controller never breaks teardown.
+   */
+  private closeMediaSession(owner: DialogOwner): void {
+    const controller = this.options.mediaController;
+    if (controller === undefined) return;
+    const close = (controller as { closeSession?: (sessionId: string) => void }).closeSession;
+    if (typeof close !== 'function') return;
+    try {
+      close(owner.mediaSessionId);
+    } catch {
+      // A teardown notification must never throw into the session state machine.
+    }
+  }
+
   /** Handle an incoming INVITE request. */
   private handleIncomingInvite(
     request: import('../messages/message.js').SipRequestMessage,
@@ -559,6 +580,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
         if (dialog !== undefined && this.dialogOwners.get(dialog.id) === invitation) {
           this.dialogOwners.delete(dialog.id);
         }
+        this.closeMediaSession(invitation);
         this.detachOwnerSession(invitation);
       }
     };

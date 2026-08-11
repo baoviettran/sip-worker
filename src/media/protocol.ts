@@ -27,13 +27,26 @@ export const STUB_SDP = [
 export type MediaCommand =
   | { type: 'createOffer'; requestId: string; sessionId: string }
   | { type: 'createAnswer'; requestId: string; sessionId: string; remoteSdp: string }
-  | { type: 'setRemote'; requestId: string; sessionId: string; remoteSdp: string };
+  | { type: 'setRemote'; requestId: string; sessionId: string; remoteSdp: string }
+  /**
+   * Fire-and-forget notification that the session is done. Carries no
+   * requestId and expects no reply: the main side releases per-session state.
+   * Kept plain-data/structured-clone-safe like every other command.
+   */
+  | { type: 'closeSession'; sessionId: string };
 
 export type MediaReply =
   | { type: 'mediaResult'; requestId: string; sessionId: string; sdp?: string }
   | { type: 'mediaError'; requestId: string; sessionId: string; message: string };
 
 export type MediaMessage = MediaCommand | MediaReply;
+
+/**
+ * The subset of messages that carry a `requestId` (i.e. every command except
+ * the fire-and-forget `closeSession`, and every reply). Used to narrow after a
+ * type check so callers can access `requestId` without a cast.
+ */
+export type MediaRequestMessage = Exclude<MediaCommand, { type: 'closeSession' }> | MediaReply;
 
 /**
  * The transport boundary between the two media sides. Implemented in-memory by

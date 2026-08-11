@@ -97,6 +97,7 @@ class DelayedConnectTransport extends FakeTransport {
 /** Auto-replies to createOffer/answer/setRemote over a microtask with STUB_SDP. */
 class FakeMediaPort {
   postMessage(message: MediaMessage): void {
+    if (message.type === 'closeSession') return;
     if (message.type === 'setRemote') {
       queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId }));
       return;

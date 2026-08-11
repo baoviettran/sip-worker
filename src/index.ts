@@ -44,6 +44,7 @@ export { parseDigestChallenges, selectChallenge } from './auth/challenge.js';
 export { renderAuthorization } from './auth/authorization.js';
 export {
   WorkerMediaController,
+  MediaTimeoutError,
   StubMainMediaHandler,
   STUB_SDP,
 } from './media/index.js';
@@ -52,6 +53,7 @@ export type {
   MediaMessage,
   MediaPort,
   MediaReply,
+  WorkerMediaControllerOptions,
 } from './media/index.js';
 export {
   NodeWebSocketLiveness,

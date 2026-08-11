@@ -178,6 +178,11 @@ export class Inviter {
     return this.dialogSet?.allDialogs ?? [];
   }
 
+  /** The media session id used for offer/answer on this call. */
+  get mediaSessionId(): string {
+    return this.sessionId;
+  }
+
   private async startInvite(): Promise<void> {
     try {
       // Obtain SDP offer FIRST

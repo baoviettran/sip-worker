@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { MediaCommand, MediaMessage, MediaReply } from '../../src/media/protocol.js';
+import type { MediaCommand, MediaMessage, MediaReply, MediaRequestMessage } from '../../src/media/protocol.js';
 import { STUB_SDP } from '../../src/media/protocol.js';
 import { WorkerMediaController } from '../../src/media/worker-controller.js';
 import { StubMainMediaHandler } from '../../src/media/stub-main-handler.js';
+import { MediaTimeoutError } from '../../src/media/worker-controller.js';
+import { FakeClock } from '../support/fake-clock.js';
 
 /** Asserts a promise has not settled yet. */
 const PENDING = Symbol('pending');
@@ -11,10 +13,10 @@ function expectPending<T>(promise: Promise<T>): Promise<void> {
 }
 
 /** Returns the first delivered message, asserting it exists (narrows undefined). */
-function firstDelivered(port: FakePort): MediaMessage {
+function firstDelivered(port: FakePort): MediaRequestMessage {
   const message = port.delivered[0];
   expect(message).toBeDefined();
-  return message as MediaMessage;
+  return message as MediaRequestMessage;
 }
 
 /**
@@ -51,9 +53,15 @@ class FakePort {
 }
 
 /** Convenience: build a controller + a fake port that captures sent commands. */
-function makeBridge(): { controller: WorkerMediaController; port: FakePort } {
+function makeBridge(options?: { clock?: FakeClock; deadlineMs?: number }): {
+  controller: WorkerMediaController;
+  port: FakePort;
+} {
   const port = new FakePort();
-  return { controller: new WorkerMediaController(port), port };
+  const controller = options && options.clock
+    ? new WorkerMediaController(port, { clock: options.clock, deadlineMs: options.deadlineMs })
+    : new WorkerMediaController(port);
+  return { controller, port };
 }
 
 describe('STUB_SDP', () => {
@@ -115,7 +123,7 @@ describe('WorkerMediaController serialization', () => {
     expect(port.delivered).toHaveLength(2);
     const a = firstDelivered(port);
     expect(port.delivered[1]).toBeDefined();
-    const b = port.delivered[1] as MediaMessage;
+    const b = port.delivered[1] as MediaRequestMessage;
     expect(a.sessionId).toBe('session-a');
     expect(b.sessionId).toBe('session-b');
     expect(a.requestId).not.toBe(b.requestId);
@@ -202,5 +210,115 @@ describe('StubMainMediaHandler', () => {
     handler.unsubscribe();
     port.deliver({ type: 'createOffer', requestId: 'req-1', sessionId: 'sess' });
     expect(port.delivered).toHaveLength(0);
+  });
+
+  it('records and acknowledges a closeSession command without a reply', () => {
+    const port = new FakePort();
+    const handler = new StubMainMediaHandler(port);
+    port.deliver({ type: 'closeSession', sessionId: 'sess-done' });
+    // closeSession is fire-and-forget: the stub records it and emits no reply.
+    expect(port.delivered).toHaveLength(0);
+    expect(handler.closedSessions()).toContain('sess-done');
+  });
+
+  it('drops per-session remote SDP after closeSession', () => {
+    const port = new FakePort();
+    const handler = new StubMainMediaHandler(port);
+    port.deliver({ type: 'setRemote', requestId: 'req-1', sessionId: 'sess', remoteSdp: 'remote-set' });
+    expect(handler.remoteSdp('sess')).toBe('remote-set');
+    port.deliver({ type: 'closeSession', sessionId: 'sess' });
+    expect(handler.remoteSdp('sess')).toBeUndefined();
+    expect(handler.offers('sess')).toBeUndefined();
+  });
+});
+
+describe('WorkerMediaController bounded lifecycle', () => {
+  it('rejects a pending request with MediaTimeoutError when its deadline elapses', async () => {
+    const clock = new FakeClock();
+    const { controller, port } = makeBridge({ clock, deadlineMs: 1000 });
+    const offer = controller.createOffer('session-1');
+    const sent = firstDelivered(port);
+    expect(sent.type).toBe('createOffer');
+    // Before the deadline: still pending.
+    clock.advance(999);
+    await expectPending(offer);
+    // At/after the deadline: rejects with a typed timeout error.
+    clock.advance(1);
+    await expect(offer).rejects.toBeInstanceOf(MediaTimeoutError);
+    await expect(offer).rejects.toThrow(/createOffer.*session-1/);
+  });
+
+  it('clears the deadline timer when the matching reply arrives', async () => {
+    const clock = new FakeClock();
+    const { controller, port } = makeBridge({ clock, deadlineMs: 1000 });
+    const offer = controller.createOffer('session-1');
+    const sent = firstDelivered(port);
+    port.deliver({ type: 'mediaResult', requestId: sent.requestId, sessionId: 'session-1', sdp: STUB_SDP });
+    await expect(offer).resolves.toBe(STUB_SDP);
+    // The deadline timer was cleared; advancing past it does nothing.
+    expect(clock.pending()).toBe(0);
+    clock.advance(2000);
+    await expect(offer).resolves.toBe(STUB_SDP);
+  });
+
+  it('rejects a request in flight when the controller closes', async () => {
+    const clock = new FakeClock();
+    const { controller, port } = makeBridge({ clock, deadlineMs: 5000 });
+    const offer = controller.createOffer('session-1');
+    firstDelivered(port);
+    // No reply yet; close() must reject the pending offer (not the deadline).
+    controller.close();
+    await expect(offer).rejects.toThrow(/media port closed/);
+    await expect(offer).rejects.not.toBeInstanceOf(MediaTimeoutError);
+    // Closing cleared the deadline timer.
+    expect(clock.pending()).toBe(0);
+  });
+
+  it('emits a closeSession command and cancels pending requests for that session', async () => {
+    const clock = new FakeClock();
+    const { controller, port } = makeBridge({ clock, deadlineMs: 5000 });
+    const offer = controller.createOffer('session-1');
+    const offerSent = firstDelivered(port);
+    expect(offerSent.type).toBe('createOffer');
+
+    controller.closeSession('session-1');
+    const closeCmd = port.delivered.find((m) => m.type === 'closeSession');
+    expect(closeCmd).toBeDefined();
+    expect(closeCmd && closeCmd.type === 'closeSession' && closeCmd.sessionId).toBe('session-1');
+    // closeSession is plain data and structured-clone safe.
+    expect(() => structuredClone(closeCmd)).not.toThrow();
+    // The pending offer for the closed session was cancelled.
+    await expect(offer).rejects.toThrow(/session-1/);
+    await expect(offer).rejects.not.toBeInstanceOf(MediaTimeoutError);
+    // Its deadline timer was cleared.
+    expect(clock.pending()).toBe(0);
+  });
+
+  it('does not cancel pending requests for other sessions on closeSession', async () => {
+    const clock = new FakeClock();
+    const { controller, port } = makeBridge({ clock, deadlineMs: 5000 });
+    const offerA = controller.createOffer('session-a');
+    const offerB = controller.createOffer('session-b');
+    expect(port.delivered).toHaveLength(2);
+
+    controller.closeSession('session-a');
+    // A rejected; B still pending.
+    await expect(offerA).rejects.toThrow(/session-a/);
+    await expectPending(offerB);
+  });
+
+  it('rejects createOffer after the controller is closed', async () => {
+    const { controller } = makeBridge();
+    controller.close();
+    await expect(controller.createOffer('session-1')).rejects.toThrow(/media port closed/);
+  });
+
+  it('does not configure a deadline when no clock/deadline is provided', async () => {
+    const { controller, port } = makeBridge();
+    const offer = controller.createOffer('session-1');
+    const sent = firstDelivered(port);
+    // Without a clock there is no timer; a late reply still resolves.
+    port.deliver({ type: 'mediaResult', requestId: sent.requestId, sessionId: 'session-1', sdp: STUB_SDP });
+    await expect(offer).resolves.toBe(STUB_SDP);
   });
 });

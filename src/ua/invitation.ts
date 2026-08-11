@@ -66,6 +66,11 @@ export class Invitation {
   get dialog(): Dialog | undefined {
     return this.dialogValue;
   }
+
+  /** The media session id used for offer/answer on this call. */
+  get mediaSessionId(): string {
+    return this.sessionId;
+  }
   constructor(options: InvitationOptions) {
     this.session = new Session();
     this.request = options.request;

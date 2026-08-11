@@ -422,6 +422,94 @@ describe('Full Call Integration', () => {
       .map((parsed) => parsed.ok && parsed.value.kind === 'response' ? parsed.value.statusCode : 0);
     expect(statuses).toEqual([481, 200, 481]);
   });
+
+  it('emits a closeSession media command when an outgoing call terminates via BYE', async () => {
+    const closedSessions: string[] = [];
+    let offerSession: string | undefined;
+    const mediaController = {
+      createOffer: async (sessionId: string) => {
+        offerSession = sessionId;
+        return 'v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n';
+      },
+      createAnswer: async () => 'v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n',
+      setRemote: async () => {},
+      closeSession: (sessionId: string) => { closedSessions.push(sessionId); },
+    } as any;
+    const authManager = new AuthManager(idGenerator);
+    const closingUa = new UserAgent({
+      transport,
+      clock,
+      registrarUri: 'sip:registrar.example.com',
+      aor: 'sip:alice@example.com',
+      contact: '<sip:alice@192.0.2.1:5060>',
+      credentials: { username: 'alice', password: 'password123' },
+      idGenerator,
+      authManager,
+      mediaController,
+    });
+    await closingUa.connect();
+    registrar.start();
+    await closingUa.register();
+
+    const invitePromise = closingUa.invite('sip:bob@example.com');
+    await waitForSentMessage(transport, 'INVITE');
+    await sendRinging(transport);
+    await send200Ok(transport);
+    await invitePromise;
+    expect(offerSession).toBeDefined();
+
+    const byePromise = closingUa.bye();
+    await waitForSentMessage(transport, 'BYE');
+    await sendBye200(transport);
+    await byePromise;
+
+    expect(closedSessions).toContain(offerSession);
+  });
+
+  it('emits a closeSession media command when an incoming call terminates via BYE', async () => {
+    const closedSessions: string[] = [];
+    let mediaSession: string | undefined;
+    const mediaController = {
+      createOffer: async () => 'v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n',
+      createAnswer: async () => 'v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n',
+      setRemote: async (sessionId: string) => { mediaSession = sessionId; },
+      closeSession: (sessionId: string) => { closedSessions.push(sessionId); },
+    } as any;
+    const authManager = new AuthManager(idGenerator);
+    const closingUa = new UserAgent({
+      transport,
+      clock,
+      registrarUri: 'sip:registrar.example.com',
+      aor: 'sip:alice@example.com',
+      contact: '<sip:alice@192.0.2.1:5060>',
+      credentials: { username: 'alice', password: 'password123' },
+      idGenerator,
+      authManager,
+      mediaController,
+    });
+    const incomingCalls: any[] = [];
+    closingUa.on('incomingCall', (invitation: any) => incomingCalls.push(invitation));
+
+    await closingUa.connect();
+    registrar.start();
+    await closingUa.register();
+
+    transport.emitData(serializeMessage(createInviteRequest()));
+    await flush();
+    expect(incomingCalls).toHaveLength(1);
+
+    const invitation = incomingCalls[0];
+    const answerPromise = invitation.answer('v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n');
+    await waitForSentResponse(transport, 200);
+    transport.emitData(serializeMessage(createAckRequest(invitation.dialog.localTag)));
+    await answerPromise;
+    expect(mediaSession).toBeDefined();
+
+    transport.emitData(serializeMessage(createByeRequest(invitation.dialog)));
+    await flush();
+    expect(invitation.session.state).toBe('terminated');
+    expect(closedSessions).toContain(mediaSession);
+  });
 });
 
 async function waitForSentMessage(transport: FakeTransport, method: string): Promise<void> {
