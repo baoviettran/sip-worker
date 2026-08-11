@@ -133,6 +133,15 @@ Phase 4 (authentication + registration) is merged and pushed. The following were
 - `transportError` is dropped if a late send rejects after the transaction already reached `Terminated` (all four machines) — arguably correct, but untested.
 - Coverage gaps: a non-ACK duplicate in `Confirmed` is not tested; `sendResponse` as a no-op in `Terminated` is not tested; no reliable-INVITE `Confirmed` test (I=0 never exercised).
 
+## Phase 11 Handoff (deferred items)
+
+Phase 11 (worker and media reliability) is merged and pushed. The following were deliberately deferred and are NOT yet fixed.
+
+- **Media deadline is opt-in only.** `WorkerMediaController` bounds missing replies only when a consumer injects a `Clock` + `deadlineMs`; the default is unbounded (`Infinity`) for v1 backwards compatibility. The design acceptance "missing media replies reject before a configurable deadline" therefore holds only under consumer opt-in. A Phase 12+ task should wire a default deadline at the Node composition root.
+- **`register()` after `registrationFailed` parks a waiter that never resolves.** A registration failure rejects current waiters and emits `registrationFailed`, but the worker stays alive and heartbeating (deliberate — the failure is not a heartbeat death), so a subsequent `register()` on the same generation hangs until heartbeat death or `close()`. The common path (await one `register()`, then proceed or `close()` on failure) is unaffected. Consider documenting "do not retry `register()` after `registrationFailed` without a `stop()`/`start()` cycle," or have `onRegistrationFailed` mark the generation un-registerable.
+- **Credential redaction regex is cosmetically mangled.** `WorkerRuntime.redact` `/(password|credentials)[^,:;)}"]*/gi` over-redacts substrings (`myPassword` → `my: [redacted]`) and leaves a stray ` : [redacted]` artifact. Security holds (the credential value is always removed); only readability suffers. Tighten to `/(password|credentials)\s*[:=]?\s*[^,:;)}"\s]*/gi` or similar in a future pass.
+- **Package type fixture doesn't exercise the media options overload.** `test/package/fixtures/types/index.ts` constructs `new MediaCls({} as MediaPort)` but doesn't reference `MediaTimeoutError`/`WorkerMediaControllerOptions`/`MediaRequestMessage` or the optional constructor overload. Nice-to-have API-surface regression coverage, not a merge blocker.
+
 ## Execution Order
 
 1. [x] [Plan 01 — Codec and package](./2026-08-04-01-codec-and-package.md)
@@ -146,7 +155,7 @@ Phase 4 (authentication + registration) is merged and pushed. The following were
 9. [x] [Phase 08 — Protocol correctness](./2026-08-07-08-protocol-correctness.md)
 10. [x] [Phase 09 — Call lifecycle and authentication](./2026-08-07-09-call-lifecycle-auth.md)
 11. [x] [Phase 10 — Transport resilience](./2026-08-07-10-transport-resilience.md)
-12. [ ] [Phase 11 — Worker and media reliability](./2026-08-07-11-worker-media.md)
+12. [x] [Phase 11 — Worker and media reliability](./2026-08-07-11-worker-media.md)
 13. [ ] [Phase 12 — Release productization](./2026-08-07-12-release-productization.md)
 
 ## Plan Gates
