@@ -38,8 +38,8 @@
 
 **Files:** Modify `src/ua/user-agent.ts`, `src/ua/registrar.ts`, `src/ua/inviter.ts`, `src/auth/manager.ts`; Test auth and UA suites.
 
-- [ ] Add failing tests for credentials-only INVITE auth, fourth challenge rejection, auth→423, and auth→redirect.
-- [ ] Store one UA AuthManager, use stable exchange IDs, settle every terminal exchange, and recompute Digest after URI/nonce changes.
-- [ ] Run `npm test -- --run test/auth test/ua`; expect all focused tests pass.
-- [ ] Commit `fix: bound and regenerate SIP Digest retries`.
+- [x] Add failing tests for credentials-only INVITE auth, fourth challenge rejection, auth→423, and auth→redirect.
+- [x] Store one UA AuthManager, use stable exchange IDs, settle every terminal exchange, and recompute Digest after URI/nonce changes.
+- [x] Run `npm test -- --run test/auth test/ua`; expect all focused tests pass.
+- [x] Commit `fix: bound and regenerate SIP Digest retries`.
 
