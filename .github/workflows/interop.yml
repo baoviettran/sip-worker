@@ -1,0 +1,73 @@
+name: Interop
+
+# Interoperability matrix against a separately provisioned external SIP test
+# environment (SIPp-compatible). This repository does NOT provision a SIP
+# endpoint, so this workflow is intentionally gated: it runs only on schedule
+# or manual dispatch, and each job skips cleanly (never fails) when the
+# provisioned endpoint inputs are absent. It therefore never fails the default
+# branch just because the external environment is not present.
+#
+# To run it, provision endpoints and set the repository/org secrets
+# SIP_PROXY_ENDPOINT / SIP_MEDIA_ENDPOINT, then dispatch the workflow.
+
+on:
+  schedule:
+    # Nightly UTC. The matrix trivially skips when no endpoints are provisioned.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      sip_proxy_endpoint:
+        description: 'SIP endpoint (host:port) to run the proxy/scenario against'
+        required: false
+        type: string
+      sip_media_endpoint:
+        description: 'SIP endpoint (host:port) for media/audio scenarios'
+        required: false
+        type: string
+
+jobs:
+  interop:
+    name: Interop ${{ matrix.scenario }} (${{ matrix.direction }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [register, invite-byebye, cancel]
+        direction: [proxy, direct]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Resolve endpoint for this matrix cell
+        id: endpoint
+        env:
+          PROXY: ${{ inputs.sip_proxy_endpoint || secrets.SIP_PROXY_ENDPOINT || '' }}
+          MEDIA: ${{ inputs.sip_media_endpoint || secrets.SIP_MEDIA_ENDPOINT || '' }}
+        run: |
+          if [ "${{ matrix.direction }}" = "proxy" ]; then
+            echo "endpoint=${PROXY}" >> "$GITHUB_OUTPUT"
+          else
+            echo "endpoint=${MEDIA}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip when no provisioned endpoint
+        if: steps.endpoint.outputs.endpoint == ''
+        run: echo "No provisioned endpoint for ${{ matrix.scenario }}/${{ matrix.direction }}; skipping. Provision SIP_*_ENDPOINT secrets and dispatch to run."
+
+      - name: Run SIPp scenario against provisioned endpoint
+        if: steps.endpoint.outputs.endpoint != ''
+        env:
+          ENDPOINT: ${{ steps.endpoint.outputs.endpoint }}
+          SCENARIO: ${{ matrix.scenario }}
+        # The concrete scenario scripts live under test/interop/ and are authored
+        # once an endpoint is provisioned. Until then this job only ever skips.
+        run: |
+          if [ -f "test/interop/${SCENARIO}.sh" ]; then
+            "./test/interop/${SCENARIO}.sh" "$ENDPOINT"
+          else
+            echo "No scenario script test/interop/${SCENARIO}.sh yet; skipping."
+          fi

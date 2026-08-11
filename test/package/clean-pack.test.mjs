@@ -109,9 +109,9 @@ try {
   const prefix = 'package/';
   const off = entries.filter((e) => !e.startsWith(prefix));
   assert.deepEqual(off, [], `tarball has non-package entries: ${off.join(', ')}`);
-  // npm always packs package/package.json and package/README.md; everything
-  // else must be a dist/ artifact (proves the `files: ["dist"]` policy).
-  const alwaysIncluded = new Set(['', 'dist', 'package.json', 'README.md']);
+  // npm always packs package/package.json, package/README.md, and package/LICENSE;
+  // everything else must be a dist/ artifact (proves the `files: ["dist"]` policy).
+  const alwaysIncluded = new Set(['', 'dist', 'package.json', 'README.md', 'LICENSE']);
   for (const e of entries) {
     const path = e.slice(prefix.length);
     if (alwaysIncluded.has(path)) continue;

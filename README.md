@@ -2,9 +2,11 @@
 
 A from-scratch TypeScript SIP stack with registration, calls, worker-supervised
 recovery, deterministic liveness, and verified packed ESM/CommonJS/TypeScript
-exports. This is the v1 release candidate.
+exports. **0.1.0 is a signaling-only prototype**: it ships no real media adapter
+(no RTP/RTCP, no WebRTC, no DTLS/SRTP) and no interop evidence. A real media
+adapter plus interop evidence gate the 1.0 framing.
 
-Every behavior documented here is exercised by the release-candidate smoke gate
+Every behavior documented here is exercised by the signaling smoke gate
 (`test/integration/release-smoke.test.ts`) against the public package root, and
 every import below is copied verbatim from a passing packed-consumer fixture
 (`test/package/fixtures/`), so each name is proven to resolve from the built
@@ -159,7 +161,7 @@ Liveness is an injected `LivenessStrategy` at the `UserAgent` composition root:
 When no `liveness` is supplied, `UserAgent` builds the OPTIONS strategy itself,
 so browser usage needs no native socket.
 
-## v1 recovery rule
+## Recovery rule
 
 On a worker death, registration is **restored** (same Call-ID, advanced CSeq)
 but in-flight calls are **not** reconstructed. The pending registration promise
@@ -170,7 +172,62 @@ application's to recreate.
 ## Project
 
 - `npm run typecheck` – tsc over `src` and `test`
-- `npm test` – vitest suite (all virtual-clock deterministic; no real-time waits)
+- `npm test` – vitest suite (all virtual-clock deterministic; no real-time waits);
+  `pretest` runs the documentation-contract gate
+- `npm run test:docs` – asserts README links resolve, documented scripts exist,
+  and the 0.1.0 signaling-only framing stays honest
 - `npm run build` – tsup emitting ESM `.js`, CommonJS `.cjs`, and `.d.ts` per subpath
 - `npm run test:package` – installs the packed tarball into fresh ESM, CommonJS,
   and TypeScript consumers and exercises every advertised subpath
+
+## Security status
+
+0.1.0 is a **signaling-only prototype**, not production-ready for general
+deployment. It ships no real media (no RTP/RTCP, no WebRTC, no DTLS/SRTP), no
+TLS/SIPS transports, no `auth-int`, no observability, and its `AuthManager`
+maps are unbounded. See [SECURITY.md](SECURITY.md) and
+[docs/2026-08-11-production-readiness-review.md](docs/2026-08-11-production-readiness-review.md)
+for the complete limits. A real media adapter plus interop evidence gate the
+1.0 framing.
+
+## Startup sequence
+
+The library performs no network activity until you drive it. The canonical
+composition order, from a fresh process:
+
+1. `connect()` — opens the transport and wires ingress, the transaction layer,
+   and the registrar. Resolves once the transport is open.
+2. `register()` — authenticated REGISTER; resolves when `registered`. A 401/407
+   challenge is retried with `Authorization` automatically while credentials are
+   configured.
+3. `invite(target)` — offer/answer through the media controller; resolves when
+   the call is `confirmed` (2xx received and ACK sent).
+4. `bye()` — resolves when the BYE 2xx arrives.
+5. `unregister()` — `Contact: * / Expires: 0`; resolves when `unregistered`.
+6. `disconnect()` — graceful teardown.
+
+For worker supervision, `WorkerSupervisor.register()` reproduces steps 1–2 on a
+replacement generation if the current one dies; the recovery snapshot is the
+only serializable state carried across restart (see [Recovery rule](#recovery-rule)).
+
+## Release procedure
+
+Releases are gated by the local deterministic checks and the packed-consumer
+gate. To cut a release:
+
+1. `npm run typecheck` – must pass.
+2. `npm test` – full suite (including the smoke and doc-contract gates) must be
+   green.
+3. `npm run test:package` – packs the tarball and proves every advertised
+   subpath resolves for ESM, CommonJS, and TypeScript consumers; the prepack
+   gate aborts if `dist` is absent or any export fails to resolve.
+4. `npm run build` – produces the versioned `dist/` artifact.
+5. Bump the version in `package.json`, add a `[Unreleased] → [X.Y.Z]` entry in
+   `CHANGELOG.md`, and tag `vX.Y.Z`.
+6. `npm publish` – the `prepack` hook re-runs the build and export-resolution
+   gate automatically, so a broken or absent `dist` fails the publish.
+
+CI runs steps 1–3 on every push and pull request
+([.github/workflows/ci.yml](.github/workflows/ci.yml)); a separate
+[interop workflow](.github/workflows/interop.yml) runs the SIPp-compatible
+matrix against provisioned endpoints on schedule or on demand.
