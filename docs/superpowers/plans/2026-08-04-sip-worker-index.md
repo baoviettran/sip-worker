@@ -135,12 +135,11 @@ Phase 4 (authentication + registration) is merged and pushed. The following were
 
 ## Phase 11 Handoff (deferred items)
 
-Phase 11 (worker and media reliability) is merged and pushed. The following were deliberately deferred and are NOT yet fixed.
-
-- **Media deadline is opt-in only.** `WorkerMediaController` bounds missing replies only when a consumer injects a `Clock` + `deadlineMs`; the default is unbounded (`Infinity`) for v1 backwards compatibility. The design acceptance "missing media replies reject before a configurable deadline" therefore holds only under consumer opt-in. A Phase 12+ task should wire a default deadline at the Node composition root.
-- **`register()` after `registrationFailed` parks a waiter that never resolves.** A registration failure rejects current waiters and emits `registrationFailed`, but the worker stays alive and heartbeating (deliberate — the failure is not a heartbeat death), so a subsequent `register()` on the same generation hangs until heartbeat death or `close()`. The common path (await one `register()`, then proceed or `close()` on failure) is unaffected. Consider documenting "do not retry `register()` after `registrationFailed` without a `stop()`/`start()` cycle," or have `onRegistrationFailed` mark the generation un-registerable.
-- **Credential redaction regex is cosmetically mangled.** `WorkerRuntime.redact` `/(password|credentials)[^,:;)}"]*/gi` over-redacts substrings (`myPassword` → `my: [redacted]`) and leaves a stray ` : [redacted]` artifact. Security holds (the credential value is always removed); only readability suffers. Tighten to `/(password|credentials)\s*[:=]?\s*[^,:;)}"\s]*/gi` or similar in a future pass.
-- **Package type fixture doesn't exercise the media options overload.** `test/package/fixtures/types/index.ts` constructs `new MediaCls({} as MediaPort)` but doesn't reference `MediaTimeoutError`/`WorkerMediaControllerOptions`/`MediaRequestMessage` or the optional constructor overload. Nice-to-have API-surface regression coverage, not a merge blocker.
+These four items were closed by the [Phase 11 Handoff Cleanup](./2026-08-11-phase-11-handoff-cleanup.md) plan:
+1. Media deadline default at the Node composition root — closed (bounded by default when a clock is present).
+2. `register()` after `registrationFailed` — closed (rejects immediately; stop/start resets).
+3. Credential redaction regex — closed (values past `:` / `=` removed).
+4. Package type fixture media overload — closed (two-argument constructor form exercised).
 
 ## Execution Order
 
@@ -156,7 +155,8 @@ Phase 11 (worker and media reliability) is merged and pushed. The following were
 10. [x] [Phase 09 — Call lifecycle and authentication](./2026-08-07-09-call-lifecycle-auth.md)
 11. [x] [Phase 10 — Transport resilience](./2026-08-07-10-transport-resilience.md)
 12. [x] [Phase 11 — Worker and media reliability](./2026-08-07-11-worker-media.md)
-13. [ ] [Phase 12 — Release productization](./2026-08-07-12-release-productization.md)
+13. [x] [Phase 11 Handoff Cleanup](./2026-08-11-phase-11-handoff-cleanup.md)
+14. [ ] [Phase 12 — Release productization](./2026-08-07-12-release-productization.md)
 
 ## Plan Gates
 
