@@ -82,7 +82,15 @@ export class NodeWebSocketLiveness implements LivenessStrategy {
     // as soon as the matching pong clears the outstanding slot.
     if (this.pendingNonce !== undefined) return;
     this.pendingNonce = this.nextNonce();
-    this.socket.ping(this.pendingNonce);
+    try {
+      this.socket.ping(this.pendingNonce);
+    } catch (cause) {
+      // A synchronous throw from ping must surface as a typed callback, never
+      // escape the clock timer that invoked this probe.
+      this.stop();
+      this.onFailure(new TransportError('liveness ping failed', cause));
+      return;
+    }
     this.deadlineTimer = this.clock.setTimeout(() => this.handleTimeout(), this.deadlineMs);
   }
 

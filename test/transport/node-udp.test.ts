@@ -101,8 +101,8 @@ describe('NodeUdpTransport', () => {
     const first = new Uint8Array([1, 2, 3]);
     const second = new Uint8Array([4]);
 
-    socket.emit('message', first, { address: '127.0.0.1' });
-    socket.emit('message', second, { address: '127.0.0.1' });
+    socket.emit('message', first, { address: 'sip.example.test', port: 5070 });
+    socket.emit('message', second, { address: 'sip.example.test', port: 5070 });
     first[0] = 9;
     second[0] = 9;
 
@@ -112,6 +112,21 @@ describe('NodeUdpTransport', () => {
       { type: 'data', data: new Uint8Array([1, 2, 3]) },
       { type: 'data', data: new Uint8Array([4]) },
     ]);
+  });
+
+  it('silently drops datagrams from a peer other than the configured remote', async () => {
+    const { socket, transport } = createTransport();
+    const events: TransportEvent[] = [];
+    transport.subscribe((event) => events.push(event));
+    await connect(socket, transport);
+
+    const foreign = new Uint8Array([9, 9, 9]);
+    socket.emit('message', foreign, { address: 'evil.example.test', port: 5070 });
+    socket.emit('message', foreign, { address: 'sip.example.test', port: 9999 });
+
+    expect(events.filter((event) => event.type === 'data')).toHaveLength(0);
+    expect(events.filter((event) => event.type === 'error')).toHaveLength(0);
+    expect(transport.isConnected()).toBe(true);
   });
 
   it('binds locally and copies outbound bytes to the configured peer', async () => {

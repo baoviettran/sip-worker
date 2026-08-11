@@ -56,7 +56,18 @@ export class NodeUdpTransport implements Transport {
     if (!this.socketListenersActive) return;
     const message = args[0];
     if (!(message instanceof Uint8Array)) return;
+    // Only accept datagrams from the configured remote peer. Node's `message`
+    // event carries `(msg, rinfo)` where `rinfo = { address, port, ... }`; a
+    // datagram sent from any other source is foreign and must be silently
+    // dropped — it is not a peer message and must never be surfaced as data.
+    if (!this.isFromConfiguredPeer(args[1])) return;
     this.emit({ type: 'data', data: message.slice() });
+  };
+
+  private isFromConfiguredPeer(rinfo: unknown): boolean {
+    if (typeof rinfo !== 'object' || rinfo === null) return false;
+    const info = rinfo as { address?: unknown; port?: unknown };
+    return info.address === this.options.remoteHost && info.port === this.options.remotePort;
   };
 
   private readonly handleError: SocketListener = (...args) => {

@@ -91,7 +91,16 @@ export class OptionsLiveness implements LivenessStrategy {
     if (this.outstanding !== undefined) return;
 
     this.probeIndex += 1;
-    const request = this.requestFactory(this.probeIndex);
+    let request: SipRequestMessage;
+    try {
+      request = this.requestFactory(this.probeIndex);
+    } catch (cause) {
+      // A synchronous throw from the factory must surface as a typed callback,
+      // never escape the clock timer that invoked this probe.
+      this.stop();
+      this.onFailure(new TransportError('liveness probe failed', cause));
+      return;
+    }
     this.unsubscribeOwnership();
     sendOwnedRequest(
       this.layer,

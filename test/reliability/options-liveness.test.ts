@@ -188,6 +188,43 @@ describe('OptionsLiveness', () => {
     expect(failures).toHaveLength(0);
   });
 
+  it('converts a synchronously-throwing request factory to a typed liveness failure and stops', () => {
+    const clock = new FakeClock();
+    const transport = new FakeTransport({ reliable: true, framing: 'stream' });
+    void transport.connect();
+    const layer = new TransactionLayer({
+      transport,
+      clock,
+      timers: deriveTimers({ T1: 100, T2: 400, T4: 500 }, true),
+      reliable: true,
+      emit: () => {},
+    });
+    const failures: TransportError[] = [];
+    const cause = new Error('factory threw');
+    const liveness = new OptionsLiveness({
+      layer,
+      clock,
+      requestFactory: () => {
+        throw cause;
+      },
+      probeIntervalMs: 1000,
+      onFailure: (error) => failures.push(error),
+    });
+    liveness.start();
+
+    clock.advance(1000); // probe fires; factory throws synchronously
+
+    expect(failures).toHaveLength(1);
+    const failure = failures[0];
+    expect(failure).toBeInstanceOf(TransportError);
+    expect(failure!.message).toBe('liveness probe failed');
+    expect(failure!.cause).toBe(cause);
+
+    // The strategy stops and must not rethrow on the next tick.
+    clock.advance(50000);
+    expect(failures).toHaveLength(1);
+  });
+
   it('reports one liveness failure on transaction timeout and keeps monitoring', () => {
     const { clock, requests, failures, liveness } = setup();
     liveness.start();

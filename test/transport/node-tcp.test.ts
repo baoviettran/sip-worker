@@ -207,6 +207,26 @@ describe('NodeTcpTransport', () => {
     });
   });
 
+  it('waits for the actual socket close before settling a half-closed disconnect', async () => {
+    const { socket, transport } = createTransport();
+    await connect(socket, transport);
+
+    let settled = false;
+    const pending = transport.disconnect().then(() => {
+      settled = true;
+    });
+
+    // The peer half-closes: our write side finished (FIN sent) but the
+    // connection is not fully closed until the socket emits `close`.
+    socket.completeEnd();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    socket.emit('close');
+    await pending;
+    expect(settled).toBe(true);
+  });
+
   it('settles disconnect once, rejects post-close sends, and removes socket listeners', async () => {
     const { socket, transport } = createTransport();
     const events: TransportEvent[] = [];

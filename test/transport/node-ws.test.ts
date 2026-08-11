@@ -25,6 +25,7 @@ class FakeNodeWebSocket implements NodeWebSocketLike {
   protocol = '';
   closeCalls: Array<{ code?: number; reason?: string }> = [];
   sendError?: Error;
+  closeError?: Error;
 
   on(event: NodeWebSocketEvent, listener: SocketListener): void {
     let listeners = this.listeners.get(event);
@@ -49,6 +50,8 @@ class FakeNodeWebSocket implements NodeWebSocketLike {
 
   close(code?: number, reason?: string): void {
     this.closeCalls.push({ code, reason });
+    const error = this.closeError;
+    if (error !== undefined) throw error;
   }
 
   emitOpen(protocol = 'sip'): void {
@@ -266,6 +269,25 @@ describe('NodeWebSocketTransport', () => {
       'message',
       'open',
     ]);
+  });
+
+  it('converts a synchronously-throwing close during failure teardown to a typed error', async () => {
+    const socket = new FakeNodeWebSocket();
+    const transport = new NodeWebSocketTransport(socket);
+    socket.closeError = new Error('close threw');
+    const events: TransportEvent[] = [];
+    transport.subscribe((event) => events.push(event));
+
+    const pending = transport.connect();
+    socket.emitError(new Error('handshake failed'));
+
+    await expect(pending).rejects.toMatchObject({ name: 'TransportError', cause: expect.any(Error) });
+    expect(transport.isConnected()).toBe(false);
+    // The close failure is itself surfaced as a typed error event.
+    expect(events).toContainEqual({
+      type: 'error',
+      error: expect.objectContaining({ name: 'TransportError', cause: expect.any(Error) }),
+    });
   });
 
   it('waits for close when disconnecting and rejects sends immediately', async () => {

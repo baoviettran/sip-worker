@@ -147,6 +147,27 @@ describe('BrowserWebSocketTransport', () => {
     expect(events.filter((event) => event.type === 'connected')).toHaveLength(1);
   });
 
+  it('converts a synchronously-throwing factory to a typed error and closes', async () => {
+    const cause = new Error('factory threw');
+    const factory: BrowserWebSocketFactory = () => {
+      throw cause;
+    };
+    const transport = new BrowserWebSocketTransport('wss://sip.example.test/ws', factory);
+    const events: TransportEvent[] = [];
+    transport.subscribe((event) => events.push(event));
+
+    await expect(transport.connect()).rejects.toMatchObject({ name: 'TransportError', cause });
+    expect(transport.isConnected()).toBe(false);
+    expect(events).toContainEqual({
+      type: 'error',
+      error: expect.objectContaining({ name: 'TransportError', cause }),
+    });
+    expect(events).toContainEqual({
+      type: 'disconnected',
+      error: expect.objectContaining({ name: 'TransportError', cause }),
+    });
+  });
+
   it('rejects a pre-open browser error and ignores a late open', async () => {
     const { socket, transport } = createTransport();
     const events: TransportEvent[] = [];

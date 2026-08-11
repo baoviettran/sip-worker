@@ -151,7 +151,12 @@ export class NodeTcpTransport implements Transport {
     this.pendingDisconnect = attempt;
 
     try {
-      this.socket.end(() => this.finishClose());
+      // `end()` only half-closes the write side (FIN). The connection is not
+      // fully closed until the peer closes and the socket emits `close`, at
+      // which point `handleClose` settles the pending disconnect. Waiting for
+      // the real close event is what makes a half-close (FIN from us, peer
+      // still open) a non-settled disconnect.
+      this.socket.end(() => undefined);
     } catch (cause) {
       const error = new TransportError('TCP close failed', cause);
       try {

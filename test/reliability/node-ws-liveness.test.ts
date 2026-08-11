@@ -6,9 +6,12 @@ import { FakeClock } from '../support/fake-clock.js';
 
 class FakeNativePingSocket implements NativePingSocket {
   readonly pings: Uint8Array[] = [];
+  pingError?: Error;
   private readonly pongListeners = new Set<(payload: Uint8Array) => void>();
 
   ping(payload: Uint8Array): void {
+    const error = this.pingError;
+    if (error !== undefined) throw error;
     this.pings.push(payload.slice());
   }
 
@@ -118,6 +121,24 @@ describe('NodeWebSocketLiveness', () => {
     expect(failure).not.toBeUndefined();
     expect(failure).toBeInstanceOf(TransportError);
     expect(failure!.message).toBe('liveness timeout');
+  });
+
+  it('converts a synchronously-throwing ping to a typed liveness failure and stops', () => {
+    const { clock, socket, failures, liveness } = setup();
+    socket.pingError = new Error('ping threw');
+    liveness.start();
+
+    clock.advance(5000); // probe fires; ping throws synchronously
+
+    expect(failures).toHaveLength(1);
+    const failure = failures[0];
+    expect(failure).toBeInstanceOf(TransportError);
+    expect(failure!.message).toBe('liveness ping failed');
+    expect(failure!.cause).toBeInstanceOf(Error);
+
+    // The strategy stops and must not rethrow on the next tick.
+    clock.advance(50000);
+    expect(failures).toHaveLength(1);
   });
 
   it('emits exactly one TransportError when the pong is missed and then stops', () => {
