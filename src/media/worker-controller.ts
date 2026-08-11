@@ -1,6 +1,9 @@
 import type { Clock } from '../transport/index.js';
 import type { MediaMessage, MediaPort, MediaReply, MediaRequestMessage } from './protocol.js';
 
+/** Default deadline (ms) for pending media requests when a clock is present. */
+const DEFAULT_MEDIA_DEADLINE_MS = 1000;
+
 /**
  * Typed error raised when a pending media request does not receive a reply
  * before its configured deadline. Sanitized: carries no stack/cause beyond the
@@ -68,7 +71,15 @@ export class WorkerMediaController {
   ) {
     this.clock = options?.clock;
     const configured = options?.deadlineMs;
-    this.deadlineMs = configured === undefined || !Number.isFinite(configured) ? Number.POSITIVE_INFINITY : configured;
+    // When a clock is present, bound pending requests by a default deadline so
+    // a missing media reply rejects in bounded time. Without a clock no timer
+    // can be armed, so unbounded remains the only correct value.
+    this.deadlineMs =
+      this.clock !== undefined && (configured === undefined || !Number.isFinite(configured))
+        ? DEFAULT_MEDIA_DEADLINE_MS
+        : configured === undefined || !Number.isFinite(configured)
+          ? Number.POSITIVE_INFINITY
+          : configured;
     this.detach = this.port.subscribe((message: MediaMessage) => {
       if (message.type === 'mediaResult' || message.type === 'mediaError') {
         this.handleReply(message);

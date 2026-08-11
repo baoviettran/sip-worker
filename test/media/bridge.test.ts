@@ -321,4 +321,29 @@ describe('WorkerMediaController bounded lifecycle', () => {
     port.deliver({ type: 'mediaResult', requestId: sent.requestId, sessionId: 'session-1', sdp: STUB_SDP });
     await expect(offer).resolves.toBe(STUB_SDP);
   });
+
+  it('bounds pending requests by a default deadline when a clock is present but deadlineMs is omitted', async () => {
+    const clock = new FakeClock();
+    const { controller } = makeBridge({ clock }); // no deadlineMs → default 1000ms
+    const offer = controller.createOffer('session-default');
+    // Before the default deadline: still pending.
+    clock.advance(999);
+    await expectPending(offer);
+    // At/after 1000ms: rejects with a typed timeout error.
+    clock.advance(1);
+    await expect(offer).rejects.toBeInstanceOf(MediaTimeoutError);
+    await expect(offer).rejects.toThrow(/createOffer.*session-default/);
+  });
+
+  it('keeps media requests unbounded when no clock is present', async () => {
+    const { controller } = makeBridge(); // no clock, no deadline
+    const offer = controller.createOffer('session-unbounded');
+    // No deadline timer exists, so a pending request must not reject on a fake
+    // advance — but there is no clock to advance. Assert the pending request
+    // stays pending and the controller has no armed timer by closing it.
+    await expectPending(offer);
+    controller.close();
+    await expect(offer).rejects.toThrow(/media port closed/);
+    await expect(offer).rejects.not.toBeInstanceOf(MediaTimeoutError);
+  });
 });

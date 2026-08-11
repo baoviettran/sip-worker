@@ -404,6 +404,49 @@ describe('WorkerSupervisor registration failure', () => {
     });
     expect(h.events.length).toBe(preEvents);
   });
+
+  it('rejects a second register() on the same generation after registrationFailed', async () => {
+    const h = setup();
+    const gen = h.factory.current.bootstrap?.generation;
+    expect(gen).toBe(1);
+    const first = h.supervisor.register();
+    await expectPending(first);
+    h.factory.current.port.deliver({
+      type: 'registrationFailed',
+      generation: gen!,
+      error: { name: 'Error', message: 'authentication failed for [redacted]' },
+    });
+    await expect(first).rejects.toBeInstanceOf(WorkerRegistrationError);
+    // The worker is still alive and heartbeating — but a retry on the same
+    // generation must fail loudly, not park a waiter that only resolves on death.
+    const second = h.supervisor.register();
+    await expect(second).rejects.toBeInstanceOf(WorkerRestartError);
+    await expect(second).rejects.toMatchObject({ generation: gen });
+  });
+
+  it('allows register() on a fresh generation after stop/start even if the previous one failed', async () => {
+    const h = setup();
+    const gen = h.factory.current.bootstrap?.generation;
+    expect(gen).toBe(1);
+    const first = h.supervisor.register();
+    await expectPending(first);
+    h.factory.current.port.deliver({
+      type: 'registrationFailed',
+      generation: gen!,
+      error: { name: 'Error', message: 'authentication failed for [redacted]' },
+    });
+    await expect(first).rejects.toBeInstanceOf(WorkerRegistrationError);
+    // stop() then start() spawns a fresh generation (nextGen increments).
+    h.supervisor.stop();
+    h.supervisor.start();
+    expect(h.supervisor.generation).toBeGreaterThan(gen!);
+    // A register() on the new generation proceeds normally: parks, then resolves
+    // on the new generation's `registered`.
+    const retry = h.supervisor.register();
+    await expectPending(retry);
+    h.factory.current.port.deliver({ type: 'registered', generation: h.supervisor.generation });
+    await expect(retry).resolves.toBeUndefined();
+  });
 });
 
 describe('WorkerSupervisor death after send (pre-send identity checkpoint)', () => {
@@ -881,6 +924,96 @@ describe('WorkerRuntime credential redaction', () => {
     expect(port.sent.some((m) => m.type === 'registrationFailed')).toBe(false);
     expect(port.sent.some((m) => m.type === 'registered')).toBe(true);
     server.stop();
+    runtime.close();
+  });
+
+  it('redacts a password value that follows a colon separator', async () => {
+    const port = new WorkerRuntimePortCapture();
+    const clock = new FakeClock();
+    const ua = new UserAgent({
+      transport: new FakeTransport({ reliable: true, framing: 'stream' }),
+      clock,
+      registrarUri: 'sip:r.example.com',
+      aor: 'sip:a@example.com',
+      contact: '<sip:a@192.0.2.1:5060>',
+      credentials: { username: 'alice', password: 'hunter2' },
+      idGenerator: makeIdGen(),
+    });
+    const uaShim = new Proxy(ua, {
+      get(target, prop) {
+        if (prop === 'register') {
+          return () => Promise.reject(new Error('authentication failed for password: hunter2'));
+        }
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const runtime = new WorkerRuntime({ port, buildUserAgent: () => uaShim as unknown as UserAgent });
+    const snapshotWithSecret: RegistrationSnapshot = {
+      aor: 'sip:a@example.com',
+      registrar: 'sip:r.example.com',
+      credentials: { username: 'alice', password: 'hunter2' },
+      registerExpires: 600,
+      contactUri: '<sip:a@192.0.2.1:5060>',
+      callId: 'reg-a',
+      nextCSeq: 18,
+    };
+    port.push({ type: 'bootstrap', generation: 1, registration: snapshotWithSecret });
+    let error: unknown;
+    try {
+      await runtime.ready();
+    } catch (e) {
+      error = e;
+    }
+    const message = (error as Error).message;
+    // The colon-separated secret must be gone, not just the keyword.
+    expect(message).not.toContain('hunter2');
+    expect(message).toContain('[redacted]');
+    runtime.close();
+  });
+
+  it('redacts a credentials value with an internal colon (bob:secret)', async () => {
+    const port = new WorkerRuntimePortCapture();
+    const clock = new FakeClock();
+    const ua = new UserAgent({
+      transport: new FakeTransport({ reliable: true, framing: 'stream' }),
+      clock,
+      registrarUri: 'sip:r.example.com',
+      aor: 'sip:a@example.com',
+      contact: '<sip:a@192.0.2.1:5060>',
+      credentials: { username: 'alice', password: 'x' },
+      idGenerator: makeIdGen(),
+    });
+    const uaShim = new Proxy(ua, {
+      get(target, prop) {
+        if (prop === 'register') {
+          return () => Promise.reject(new Error('stored credentials=bob:secret'));
+        }
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const runtime = new WorkerRuntime({ port, buildUserAgent: () => uaShim as unknown as UserAgent });
+    const snapshotWithSecret: RegistrationSnapshot = {
+      aor: 'sip:a@example.com',
+      registrar: 'sip:r.example.com',
+      credentials: { username: 'alice', password: 'x' },
+      registerExpires: 600,
+      contactUri: '<sip:a@192.0.2.1:5060>',
+      callId: 'reg-a',
+      nextCSeq: 18,
+    };
+    port.push({ type: 'bootstrap', generation: 1, registration: snapshotWithSecret });
+    let error: unknown;
+    try {
+      await runtime.ready();
+    } catch (e) {
+      error = e;
+    }
+    const message = (error as Error).message;
+    expect(message).not.toContain('bob:secret');
+    expect(message).not.toContain('secret');
+    expect(message).toContain('[redacted]');
     runtime.close();
   });
 });

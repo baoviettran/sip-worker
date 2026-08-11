@@ -30,12 +30,20 @@ import type {
 
 /** Redact credentials from any message surfaced by the runtime. */
 const REDACTED = '[redacted]';
-/** Patterns that name a credential-bearing field; matched case-insensitively. */
-const CREDENTIAL_PATTERN = /(password|credentials)[^,:;)}"]*/gi;
+/**
+ * Patterns a credential-bearing field and its value. Consumes the keyword, an
+ * optional `:` / `=` / space separator, and the value as a run of characters
+ * excluding structural delimiters (`, ; ) } "`) and whitespace. The value may
+ * itself contain `:` (e.g. `credentials=bob:secret`), so the scan does not stop
+ * at a colon. A bare keyword with no bound value (e.g. `myPassword`) is left
+ * unchanged. A value containing whitespace truncates at the first space — the
+ * conservative choice to avoid over-redacting following prose.
+ */
+const CREDENTIAL_PATTERN = /(password|credentials)\s*[:=]?\s*[^,;)}"\s]+/gi;
 
 /** Replace credential-bearing substrings with the redaction token. */
 function redactString(value: string): string {
-  return value.replace(CREDENTIAL_PATTERN, `$1: ${REDACTED}`);
+  return value.replace(CREDENTIAL_PATTERN, REDACTED);
 }
 
 /** True when a string carries a credential-bearing token. */
