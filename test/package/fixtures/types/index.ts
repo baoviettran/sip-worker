@@ -241,7 +241,10 @@ declare const responseMsg: SipResponseMessage;
 const dialog: typeof DialogClass = DialogClass;
 void dialog;
 if (typeof DialogClass.fromUac === 'function') {
-  const d = DialogClass.fromUac(requestMsg, responseMsg, idGenerator);
+  const d = DialogClass.fromUac(requestMsg, responseMsg, idGenerator, {
+    token: 'UDP',
+    sentBy: '192.0.2.1:5060',
+  });
   void d;
 }
 void makeBranch('branch');
@@ -275,6 +278,8 @@ const regOptions: RegistrarOptions = {
   registrarUri: 'sip:example.test',
   aor: 'sip:alice@example.test',
   contact: 'sip:alice@example.test',
+  viaAddress: '192.0.2.1:5060',
+  viaToken: 'TCP',
   idGenerator,
   layer,
   clock,
