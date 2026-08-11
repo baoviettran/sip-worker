@@ -926,6 +926,96 @@ describe('WorkerRuntime credential redaction', () => {
     server.stop();
     runtime.close();
   });
+
+  it('redacts a password value that follows a colon separator', async () => {
+    const port = new WorkerRuntimePortCapture();
+    const clock = new FakeClock();
+    const ua = new UserAgent({
+      transport: new FakeTransport({ reliable: true, framing: 'stream' }),
+      clock,
+      registrarUri: 'sip:r.example.com',
+      aor: 'sip:a@example.com',
+      contact: '<sip:a@192.0.2.1:5060>',
+      credentials: { username: 'alice', password: 'hunter2' },
+      idGenerator: makeIdGen(),
+    });
+    const uaShim = new Proxy(ua, {
+      get(target, prop) {
+        if (prop === 'register') {
+          return () => Promise.reject(new Error('authentication failed for password: hunter2'));
+        }
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const runtime = new WorkerRuntime({ port, buildUserAgent: () => uaShim as unknown as UserAgent });
+    const snapshotWithSecret: RegistrationSnapshot = {
+      aor: 'sip:a@example.com',
+      registrar: 'sip:r.example.com',
+      credentials: { username: 'alice', password: 'hunter2' },
+      registerExpires: 600,
+      contactUri: '<sip:a@192.0.2.1:5060>',
+      callId: 'reg-a',
+      nextCSeq: 18,
+    };
+    port.push({ type: 'bootstrap', generation: 1, registration: snapshotWithSecret });
+    let error: unknown;
+    try {
+      await runtime.ready();
+    } catch (e) {
+      error = e;
+    }
+    const message = (error as Error).message;
+    // The colon-separated secret must be gone, not just the keyword.
+    expect(message).not.toContain('hunter2');
+    expect(message).toContain('[redacted]');
+    runtime.close();
+  });
+
+  it('redacts a credentials value with an internal colon (bob:secret)', async () => {
+    const port = new WorkerRuntimePortCapture();
+    const clock = new FakeClock();
+    const ua = new UserAgent({
+      transport: new FakeTransport({ reliable: true, framing: 'stream' }),
+      clock,
+      registrarUri: 'sip:r.example.com',
+      aor: 'sip:a@example.com',
+      contact: '<sip:a@192.0.2.1:5060>',
+      credentials: { username: 'alice', password: 'x' },
+      idGenerator: makeIdGen(),
+    });
+    const uaShim = new Proxy(ua, {
+      get(target, prop) {
+        if (prop === 'register') {
+          return () => Promise.reject(new Error('stored credentials=bob:secret'));
+        }
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const runtime = new WorkerRuntime({ port, buildUserAgent: () => uaShim as unknown as UserAgent });
+    const snapshotWithSecret: RegistrationSnapshot = {
+      aor: 'sip:a@example.com',
+      registrar: 'sip:r.example.com',
+      credentials: { username: 'alice', password: 'x' },
+      registerExpires: 600,
+      contactUri: '<sip:a@192.0.2.1:5060>',
+      callId: 'reg-a',
+      nextCSeq: 18,
+    };
+    port.push({ type: 'bootstrap', generation: 1, registration: snapshotWithSecret });
+    let error: unknown;
+    try {
+      await runtime.ready();
+    } catch (e) {
+      error = e;
+    }
+    const message = (error as Error).message;
+    expect(message).not.toContain('bob:secret');
+    expect(message).not.toContain('secret');
+    expect(message).toContain('[redacted]');
+    runtime.close();
+  });
 });
 
 function makeIdGen() {
