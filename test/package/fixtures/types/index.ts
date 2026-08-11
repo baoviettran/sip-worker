@@ -108,8 +108,15 @@ import {
   WorkerMediaController as MediaCls,
   StubMainMediaHandler,
   STUB_SDP,
+  MediaTimeoutError,
 } from 'sip-worker/media';
-import type { MediaCommand, MediaPort, MediaReply } from 'sip-worker/media';
+import type {
+  MediaCommand,
+  MediaPort,
+  MediaReply,
+  MediaRequestMessage,
+  WorkerMediaControllerOptions,
+} from 'sip-worker/media';
 
 import { OptionsLiveness as LivenessCls, NodeWebSocketLiveness } from 'sip-worker/reliability';
 import type {
@@ -366,12 +373,19 @@ void supEvent;
 
 // ---- media ----
 void new MediaCls({} as MediaPort);
+void new MediaCls({} as MediaPort, {} as WorkerMediaControllerOptions);
 void new StubMainMediaHandler({} as MediaPort);
 void STUB_SDP;
 declare const mediaCmd: MediaCommand;
 declare const mediaReply: MediaReply;
+declare const mediaReq: MediaRequestMessage;
+declare const mediaTimeout: MediaTimeoutError;
+declare const mediaOpts: WorkerMediaControllerOptions;
 void mediaCmd;
 void mediaReply;
+void mediaReq;
+void mediaTimeout;
+void mediaOpts;
 
 // ---- transport event type is exported from root ----
 declare const tEvent: TransportEvent;
