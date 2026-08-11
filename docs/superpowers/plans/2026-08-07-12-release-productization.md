@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Publishing must fail if `dist` is absent or packed exports do not resolve.
-- Document v1 as signaling-only until a real media adapter ships.
+- Frame the released artifact as **0.1.0, a signaling-only prototype**: a real media adapter (and interop evidence) gates the 1.0 framing, and docs must not call 0.1.0 a "v1 release candidate".
 
 ---
 
