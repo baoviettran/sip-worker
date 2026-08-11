@@ -404,6 +404,49 @@ describe('WorkerSupervisor registration failure', () => {
     });
     expect(h.events.length).toBe(preEvents);
   });
+
+  it('rejects a second register() on the same generation after registrationFailed', async () => {
+    const h = setup();
+    const gen = h.factory.current.bootstrap?.generation;
+    expect(gen).toBe(1);
+    const first = h.supervisor.register();
+    await expectPending(first);
+    h.factory.current.port.deliver({
+      type: 'registrationFailed',
+      generation: gen!,
+      error: { name: 'Error', message: 'authentication failed for [redacted]' },
+    });
+    await expect(first).rejects.toBeInstanceOf(WorkerRegistrationError);
+    // The worker is still alive and heartbeating — but a retry on the same
+    // generation must fail loudly, not park a waiter that only resolves on death.
+    const second = h.supervisor.register();
+    await expect(second).rejects.toBeInstanceOf(WorkerRestartError);
+    await expect(second).rejects.toMatchObject({ generation: gen });
+  });
+
+  it('allows register() on a fresh generation after stop/start even if the previous one failed', async () => {
+    const h = setup();
+    const gen = h.factory.current.bootstrap?.generation;
+    expect(gen).toBe(1);
+    const first = h.supervisor.register();
+    await expectPending(first);
+    h.factory.current.port.deliver({
+      type: 'registrationFailed',
+      generation: gen!,
+      error: { name: 'Error', message: 'authentication failed for [redacted]' },
+    });
+    await expect(first).rejects.toBeInstanceOf(WorkerRegistrationError);
+    // stop() then start() spawns a fresh generation (nextGen increments).
+    h.supervisor.stop();
+    h.supervisor.start();
+    expect(h.supervisor.generation).toBeGreaterThan(gen!);
+    // A register() on the new generation proceeds normally: parks, then resolves
+    // on the new generation's `registered`.
+    const retry = h.supervisor.register();
+    await expectPending(retry);
+    h.factory.current.port.deliver({ type: 'registered', generation: h.supervisor.generation });
+    await expect(retry).resolves.toBeUndefined();
+  });
 });
 
 describe('WorkerSupervisor death after send (pre-send identity checkpoint)', () => {

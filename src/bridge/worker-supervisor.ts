@@ -130,6 +130,8 @@ export class WorkerSupervisor {
   private closed = false;
   /** Timestamps (ms since epoch of the injected clock) of past restarts. */
   private readonly restartTimestamps: number[] = [];
+  /** Generation whose registration failed; a retry on it rejects immediately. */
+  private registrationFailedGen = -1;
 
   constructor(options: WorkerSupervisorOptions) {
     this.factory = options.factory;
@@ -222,6 +224,9 @@ export class WorkerSupervisor {
     if (!this.started || gen === 0) {
       return Promise.reject(new WorkerRestartError(gen, 'supervisor not started'));
     }
+    if (gen === this.registrationFailedGen) {
+      return Promise.reject(new WorkerRestartError(gen, `generation ${gen} already failed to register; stop()/start() to reset`));
+    }
     return new Promise<void>((resolve, reject) => {
       this.waiters.add({ gen, resolve, reject });
     });
@@ -309,6 +314,7 @@ export class WorkerSupervisor {
 
   /** Handle a registration failure from the worker: reject waiters + emit. */
   private onRegistrationFailed(gen: number, cause: SerializedError): void {
+    this.registrationFailedGen = gen;
     const error: WorkerRegistrationErrorType = new WorkerRegistrationError(gen, cause);
     // Reject every waiter parked on the failing generation (collect first to
     // avoid mutating the Set during iteration).
