@@ -1,7 +1,32 @@
 {
   "name": "sip-worker",
   "version": "0.1.0",
+  "description": "Signaling-only SIP stack (RFC 3261) as a TypeScript library with worker-supervised recovery. 0.1.0 is a prototype; real media and interop evidence gate the 1.0 framing.",
+  "keywords": [
+    "sip",
+    "rfc3261",
+    "voip",
+    "signaling",
+    "webrtc",
+    "worker",
+    "typescript"
+  ],
+  "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baoviettran/sip-worker.git"
+  },
+  "support": {
+    "docs": "https://github.com/baoviettran/sip-worker#readme",
+    "url": "https://github.com/baoviettran/sip-worker/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "dist"
   ],
@@ -72,9 +97,14 @@
   },
   "scripts": {
     "build": "tsup",
+    "build:silent": "tsup --silent",
+    "prepack": "npm run build:silent && node test/package/prepack-check.mjs",
+    "prepack-check": "node test/package/prepack-check.mjs",
     "typecheck": "tsc --noEmit",
+    "pretest": "node test/package/documentation-contract.test.mjs",
     "test": "vitest run",
-    "test:package": "npm run build && node test/package/exports.test.mjs"
+    "test:docs": "node test/package/documentation-contract.test.mjs",
+    "test:package": "npm run build && node test/package/exports.test.mjs && node test/package/clean-pack.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
