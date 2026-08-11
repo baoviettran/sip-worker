@@ -15,7 +15,7 @@ import { extractTag, makeBranch, makeTopVia, type ViaConfig } from '../dialogs/h
 import { Dialog, type IdGenerator } from '../dialogs/dialog.js';
 import type { TransactionLayer } from '../transactions/coordinator.js';
 import type { ServerTransaction } from '../transactions/types.js';
-import type { Clock } from '../transport/transport.js';
+import type { Clock, TransportToken } from '../transport/transport.js';
 import type { WorkerMediaController } from '../media/worker-controller.js';
 import { Session } from './session.js';
 import { InviteResponseRetransmitter } from './invite-response-retransmitter.js';
@@ -27,7 +27,7 @@ export interface InvitationOptions {
   /** Caller-supplied Via sent-by host:port (never inferred from a socket). */
   readonly viaAddress: string;
   /** Via transport token from the connected transport's capabilities. */
-  readonly viaToken: string;
+  readonly viaToken: TransportToken;
   readonly idGenerator: IdGenerator;
   readonly layer: TransactionLayer;
   readonly clock: Clock;

@@ -20,7 +20,7 @@ import type { IdGenerator, AuthManager, AuthFailure } from '../auth/manager.js';
 import type { TransactionLayer } from '../transactions/coordinator.js';
 import type { TransactionLayerEvent } from '../transactions/types.js';
 import { sendOwnedRequest } from '../transactions/request-ownership.js';
-import type { Clock } from '../transport/index.js';
+import type { Clock, TransportToken } from '../transport/index.js';
 import type { RegistrationIdentity, RegisterState } from './registration-types.js';
 import { responseMatchesRequestIdentity } from './response-identity.js';
 
@@ -33,7 +33,7 @@ export interface RegistrarOptions {
   /** Caller-supplied Via sent-by host:port (never inferred from a socket). */
   readonly viaAddress: string;
   /** Via transport token from the connected transport's capabilities. */
-  readonly viaToken: string;
+  readonly viaToken: TransportToken;
   readonly idGenerator: IdGenerator;
   readonly layer: TransactionLayer;
   readonly clock: Clock;
@@ -93,7 +93,7 @@ export class Registrar {
   private readonly aor: string;
   private readonly contact: string;
   private readonly viaAddress: string;
-  private readonly viaToken: string;
+  private readonly viaToken: TransportToken;
   private readonly fromTag: string;
   private readonly authManager?: AuthManager;
   private readonly credentials?: { readonly username: string; readonly password: string };

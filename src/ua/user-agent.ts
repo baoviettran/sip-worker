@@ -16,7 +16,7 @@
  * - Unsubscribes listeners/timers exactly once
  */
 
-import type { Transport, Clock } from '../transport/index.js';
+import type { Transport, Clock, TransportToken } from '../transport/index.js';
 import { SipIngress } from '../transport/index.js';
 import type { MessageSink } from '../transport/ingress.js';
 import { SipError } from '../errors.js';
@@ -133,7 +133,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
   }
 
   /** Via transport token from the connected transport's capabilities. */
-  private get viaToken(): string {
+  private get viaToken(): TransportToken {
     return this.transport.capabilities.token;
   }
 

@@ -1,4 +1,5 @@
 import type { Headers } from '../messages/headers.js';
+import type { TransportToken } from '../transport/transport.js';
 
 /** The RFC 3261 magic cookie that must appear in the top Via branch. */
 export const MAGIC_COOKIE = 'z9hG4bK';
@@ -147,8 +148,8 @@ export function makeBranch(branch: string): string {
 
 /** The transport protocol and sent-by used to stamp a new top Via header. */
 export interface ViaConfig {
-  /** Via transport token, e.g. 'UDP' | 'TCP' | 'WS' | 'WSS' (RFC 3261 20.42). */
-  readonly token: string;
+  /** Via transport token (RFC 3261 20.42 / RFC 7118). */
+  readonly token: TransportToken;
   /** Caller-supplied sent-by host:port (never inferred from a remote socket). */
   readonly sentBy: string;
 }

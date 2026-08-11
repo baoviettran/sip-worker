@@ -19,7 +19,7 @@ import { Dialog, type IdGenerator } from '../dialogs/dialog.js';
 import { clientKey, type TransactionLayer } from '../transactions/coordinator.js';
 import type { TransactionKey, TransactionLayerEvent, ServerTransaction } from '../transactions/types.js';
 import { sendOwnedRequest } from '../transactions/request-ownership.js';
-import type { Clock } from '../transport/index.js';
+import type { Clock, TransportToken } from '../transport/index.js';
 import type { AuthManager, AuthFailure } from '../auth/manager.js';
 import type { WorkerMediaController } from '../media/worker-controller.js';
 import { Session } from './session.js';
@@ -33,7 +33,7 @@ export interface InviterOptions {
   /** Caller-supplied Via sent-by host:port (never inferred from a socket). */
   readonly viaAddress: string;
   /** Via transport token from the connected transport's capabilities. */
-  readonly viaToken: string;
+  readonly viaToken: TransportToken;
   readonly idGenerator: IdGenerator;
   readonly layer: TransactionLayer;
   readonly clock: Clock;
