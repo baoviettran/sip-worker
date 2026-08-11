@@ -72,9 +72,12 @@
   },
   "scripts": {
     "build": "tsup",
+    "build:silent": "tsup --silent",
+    "prepack": "npm run build:silent && node test/package/prepack-check.mjs",
+    "prepack-check": "node test/package/prepack-check.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:package": "npm run build && node test/package/exports.test.mjs"
+    "test:package": "npm run build && node test/package/exports.test.mjs && node test/package/clean-pack.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",

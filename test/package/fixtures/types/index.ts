@@ -55,9 +55,11 @@ import {
   NodeTcpTransport,
   NodeUdpTransport,
   NodeWebSocketTransport,
+  toNativePingSocket,
 } from 'sip-worker/transport/node';
 import type {
   DatagramSocketLike,
+  NativeNodeWebSocket,
   NodeWebSocketLike,
   StreamSocketLike,
   NodeTcpTransportOptions,
@@ -221,6 +223,12 @@ void new NodeTcpTransport(
   { host: 'sip.example.test', port: 5060 } as NodeTcpTransportOptions,
 );
 void new NodeWebSocketTransport(null as unknown as NodeWebSocketLike);
+
+// ---- native ping adapter is part of the exported surface ----
+declare const nativeWs: NativeNodeWebSocket;
+const nativePingSocket: NativePingSocket = toNativePingSocket(nativeWs) as unknown as NativePingSocket;
+void nativePingSocket;
+void toNativePingSocket(undefined);
 
 // ---- transport/browser ----
 const wsFactory: BrowserWebSocketFactory = () => null as unknown as BrowserWebSocketLike;

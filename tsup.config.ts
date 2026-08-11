@@ -16,5 +16,5 @@ export default defineConfig({
   },
   format: ['esm', 'cjs'],
   outExtension: ({ format }) => ({ js: format === 'cjs' ? '.cjs' : '.js' }),
-  dts: true, clean: true, sourcemap: true, splitting: false, target: 'es2022',
+  dts: true, clean: true, sourcemap: true, splitting: true, target: 'es2022',
 });

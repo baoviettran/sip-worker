@@ -37,6 +37,7 @@ assert.equal(typeof stream.SipStreamDecoder, 'function');
 assert.equal(typeof nodeTransport.NodeUdpTransport, 'function');
 assert.equal(typeof nodeTransport.NodeTcpTransport, 'function');
 assert.equal(typeof nodeTransport.NodeWebSocketTransport, 'function');
+assert.equal(typeof nodeTransport.toNativePingSocket, 'function');
 assert.equal(typeof browserTransport.BrowserWebSocketTransport, 'function');
 
 assert.equal(typeof transactions.TransactionLayer, 'function');
@@ -69,5 +70,49 @@ const request = root.makeRequest('REGISTER', 'sip:alice@example.test');
 const wire = root.serializeMessage(request);
 const parsed = messages.parseMessage(wire);
 assert.ok(parsed.ok, 'message round-trip failed');
+
+// ---- native ping adapter no-op contract ----
+assert.equal(nodeTransport.toNativePingSocket(undefined), undefined);
+assert.equal(nodeTransport.toNativePingSocket({}), undefined);
+
+// ---- instanceof identity: root-built values must be instanceof the same
+// class re-imported from a subpath (shared code-split core required).
+{
+  const instances = [
+    [new root.SipStreamDecoder(), stream.SipStreamDecoder],
+    [new root.TypedEventEmitter(), ua.TypedEventEmitter],
+    [new root.AuthManager({ branch: () => 'z9hG4bK-cjs' }), auth.AuthManager],
+    [new root.WorkerMediaController({ postMessage() {}, subscribe: () => () => {} }), media.WorkerMediaController],
+  ];
+  for (const [instance, subpathCtor] of instances) {
+    assert.ok(instance instanceof subpathCtor,
+      `root value not instanceof subpath class ${subpathCtor?.name ?? '?'}`);
+  }
+}
+
+// ---- root/subpath UserAgent identity (via ./ua) ----
+{
+  const clock = { now: () => 0, setTimeout: () => 0, clearTimeout: () => {} };
+  const idGen = { branch: () => 'z9hG4bK-cjs-ua' };
+  const transport = {
+    egress() {},
+    capabilities: { reliable: true, framing: 'message', token: 'WSS' },
+    connect: () => Promise.resolve(),
+    disconnect: () => Promise.resolve(),
+    send: () => Promise.resolve(),
+    subscribe: () => () => {},
+    isConnected: () => false,
+  };
+  const uaInstance = new root.UserAgent({
+    transport,
+    clock,
+    registrarUri: 'sip:example.test',
+    aor: 'sip:alice@example.test',
+    contact: 'sip:alice@example.test',
+    idGenerator: idGen,
+    authManager: new root.AuthManager(idGen),
+  });
+  assert.ok(uaInstance instanceof ua.UserAgent, 'root UserAgent not instanceof ./ua UserAgent');
+}
 
 console.log('cjs-consumer OK');
