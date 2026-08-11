@@ -46,6 +46,8 @@ The highlights that affect security posture:
   no cross-testing against Asterisk, Kamailio, FreeSWITCH, SIP.js, or SIPp.
 - **No observability.** No metrics, structured logging, health endpoints, or
   tracing to detect or forensically reconstruct an attack.
+- **No streaming/siren.** No SIP INFO / DTMF / RFC 2833 / MSRP.
+- **No high availability.** No active/standby, shared state, or proxy failover.
 
 The 1.0 framing is gated on a real media adapter plus interop evidence. Treat
 0.1.0 accordingly: signaling experiments and tightly-controlled single-peer
