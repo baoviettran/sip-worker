@@ -10,8 +10,8 @@
 //   4. The required release-hygiene files declared in SECURITY.md and package.json
 //      metadata actually exist.
 //
-// This is `npm run test:docs` and runs in CI and in `npm run typecheck` via
-// `pretest`.
+// This is `npm run test:docs`; it is also wired into `pretest`, which fires
+// before `npm test` (the `test` script), and it runs explicitly in CI.
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';

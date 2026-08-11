@@ -186,8 +186,9 @@ application's to recreate.
 deployment. It ships no real media (no RTP/RTCP, no WebRTC, no DTLS/SRTP), no
 TLS/SIPS transports, no `auth-int`, no streaming/siren (no SIP INFO / DTMF /
 RFC 2833 / MSRP), no observability, no high availability (no active/standby,
-shared state, or proxy failover), and its `AuthManager`
-maps are unbounded. See [SECURITY.md](SECURITY.md) and
+shared state, or proxy failover), and no interop evidence (the smoke gate is a
+self-contained loopback). Its `AuthManager` maps are unbounded. See
+[SECURITY.md](SECURITY.md) and
 [docs/2026-08-11-production-readiness-review.md](docs/2026-08-11-production-readiness-review.md)
 for the complete limits. A real media adapter plus interop evidence gate the
 1.0 framing.
