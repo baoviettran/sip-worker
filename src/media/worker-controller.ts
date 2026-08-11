@@ -1,5 +1,5 @@
 import type { Clock } from '../transport/index.js';
-import type { MediaCommand, MediaMessage, MediaPort, MediaReply } from './protocol.js';
+import type { MediaMessage, MediaPort, MediaReply, MediaRequestMessage } from './protocol.js';
 
 /**
  * Typed error raised when a pending media request does not receive a reply
@@ -122,18 +122,9 @@ export class WorkerMediaController {
     this.unsubscribe();
   }
 
-  private sendAndAwait<T extends string | void>(command: MediaCommand): Promise<T> {
+  private sendAndAwait<T extends string | void>(command: MediaRequestMessage): Promise<T> {
     if (this.closed) {
       return Promise.reject(new Error(`media port closed, cannot send ${command.type}`));
-    }
-    // closeSession carries no requestId and is not awaited.
-    if (command.type === 'closeSession') {
-      try {
-        this.port.postMessage(command);
-      } catch (error) {
-        // Fire-and-forget; surface nothing to the caller.
-      }
-      return Promise.resolve(undefined as T);
     }
     return new Promise<T>((resolve, reject) => {
       const pending: Pending = {
@@ -201,15 +192,12 @@ export class WorkerMediaController {
   }
 
   private rejectSession(sessionId: string, message: string): void {
-    let cancelled = false;
     for (const [id, pending] of this.pending) {
       if (pending.sessionId !== sessionId) continue;
       this.pending.delete(id);
       this.clearDeadline(pending);
       pending.reject(new Error(message));
-      cancelled = true;
     }
-    void cancelled;
   }
 
   private clearAllDeadlines(): void {
