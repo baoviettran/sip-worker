@@ -7,8 +7,10 @@ import {
   extractUri,
   isStrictRouter,
   makeBranch,
+  makeTopVia,
   parseRecordRoutes,
   reverseRouteSet,
+  type ViaConfig,
 } from './header-values.js';
 
 /** Injects volatile call data (Via branches) needed by dialog builders. */
@@ -22,10 +24,6 @@ function cseqNumber(headers: Headers): number {
   const cseq = headers.get('CSeq');
   if (cseq === undefined) return 0;
   return Number.parseInt(cseq.trim().split(/\s+/)[0] ?? '', 10);
-}
-
-function makeTopVia(branch: string): string {
-  return `SIP/2.0/UDP 192.0.2.1:5060;branch=${branch}`;
 }
 
 function routeNameAddr(uri: string): string {
@@ -57,6 +55,7 @@ export function requestDialogId(request: SipRequestMessage): string | undefined 
  */
 export class Dialog {
   private readonly idGenerator: IdGenerator;
+  private readonly viaConfig: ViaConfig;
   private readonly invCSeq: number;
   private localCSeq: number;
   private remoteCSeq: number;
@@ -70,6 +69,7 @@ export class Dialog {
 
   private constructor(
     idGenerator: IdGenerator,
+    viaConfig: ViaConfig,
     invCSeq: number,
     requestUri: string,
     contact: string | undefined,
@@ -80,6 +80,7 @@ export class Dialog {
     maxForwards: string,
   ) {
     this.idGenerator = idGenerator;
+    this.viaConfig = viaConfig;
     this.invCSeq = invCSeq;
     this.localCSeq = invCSeq;
     this.remoteCSeq = 0;
@@ -100,11 +101,13 @@ export class Dialog {
     request: SipRequestMessage,
     response: SipResponseMessage,
     idGenerator: IdGenerator,
+    viaConfig: ViaConfig,
   ): Dialog {
     const recordRoutes = parseRecordRoutes(response.headers);
     const routeSet = reverseRouteSet(recordRoutes);
     return new Dialog(
       idGenerator,
+      viaConfig,
       cseqNumber(request.headers),
       request.uri,
       contactUri(response.headers),
@@ -125,11 +128,13 @@ export class Dialog {
     request: SipRequestMessage,
     response: SipResponseMessage,
     idGenerator: IdGenerator,
+    viaConfig: ViaConfig,
   ): Dialog {
     const recordRoutes = parseRecordRoutes(request.headers);
     // UAS: local=To (response), remote=From (request)
     const dialog = new Dialog(
       idGenerator,
+      viaConfig,
       cseqNumber(request.headers),
       contactUri(request.headers) ?? request.uri,
       contactUri(request.headers),
@@ -183,7 +188,7 @@ export class Dialog {
    */
   createAck(response: SipResponseMessage): SipRequestMessage {
     const headers = new Headers();
-    headers.set('Via', makeTopVia(makeBranch(this.idGenerator.branch())));
+    headers.set('Via', makeTopVia(this.viaConfig, makeBranch(this.idGenerator.branch())));
     headers.set('To', response.headers.get('To') ?? this.toValue);
     headers.set('From', this.fromValue);
     headers.set('Call-ID', this.callIdValue);
@@ -200,7 +205,7 @@ export class Dialog {
   createRequest(method: string): SipRequestMessage {
     this.localCSeq += 1;
     const headers = new Headers();
-    headers.set('Via', makeTopVia(makeBranch(this.idGenerator.branch())));
+    headers.set('Via', makeTopVia(this.viaConfig, makeBranch(this.idGenerator.branch())));
     headers.set('To', this.toValue);
     headers.set('From', this.fromValue);
     headers.set('Call-ID', this.callIdValue);

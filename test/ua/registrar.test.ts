@@ -58,6 +58,8 @@ function setup(options: {
     aor: AOR,
     credentials: credentials ? { username: 'alice', password: SECRET } : undefined,
     contact: CONTACT,
+    viaAddress: '192.0.2.1:5060',
+    viaToken: 'TCP',
     idGenerator,
     layer,
     clock,
@@ -277,7 +279,7 @@ describe('Registrar', () => {
     const request = h.sent[h.sent.length - 1]!;
     expect(request.method).toBe('REGISTER');
     expect(request.uri).toBe(REGISTRAR_URI);
-    expect(request.headers.get('Via')).toMatch(/SIP\/2\.0\/UDP \S+;branch=z9hG4bK-/);
+    expect(request.headers.get('Via')).toMatch(/SIP\/2\.0\/(UDP|TCP|WS|WSS) \S+;branch=z9hG4bK-/);
     expect(request.headers.get('CSeq')).toBe('1 REGISTER');
     expect(request.headers.get('Max-Forwards')).toBe('70');
     expect(request.headers.get('Contact')).toBe(CONTACT);

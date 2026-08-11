@@ -161,6 +161,7 @@ export class TransactionLayer implements MessageSink {
   private readonly subscribersByKey = new Map<TransactionKey, Set<(event: TransactionLayerEvent) => void>>();
   private readonly clientSubscribersByKey = new Map<TransactionKey, Set<(event: TransactionLayerEvent) => void>>();
   private readonly serverSubscribersByKey = new Map<TransactionKey, Set<(event: TransactionLayerEvent) => void>>();
+  private readonly transportUnsubscribe?: () => void;
   private disposed = false;
 
   constructor(options: TransactionLayerOptions) {
@@ -169,6 +170,11 @@ export class TransactionLayer implements MessageSink {
     this.timers = options.timers;
     this.reliable = options.reliable;
     this.emit = options.emit;
+    // Own the transport subscription so a loss fans a typed terminal error to
+    // every active transaction, and so it is released exactly once on dispose.
+    this.transportUnsubscribe = this.transport.subscribe((event) => {
+      if (event.type === 'disconnected') this.onTransportDisconnected(event.error);
+    });
   }
 
   /** Expose the transport for direct sends (e.g. 2xx ACKs that bypass transactions). */
@@ -176,10 +182,14 @@ export class TransactionLayer implements MessageSink {
     return this.transport;
   }
 
-  /** Terminate every owned transaction and release all layer subscriptions. */
+  /**
+   * Terminate every owned transaction (with a typed transport error when one is
+   * supplied) and release all layer subscriptions.
+   */
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.transportUnsubscribe?.();
     try {
       for (const transaction of [...this.clients.values()]) {
         try {
@@ -202,6 +212,33 @@ export class TransactionLayer implements MessageSink {
       this.subscribersByKey.clear();
       this.clientSubscribersByKey.clear();
       this.serverSubscribersByKey.clear();
+    }
+  }
+
+  /**
+   * Transport loss: fan a typed terminal error to every active transaction so
+   * they fail observably (RFC 3261 transport failure → terminate). Unlike
+   * `dispose()`, this does NOT mark the layer disposed or clear subscriptions,
+   * so a later reconnect can create and route new transactions (the UA owns
+   * reconnection). Terminated transactions delete themselves from their maps
+   * via the normal `terminated` forward.
+   */
+  private onTransportDisconnected(error?: TransportError): void {
+    if (this.disposed) return;
+    const terminalError = error ?? new TransportError('transport disconnected');
+    for (const transaction of [...this.clients.values()]) {
+      try {
+        transaction.terminate(terminalError);
+      } catch {
+        // Continue terminating other transactions if an observer throws.
+      }
+    }
+    for (const transaction of [...this.servers.values()]) {
+      try {
+        transaction.terminate(terminalError);
+      } catch {
+        // Continue terminating other transactions if an observer throws.
+      }
     }
   }
 

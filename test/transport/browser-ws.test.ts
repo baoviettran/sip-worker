@@ -112,6 +112,15 @@ async function connect(
 }
 
 describe('BrowserWebSocketTransport', () => {
+  it('derives the Via token from the URL scheme (wss -> WSS, ws -> WS)', () => {
+    const { socket, factory } = createTransport();
+    const wss = new BrowserWebSocketTransport('wss://sip.example.test/ws', factory);
+    const plain = new BrowserWebSocketTransport('ws://sip.example.test/ws', factory);
+    expect(wss.capabilities.token).toBe('WSS');
+    expect(plain.capabilities.token).toBe('WS');
+    expect(socket).toBeDefined();
+  });
+
   it('creates the socket on connect, requests sip, and waits for open', async () => {
     const { socket, calls, transport } = createTransport();
     const events: TransportEvent[] = [];
@@ -129,7 +138,7 @@ describe('BrowserWebSocketTransport', () => {
     ]);
     expect(socket.binaryType).toBe('arraybuffer');
     expect(settled).toBe(false);
-    expect(transport.capabilities).toEqual({ reliable: true, framing: 'message' });
+    expect(transport.capabilities).toEqual({ reliable: true, framing: 'message', token: 'WSS' });
     expect(Object.isFrozen(transport.capabilities)).toBe(true);
 
     socket.emitOpen('sip');

@@ -2,8 +2,16 @@ import type {
   Transport,
   TransportCapabilities,
   TransportEvent,
+  TransportToken,
 } from '../../src/transport/index.js';
 import { TransportError } from '../../src/errors.js';
+
+/** Default Via token from framing, so existing callers stay stable. */
+function tokenFor(framing: TransportCapabilities['framing']): TransportToken {
+  if (framing === 'message') return 'WS';
+  if (framing === 'stream') return 'TCP';
+  return 'UDP';
+}
 
 export class FakeTransport implements Transport {
   readonly capabilities: TransportCapabilities;
@@ -15,8 +23,13 @@ export class FakeTransport implements Transport {
   private disconnectedEmitted = false;
   private readonly listeners = new Set<(event: TransportEvent) => void>();
 
-  constructor(capabilities: TransportCapabilities) {
-    this.capabilities = Object.freeze({ ...capabilities });
+  constructor(
+    capabilities: Omit<TransportCapabilities, 'token'> & { readonly token?: TransportToken },
+  ) {
+    this.capabilities = Object.freeze({
+      token: tokenFor(capabilities.framing),
+      ...capabilities,
+    });
   }
 
   async connect(): Promise<void> {

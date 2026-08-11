@@ -114,7 +114,7 @@ describe('NodeTcpTransport', () => {
     socket.emit('data', stream.slice(17, 61));
     socket.emit('data', stream.slice(61));
 
-    expect(transport.capabilities).toEqual({ reliable: true, framing: 'stream' });
+    expect(transport.capabilities).toEqual({ reliable: true, framing: 'stream', token: 'TCP' });
     expect(Object.isFrozen(transport.capabilities)).toBe(true);
     expect(events.filter((event) => event.type === 'data')).toEqual([
       { type: 'data', data: firstMessage },

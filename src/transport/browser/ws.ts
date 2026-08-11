@@ -32,10 +32,9 @@ interface ConnectAttempt {
 interface DisconnectAttempt extends ConnectAttempt {}
 
 export class BrowserWebSocketTransport implements Transport {
-  readonly capabilities: TransportCapabilities = Object.freeze({
-    reliable: true,
-    framing: 'message',
-  });
+  readonly capabilities: TransportCapabilities;
+
+  private readonly token: 'WS' | 'WSS';
 
   private readonly listeners = new Set<(event: TransportEvent) => void>();
   private socket?: BrowserWebSocketLike;
@@ -93,7 +92,14 @@ export class BrowserWebSocketTransport implements Transport {
   constructor(
     private readonly url: string,
     private readonly factory: BrowserWebSocketFactory,
-  ) {}
+  ) {
+    this.token = /^wss:/i.test(url) ? 'WSS' : 'WS';
+    this.capabilities = Object.freeze({
+      reliable: true,
+      framing: 'message',
+      token: this.token,
+    });
+  }
 
   connect(): Promise<void> {
     if (this.connected) return Promise.resolve();

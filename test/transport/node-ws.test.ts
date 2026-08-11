@@ -85,6 +85,14 @@ async function connect(
 }
 
 describe('NodeWebSocketTransport', () => {
+  it('advertises an explicit Via token (WS by default, WSS on request)', () => {
+    const socket = new FakeNodeWebSocket();
+    const plain = new NodeWebSocketTransport(socket);
+    const wss = new NodeWebSocketTransport(socket, { token: 'WSS' });
+    expect(plain.capabilities.token).toBe('WS');
+    expect(wss.capabilities.token).toBe('WSS');
+  });
+
   it('waits for open, requires the sip protocol, and advertises message capabilities', async () => {
     const socket = new FakeNodeWebSocket();
     const transport = new NodeWebSocketTransport(socket);
@@ -99,7 +107,7 @@ describe('NodeWebSocketTransport', () => {
 
     expect(settled).toBe(false);
     expect(transport.isConnected()).toBe(false);
-    expect(transport.capabilities).toEqual({ reliable: true, framing: 'message' });
+    expect(transport.capabilities).toEqual({ reliable: true, framing: 'message', token: 'WS' });
     expect(Object.isFrozen(transport.capabilities)).toBe(true);
 
     socket.emitOpen('sip');

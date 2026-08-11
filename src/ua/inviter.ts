@@ -14,7 +14,7 @@
 import { Headers, makeRequest, makeResponse, bodyText } from '../messages/index.js';
 import type { SipRequestMessage, SipResponseMessage } from '../messages/message.js';
 import { SipError } from '../errors.js';
-import { makeBranch } from '../dialogs/header-values.js';
+import { makeBranch, makeTopVia, type ViaConfig } from '../dialogs/header-values.js';
 import { Dialog, type IdGenerator } from '../dialogs/dialog.js';
 import { clientKey, type TransactionLayer } from '../transactions/coordinator.js';
 import type { TransactionKey, TransactionLayerEvent, ServerTransaction } from '../transactions/types.js';
@@ -30,7 +30,10 @@ export interface InviterOptions {
   readonly to: string;
   readonly from: string;
   readonly contact: string;
+  /** Caller-supplied Via sent-by host:port (never inferred from a socket). */
   readonly viaAddress: string;
+  /** Via transport token from the connected transport's capabilities. */
+  readonly viaToken: string;
   readonly idGenerator: IdGenerator;
   readonly layer: TransactionLayer;
   readonly clock: Clock;
@@ -58,7 +61,7 @@ export class Inviter {
   private readonly to: string;
   private readonly from: string;
   private readonly contact: string;
-  private readonly viaAddress: string;
+  private readonly viaConfig: ViaConfig;
   private readonly idGenerator: IdGenerator;
   private readonly layer: TransactionLayer;
   private readonly controller: WorkerMediaController;
@@ -91,7 +94,7 @@ export class Inviter {
     this.to = options.to;
     this.from = options.from;
     this.contact = options.contact;
-    this.viaAddress = options.viaAddress;
+    this.viaConfig = { token: options.viaToken, sentBy: options.viaAddress };
     this.idGenerator = options.idGenerator;
     this.layer = options.layer;
     this.controller = options.controller;
@@ -194,7 +197,7 @@ export class Inviter {
   private buildInviteRequest(sdp: string): SipRequestMessage {
     const headers = new Headers();
     const branch = makeBranch(this.idGenerator.branch());
-    headers.set('Via', `SIP/2.0/UDP ${this.viaAddress};branch=${branch}`);
+    headers.set('Via', makeTopVia(this.viaConfig, branch));
     headers.set('Max-Forwards', '70');
     headers.set('From', `<${this.from}>;tag=${this.fromTag}`);
     headers.set('To', `<${this.to}>`);
@@ -311,6 +314,7 @@ export class Inviter {
       this.dialogSet = new DialogSet(
         this.currentRequest!,
         this.idGenerator,
+        this.viaConfig,
         this.layer.getTransport(),
         (dialog) => this.sendByeForDialog(dialog),
         (dialog) => this.onDialogCreated?.(dialog),

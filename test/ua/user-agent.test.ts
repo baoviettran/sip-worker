@@ -956,3 +956,20 @@ describe('UserAgent viaAddress', () => {
     expect(captureOutboundVia(transport)).toContain('192.0.2.1:5060');
   });
 });
+
+describe('UserAgent Via transport token', () => {
+  it.each([
+    ['UDP', 'SIP/2.0/UDP'],
+    ['TCP', 'SIP/2.0/TCP'],
+    ['WS', 'SIP/2.0/WS'],
+    ['WSS', 'SIP/2.0/WSS'],
+  ] as const)('reflects the %s transport token in the outbound INVITE Via', async (token, expectedPrefix) => {
+    const transport = new FakeTransport({ reliable: true, framing: 'stream', token });
+    const { ua } = setup({ transport });
+    await ua.connect();
+    const invite = ua.invite('sip:bob@example.com');
+    await confirmCall(transport);
+    await invite;
+    expect(captureOutboundVia(transport)).toMatch(new RegExp(`^${expectedPrefix}`));
+  });
+});

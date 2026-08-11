@@ -60,11 +60,14 @@ interface ConnectAttempt {
 
 interface DisconnectAttempt extends ConnectAttempt {}
 
+export interface NodeWebSocketTransportOptions {
+  /** Via transport token. Defaults to 'WS'; pass 'WSS' for a secure socket. */
+  readonly token?: 'WS' | 'WSS';
+}
+
 export class NodeWebSocketTransport implements Transport {
-  readonly capabilities: TransportCapabilities = Object.freeze({
-    reliable: true,
-    framing: 'message',
-  });
+  readonly capabilities: TransportCapabilities;
+  private readonly token: 'WS' | 'WSS';
 
   private readonly listeners = new Set<(event: TransportEvent) => void>();
   private connected = false;
@@ -116,7 +119,16 @@ export class NodeWebSocketTransport implements Transport {
     this.finishClose(webSocketCloseError('Node WebSocket', args[0], args[1]));
   };
 
-  constructor(private readonly socket: NodeWebSocketLike) {
+  constructor(
+    private readonly socket: NodeWebSocketLike,
+    options: NodeWebSocketTransportOptions = {},
+  ) {
+    this.token = options.token ?? 'WS';
+    this.capabilities = Object.freeze({
+      reliable: true,
+      framing: 'message',
+      token: this.token,
+    });
     socket.on('open', this.handleOpen);
     socket.on('message', this.handleMessage);
     socket.on('error', this.handleError);

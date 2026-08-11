@@ -1,4 +1,5 @@
 import { Dialog, type IdGenerator } from '../dialogs/dialog.js';
+import type { ViaConfig } from '../dialogs/header-values.js';
 import type { SipRequestMessage, SipResponseMessage } from '../messages/message.js';
 import { serializeMessage } from '../messages/serializer.js';
 import { bodyText } from '../messages/message.js';
@@ -61,6 +62,7 @@ export class DialogSet {
   constructor(
     private readonly request: SipRequestMessage,
     private readonly idGenerator: IdGenerator,
+    private readonly viaConfig: ViaConfig,
     private readonly transport: DialogSetTransport,
     private readonly sendByeFn: SendByeFn,
     private readonly onDialogCreated: (dialog: Dialog) => void = () => {},
@@ -107,7 +109,7 @@ export class DialogSet {
 
     // New dialog from this 2xx. Each fork has a distinct To tag, so generate
     // ACK bytes specific to this dialog (its To header carries this tag).
-    const dialog = Dialog.fromUac(this.request, response, this.idGenerator);
+    const dialog = Dialog.fromUac(this.request, response, this.idGenerator, this.viaConfig);
     const ack = dialog.createAck(response);
     const ackBytes = serializeMessage(ack);
     const record: DialogRecord = {

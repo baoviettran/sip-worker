@@ -136,6 +136,7 @@ function setup(): Harness {
     transaction: requestEvent.transaction,
     contact: CONTACT,
     viaAddress: '192.0.2.2:5060',
+    viaToken: 'TCP',
     idGenerator,
     layer,
     clock,

@@ -15,7 +15,7 @@
 import { Headers, makeRequest } from '../messages/index.js';
 import type { SipRequestMessage, SipResponseMessage } from '../messages/message.js';
 import { SipError } from '../errors.js';
-import { extractUri, makeBranch } from '../dialogs/header-values.js';
+import { extractUri, makeBranch, makeTopVia } from '../dialogs/header-values.js';
 import type { IdGenerator, AuthManager, AuthFailure } from '../auth/manager.js';
 import type { TransactionLayer } from '../transactions/coordinator.js';
 import type { TransactionLayerEvent } from '../transactions/types.js';
@@ -30,6 +30,10 @@ export interface RegistrarOptions {
   readonly credentials?: { readonly username: string; readonly password: string };
   /** Contact URI for the UA, e.g. `<sip:alice@192.0.2.1:5060>`. `'*'` unregisters. */
   readonly contact: string;
+  /** Caller-supplied Via sent-by host:port (never inferred from a socket). */
+  readonly viaAddress: string;
+  /** Via transport token from the connected transport's capabilities. */
+  readonly viaToken: string;
   readonly idGenerator: IdGenerator;
   readonly layer: TransactionLayer;
   readonly clock: Clock;
@@ -88,6 +92,8 @@ export class Registrar {
   private readonly registrarUri: string;
   private readonly aor: string;
   private readonly contact: string;
+  private readonly viaAddress: string;
+  private readonly viaToken: string;
   private readonly fromTag: string;
   private readonly authManager?: AuthManager;
   private readonly credentials?: { readonly username: string; readonly password: string };
@@ -115,6 +121,8 @@ export class Registrar {
     this.registrarUri = options.registrarUri;
     this.aor = options.aor;
     this.contact = options.contact;
+    this.viaAddress = options.viaAddress;
+    this.viaToken = options.viaToken;
     this.authManager = options.authManager;
     this.credentials = options.credentials;
     this.refreshAfter = (granted) => Math.max(1, Math.floor(granted * (options.refreshFraction ?? 0.5)));
@@ -208,7 +216,7 @@ export class Registrar {
   private nextRequest(expires: number | undefined, contact: string): SipRequestMessage {
     const headers = new Headers();
     const branch = makeBranch(`reg-${(this.branchCounter += 1)}`);
-    headers.set('Via', `SIP/2.0/UDP 192.0.2.1:5060;branch=${branch}`);
+    headers.set('Via', makeTopVia({ token: this.viaToken, sentBy: this.viaAddress }, branch));
     headers.set('Max-Forwards', '70');
     headers.set('From', `<${this.aor}>;tag=${this.fromTag}`);
     headers.set('To', `<${this.aor}>`);

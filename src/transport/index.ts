@@ -5,4 +5,5 @@ export type {
   Transport,
   TransportCapabilities,
   TransportEvent,
+  TransportToken,
 } from './transport.js';

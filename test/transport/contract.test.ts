@@ -20,7 +20,7 @@ describe('transport contract', () => {
 
     capabilities.reliable = false;
 
-    expect(transport.capabilities).toEqual({ reliable: true, framing: 'message' });
+    expect(transport.capabilities).toEqual({ reliable: true, framing: 'message', token: 'WS' });
     expect(Object.isFrozen(transport.capabilities)).toBe(true);
     expect(() => Object.assign(transport.capabilities, { reliable: false })).toThrow(TypeError);
   });

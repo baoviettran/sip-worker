@@ -1,8 +1,15 @@
 import type { TransportError } from '../errors.js';
 
+/**
+ * The SIP transport protocol a Via header must advertise (RFC 3261 18.1.1).
+ * `WS` is a plain WebSocket, `WSS` a secure one (RFC 7118).
+ */
+export type TransportToken = 'UDP' | 'TCP' | 'WS' | 'WSS';
+
 export interface TransportCapabilities {
   readonly reliable: boolean;
   readonly framing: 'datagram' | 'stream' | 'message';
+  readonly token: TransportToken;
 }
 
 export type TransportEvent =

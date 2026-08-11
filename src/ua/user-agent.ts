@@ -36,7 +36,7 @@ import type { LivenessStrategy } from '../reliability/index.js';
 import { OptionsLiveness } from '../reliability/index.js';
 import { Headers, makeRequest, makeResponse } from '../messages/index.js';
 import type { SipRequestMessage, SipResponseMessage } from '../messages/message.js';
-import { extractTag, makeBranch } from '../dialogs/header-values.js';
+import { extractTag, makeBranch, makeTopVia } from '../dialogs/header-values.js';
 import { requestDialogId } from '../dialogs/dialog.js';
 
 /** Default SIP OPTIONS probe cadence for the built-in browser-safe strategy. */
@@ -132,6 +132,11 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     return this.options.viaAddress ?? '192.0.2.1:5060';
   }
 
+  /** Via transport token from the connected transport's capabilities. */
+  private get viaToken(): string {
+    return this.transport.capabilities.token;
+  }
+
   /** Reject public work as soon as final shutdown begins, including re-entrant callbacks. */
   private assertOperational(): void {
     if (this.disconnected) {
@@ -199,6 +204,8 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       aor: this.options.aor,
       contact: this.options.contact,
       credentials: this.options.credentials,
+      viaAddress: this.viaAddress,
+      viaToken: this.viaToken,
       idGenerator: this.options.idGenerator,
       layer: this.layer,
       clock: this.clock,
@@ -288,6 +295,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       from: this.options.aor,
       contact: this.options.contact,
       viaAddress: this.viaAddress,
+      viaToken: this.viaToken,
       idGenerator: this.options.idGenerator,
       layer: this.layer,
       clock: this.clock,
@@ -411,7 +419,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     const optionsCallId = `ua-opt-${this.options.idGenerator.branch()}`;
     const requestFactory = (index: number) => {
       const headers = new Headers();
-      headers.set('Via', `SIP/2.0/UDP ${this.viaAddress};branch=${makeBranch(`opt-${index}`)}`);
+      headers.set('Via', makeTopVia({ token: this.viaToken, sentBy: this.viaAddress }, makeBranch(`opt-${index}`)));
       headers.set('Max-Forwards', '70');
       headers.set('From', `<${this.options.aor}>;tag=ua-opt`);
       headers.set('To', `<${this.options.registrarUri}>`);
@@ -521,6 +529,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       transaction,
       contact: this.options.contact,
       viaAddress: this.viaAddress,
+      viaToken: this.viaToken,
       idGenerator: this.options.idGenerator,
       layer: this.layer!,
       clock: this.clock,

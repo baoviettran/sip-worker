@@ -106,7 +106,7 @@ describe('NodeUdpTransport', () => {
     first[0] = 9;
     second[0] = 9;
 
-    expect(transport.capabilities).toEqual({ reliable: false, framing: 'datagram' });
+    expect(transport.capabilities).toEqual({ reliable: false, framing: 'datagram', token: 'UDP' });
     expect(Object.isFrozen(transport.capabilities)).toBe(true);
     expect(events.filter((event) => event.type === 'data')).toEqual([
       { type: 'data', data: new Uint8Array([1, 2, 3]) },

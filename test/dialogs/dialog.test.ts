@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { Dialog } from '../../src/dialogs/index.js';
 import type { IdGenerator } from '../../src/dialogs/index.js';
+import type { ViaConfig } from '../../src/dialogs/header-values.js';
 import { Headers, makeRequest, makeResponse, serializeMessage } from '../../src/messages/index.js';
 import type { SipRequestMessage, SipResponseMessage } from '../../src/messages/message.js';
+
+const VIA_CONFIG: ViaConfig = { token: 'UDP', sentBy: '192.0.2.1:5060' };
 
 function topBranch(request: SipRequestMessage): string | undefined {
   return request.headers.get('Via')?.match(/;branch=([^;]+)/)?.[1];
@@ -47,27 +50,27 @@ function requestWithCSeq(method: string, number: number): SipRequestMessage {
 
 describe('Dialog.fromUac', () => {
   it('reads the remote tag from To and the local tag from From', () => {
-    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator(), VIA_CONFIG);
     expect(dialog.remoteTag).toBe('bob77');
     expect(dialog.localTag).toBe('alice9');
   });
 
   it('reads the remote target from the Contact header', () => {
-    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator(), VIA_CONFIG);
     expect(dialog.remoteTarget).toBe('sip:bob@192.0.2.5:5060');
   });
 
   it('extracts the URI contact with a trailing URI parameter (delegates to extractUri)', () => {
     const response = make2xx();
     response.headers.set('Contact', '<sip:bob@192.0.2.5:5060>;expires=60');
-    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator(), VIA_CONFIG);
     expect(dialog.remoteTarget).toBe('sip:bob@192.0.2.5:5060');
   });
 
   it('excludes Contact parameters from a bare Contact URI', () => {
     const response = make2xx();
     response.headers.set('Contact', 'sip:bob@host;expires=60');
-    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator(), VIA_CONFIG);
     expect(dialog.remoteTarget).toBe('sip:bob@host');
   });
 
@@ -77,21 +80,21 @@ describe('Dialog.fromUac', () => {
   ])('trims whitespace before a bare Contact %s parameter', (_parameter, contact) => {
     const response = make2xx();
     response.headers.set('Contact', contact);
-    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator(), VIA_CONFIG);
     expect(dialog.remoteTarget).toBe('sip:bob@host');
   });
 
   it('retains URI parameters before a bare Contact header parameter', () => {
     const response = make2xx();
     response.headers.set('Contact', 'sip:bob@host;transport=tcp;expires=60');
-    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator(), VIA_CONFIG);
     expect(dialog.remoteTarget).toBe('sip:bob@host;transport=tcp');
   });
 
   it('retains bracketed URI parameters before Contact header parameters', () => {
     const response = make2xx();
     response.headers.set('Contact', '<sip:bob@host;transport=tcp>;expires=60');
-    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator(), VIA_CONFIG);
     expect(dialog.remoteTarget).toBe('sip:bob@host;transport=tcp');
   });
 
@@ -103,7 +106,7 @@ describe('Dialog.fromUac', () => {
     headers.set('Call-ID', 'abc123');
     headers.set('CSeq', '41 INVITE');
     const noContact = makeResponse(200, 'OK', headers);
-    const dialog = Dialog.fromUac(makeInvite(), noContact, fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), noContact, fakeIdGenerator(), VIA_CONFIG);
     expect(dialog.remoteTarget).toBe('sip:bob@example.com');
   });
 
@@ -112,12 +115,13 @@ describe('Dialog.fromUac', () => {
       makeInvite(),
       make2xx(['<sip:p1.example.com;lr>', '<sip:p2.example.com;lr>']),
       fakeIdGenerator(),
+      VIA_CONFIG,
     );
     expect(dialog.routeSet).toEqual(['sip:p2.example.com;lr', 'sip:p1.example.com;lr']);
   });
 
   it('keeps the call id and the numeric CSeq from the INVITE', () => {
-    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator(), VIA_CONFIG);
     expect(dialog.callId).toBe('abc123');
     expect(dialog.getLocalCSeq()).toBe(41);
   });
@@ -126,7 +130,7 @@ describe('Dialog.fromUac', () => {
 describe('dialog routing', () => {
 
   it('routes with header tags while ignoring quoted and URI tag decoys', () => {
-    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator(), VIA_CONFIG);
     const validHeaders = new Headers();
     validHeaders.set('From', '<sip:bob@example.com;tag=uri-remote>;TaG=bob77');
     validHeaders.set('To', '<sip:alice@example.com;tag=uri-local>;TAG=alice9');
@@ -145,7 +149,7 @@ describe('dialog routing', () => {
     // Repeated Record-Route fields [p1, p2] reverse to [p2, p1].
     const response = make2xx(['<sip:p1.example.com;lr>', '<sip:p2.example.com;lr>']);
     response.headers.set('Contact', 'sip:bob@192.0.2.5:5060');
-    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), response, fakeIdGenerator(), VIA_CONFIG);
     const bye = dialog.createRequest('BYE');
     expect(bye.uri).toBe('sip:bob@192.0.2.5:5060');
     expect(bye.headers.get('Route')).toBe('<sip:p2.example.com;lr>, <sip:p1.example.com;lr>');
@@ -158,6 +162,7 @@ describe('dialog routing', () => {
       makeInvite(),
       make2xx(['"Edge, One" <sip:p1.example.com;lr>, <sip:p2.example.com;lr>']),
       fakeIdGenerator(),
+      VIA_CONFIG,
     );
     const bye = dialog.createRequest('BYE');
 
@@ -173,6 +178,7 @@ describe('dialog routing', () => {
       makeInvite(),
       make2xx(['<sip:p2.example.com;lr>', '<sip:p1.example.com>']),
       fakeIdGenerator(),
+      VIA_CONFIG,
     );
     const bye = dialog.createRequest('BYE');
     expect(bye.uri).toBe('sip:p1.example.com');
@@ -185,7 +191,7 @@ describe('dialog routing', () => {
   });
 
   it('uses the remote target directly when the route set is empty', () => {
-    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator(), VIA_CONFIG);
     const bye = dialog.createRequest('BYE');
     expect(bye.uri).toBe('sip:bob@192.0.2.5:5060');
     expect(bye.headers.has('Route')).toBe(false);
@@ -194,21 +200,21 @@ describe('dialog routing', () => {
 
 describe('createAck', () => {
   it('uses the INVITE numeric CSeq with method ACK and does not mutate localCSeq', () => {
-    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator(), VIA_CONFIG);
     const ack = dialog.createAck(make2xx());
     expect(ack.headers.get('CSeq')).toBe('41 ACK');
     expect(dialog.getLocalCSeq()).toBe(41);
   });
 
   it('mints a fresh Via branch different from the INVITE branch', () => {
-    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator(), VIA_CONFIG);
     const ack = dialog.createAck(make2xx());
     expect(topBranch(ack)).toBe('z9hG4bK-ack-1');
     expect(topBranch(ack)).not.toBe(topBranch(makeInvite()));
   });
 
   it('carries From/To tags, Call-ID, and Max-Forwards', () => {
-    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator(), VIA_CONFIG);
     const ack = dialog.createAck(make2xx());
     expect(ack.headers.get('From')).toBe('<sip:alice@example.com>;tag=alice9');
     expect(ack.headers.get('To')).toBe('<sip:bob@example.com>;tag=bob77');
@@ -219,7 +225,7 @@ describe('createAck', () => {
 
 describe('createRequest (BYE)', () => {
   it('increments localCSeq exactly once before constructing the request', () => {
-    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator(), VIA_CONFIG);
     const bye = dialog.createRequest('BYE');
     expect(bye.headers.get('CSeq')).toBe('42 BYE');
     expect(dialog.getLocalCSeq()).toBe(42);
@@ -229,7 +235,7 @@ describe('createRequest (BYE)', () => {
   });
 
   it('carries dialog tags, Call-ID, and Max-Forwards', () => {
-    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator(), VIA_CONFIG);
     const bye = dialog.createRequest('BYE');
     expect(bye.headers.get('From')).toBe('<sip:alice@example.com>;tag=alice9');
     expect(bye.headers.get('To')).toBe('<sip:bob@example.com>;tag=bob77');
@@ -240,7 +246,7 @@ describe('createRequest (BYE)', () => {
 
 describe('receiveRequest', () => {
   it('accepts increasing remote CSeq values and rejects lower or equal ones', () => {
-    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator(), VIA_CONFIG);
     expect(dialog.receiveRequest(requestWithCSeq('BYE', 1))).toBe(true);
     expect(dialog.getRemoteCSeq()).toBe(1);
     expect(dialog.receiveRequest(requestWithCSeq('BYE', 1))).toBe(false);
@@ -250,7 +256,7 @@ describe('receiveRequest', () => {
   });
 
   it('does not reject ACK or CANCEL based on CSeq', () => {
-    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator());
+    const dialog = Dialog.fromUac(makeInvite(), make2xx(), fakeIdGenerator(), VIA_CONFIG);
     expect(dialog.receiveRequest(requestWithCSeq('ACK', 1))).toBe(true);
     expect(dialog.receiveRequest(requestWithCSeq('CANCEL', 1))).toBe(true);
     expect(dialog.getRemoteCSeq()).toBe(0);

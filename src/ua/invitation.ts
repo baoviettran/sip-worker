@@ -11,7 +11,7 @@
 import { Headers, bodyText, makeResponse } from '../messages/index.js';
 import type { SipRequestMessage, SipResponseMessage } from '../messages/message.js';
 import { SipError } from '../errors.js';
-import { extractTag } from '../dialogs/header-values.js';
+import { extractTag, makeBranch, makeTopVia, type ViaConfig } from '../dialogs/header-values.js';
 import { Dialog, type IdGenerator } from '../dialogs/dialog.js';
 import type { TransactionLayer } from '../transactions/coordinator.js';
 import type { ServerTransaction } from '../transactions/types.js';
@@ -24,7 +24,10 @@ export interface InvitationOptions {
   readonly request: SipRequestMessage;
   readonly transaction: ServerTransaction;
   readonly contact: string;
+  /** Caller-supplied Via sent-by host:port (never inferred from a socket). */
   readonly viaAddress: string;
+  /** Via transport token from the connected transport's capabilities. */
+  readonly viaToken: string;
   readonly idGenerator: IdGenerator;
   readonly layer: TransactionLayer;
   readonly clock: Clock;
@@ -39,7 +42,7 @@ export class Invitation {
   private readonly request: SipRequestMessage;
   private readonly transaction: ServerTransaction;
   private readonly contact: string;
-  private readonly viaAddress: string;
+  private readonly viaConfig: ViaConfig;
   private readonly idGenerator: IdGenerator;
   private readonly layer: TransactionLayer;
   private readonly clock: Clock;
@@ -68,7 +71,7 @@ export class Invitation {
     this.request = options.request;
     this.transaction = options.transaction;
     this.contact = options.contact;
-    this.viaAddress = options.viaAddress;
+    this.viaConfig = { token: options.viaToken, sentBy: options.viaAddress };
     this.idGenerator = options.idGenerator;
     this.layer = options.layer;
     this.clock = options.clock;
@@ -117,7 +120,7 @@ export class Invitation {
       this.acceptedResponse = response;
 
       // Create the dialog and claim acceptance before external I/O.
-      this.dialogValue = Dialog.fromUas(this.request, response, this.idGenerator);
+      this.dialogValue = Dialog.fromUas(this.request, response, this.idGenerator, this.viaConfig);
       this.state = 'accepted';
       this.onDialogCreated?.(this.dialogValue);
 
@@ -150,7 +153,7 @@ export class Invitation {
 
   private build200Ok(localSdp: string): SipResponseMessage {
     const headers = new Headers();
-    headers.set('Via', this.request.headers.get('Via') ?? `SIP/2.0/UDP ${this.viaAddress}`);
+    headers.set('Via', this.request.headers.get('Via') ?? makeTopVia(this.viaConfig, makeBranch(this.idGenerator.branch())));
     headers.set('From', this.request.headers.get('From') ?? '');
     headers.set('To', this.localToHeader(this.request));
     headers.set('Call-ID', this.request.headers.get('Call-ID') ?? '');
@@ -166,7 +169,7 @@ export class Invitation {
 
   private buildErrorResponse(statusCode: number, reason: string): SipResponseMessage {
     const headers = new Headers();
-    headers.set('Via', this.request.headers.get('Via') ?? `SIP/2.0/UDP ${this.viaAddress}`);
+    headers.set('Via', this.request.headers.get('Via') ?? makeTopVia(this.viaConfig, makeBranch(this.idGenerator.branch())));
     headers.set('From', this.request.headers.get('From') ?? '');
     headers.set('To', this.localToHeader(this.request));
     headers.set('Call-ID', this.request.headers.get('Call-ID') ?? '');

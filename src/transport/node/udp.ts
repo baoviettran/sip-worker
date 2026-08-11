@@ -40,6 +40,7 @@ export class NodeUdpTransport implements Transport {
   readonly capabilities: TransportCapabilities = Object.freeze({
     reliable: false,
     framing: 'datagram',
+    token: 'UDP',
   });
 
   private readonly listeners = new Set<(event: TransportEvent) => void>();

@@ -511,6 +511,23 @@ describe('TransactionLayer', () => {
     expect(clock.pending()).toBe(0);
   });
 
+  it('fans a terminal transportError to active client and server transactions on transport disconnect', () => {
+    const { transport, events, layer } = setup(false);
+    const client = layer.sendRequest(makeInvite('z9hG4bK-level-disc-client'));
+    layer.receive(makeInvite('z9hG4bK-level-disc-server'));
+    const error = new TransportError('link lost');
+    transport.emitDisconnected(error);
+
+    expect(client.state).toBe('Terminated');
+    const transportErrors = events.filter((event) => event.type === 'transportError');
+    expect(transportErrors).toHaveLength(2);
+    expect(transportErrors).toEqual([
+      expect.objectContaining({ type: 'transportError', error }),
+      expect.objectContaining({ type: 'transportError', error }),
+    ]);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'terminated' }));
+  });
+
   it('isolates a throwing subscriber from the rest', () => {
     const { clock, layer } = setup(true);
     const good: unknown[] = [];

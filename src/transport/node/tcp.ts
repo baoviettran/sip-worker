@@ -35,6 +35,7 @@ export class NodeTcpTransport implements Transport {
   readonly capabilities: TransportCapabilities = Object.freeze({
     reliable: true,
     framing: 'stream',
+    token: 'TCP',
   });
 
   private readonly decoder = new SipStreamDecoder();

@@ -145,6 +145,23 @@ export function makeBranch(branch: string): string {
   return `${MAGIC_COOKIE}-${branch}`;
 }
 
+/** The transport protocol and sent-by used to stamp a new top Via header. */
+export interface ViaConfig {
+  /** Via transport token, e.g. 'UDP' | 'TCP' | 'WS' | 'WSS' (RFC 3261 20.42). */
+  readonly token: string;
+  /** Caller-supplied sent-by host:port (never inferred from a remote socket). */
+  readonly sentBy: string;
+}
+
+/**
+ * Build a top Via header value from the transport token and a caller-supplied
+ * sent-by, with a fresh RFC 3261 magic-cookie branch. The sent-by is always
+ * explicit — never inferred from a remote socket endpoint.
+ */
+export function makeTopVia(config: ViaConfig, branch: string): string {
+  return `SIP/2.0/${config.token} ${config.sentBy};branch=${branch}`;
+}
+
 /** Split a comma-separated address list without splitting quoted display names or URIs. */
 function splitAddressList(value: string): string[] {
   const entries: string[] = [];

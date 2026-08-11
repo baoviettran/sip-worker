@@ -1,10 +1,13 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { DialogSet } from '../../src/ua/dialog-set.js';
 import { Dialog } from '../../src/dialogs/dialog.js';
+import type { ViaConfig } from '../../src/dialogs/header-values.js';
 import { Headers } from '../../src/messages/headers.js';
 import { makeRequest, makeResponse } from '../../src/messages/message.js';
 import { parseMessage } from '../../src/messages/parser.js';
 import { SipError } from '../../src/errors.js';
+
+const viaConfig: ViaConfig = { token: 'UDP', sentBy: '192.0.2.1:5060' };
 
 describe('DialogSet', () => {
   let sentBytes: Uint8Array[] = [];
@@ -26,6 +29,7 @@ describe('DialogSet', () => {
     dialogSet = new DialogSet(
       createInviteRequest(),
       idGenerator,
+      viaConfig,
       transport,
       async (dialog: Dialog) => {
         sendByeCalls.push(dialog);
@@ -149,6 +153,7 @@ describe('DialogSet', () => {
       const concurrentSet = new DialogSet(
         createInviteRequest(),
         idGenerator,
+        viaConfig,
         delayedTransport,
         async (dialog: Dialog) => {
           sendByeCalls.push(dialog);
