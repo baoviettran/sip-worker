@@ -9,6 +9,12 @@
  * therefore reach the wire resumed from the snapshot the supervisor retained and
  * advanced — the replacement never reuses a CSeq.
  *
+ * On a registration failure the runtime posts a `registrationFailed` message
+ * carrying a structured-clone-safe, redacted `SerializedError` (message, stack,
+ * and cause chain all sanitized of credentials) so the supervisor can reject the
+ * caller's promise with a typed `WorkerRegistrationError` carrying generation
+ * context.
+ *
  * Credentials live only in the recovery snapshot; the runtime never echoes them
  * in events or errors. Calls and dialogs end with the old generation and are the
  * application's to recreate.
@@ -17,12 +23,31 @@
 import type { UserAgent } from '../ua/user-agent.js';
 import type {
   RegistrationSnapshot,
+  SerializedError,
   SupervisorToWorker,
   WorkerRuntimePort,
 } from './worker-protocol.js';
 
 /** Redact credentials from any message surfaced by the runtime. */
 const REDACTED = '[redacted]';
+/** Patterns that name a credential-bearing field; matched case-insensitively. */
+const CREDENTIAL_PATTERN = /(password|credentials)[^,:;)}"]*/gi;
+
+/** Replace credential-bearing substrings with the redaction token. */
+function redactString(value: string): string {
+  return value.replace(CREDENTIAL_PATTERN, `$1: ${REDACTED}`);
+}
+
+/** True when a string carries a credential-bearing token. */
+function carriesCredentials(value: string | undefined): boolean {
+  return value !== undefined && value.length > 0 && /password|credentials/i.test(value);
+}
+
+/** Redact a string only when it carries credentials; pass through undefined. */
+function redactOptional(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return /password|credentials/i.test(value) ? redactString(value) : value;
+}
 
 export interface WorkerRuntimeOptions {
   /** The worker half of the boundary. */
@@ -100,10 +125,18 @@ export class WorkerRuntime {
   private async performRegister(snapshot: RegistrationSnapshot): Promise<void> {
     if (this.closed) return;
     const ua = this.buildUserAgent(snapshot);
+    const gen = this.generation;
     try {
       await ua.connect();
       await ua.register();
     } catch (error) {
+      // Surface the failure to the supervisor as a redacted, serialized error so
+      // the caller's promise rejects with typed generation context. The runtime
+      // itself re-throws the redacted error so ready() settles as well.
+      const serialized = this.serializeError(error);
+      if (!this.closed) {
+        this.port.postMessage({ type: 'registrationFailed', generation: gen, error: serialized });
+      }
       throw this.redact(error);
     }
     this.report(ua);
@@ -125,17 +158,68 @@ export class WorkerRuntime {
     this.port.postMessage({ type: 'registered', generation: gen });
   }
 
+  /**
+   * Serialize an error for the structured-clone boundary, redacting credentials
+   * from the message, stack, and cause chain. Non-Error values are stringified.
+   * The result is plain data only — no class instances survive the boundary.
+   */
+  private serializeError(error: unknown): SerializedError {
+    if (error instanceof Error) {
+      const cause = (error as Error & { cause?: unknown }).cause;
+      return {
+        name: error.name,
+        message: redactString(error.message),
+        stack: redactOptional(error.stack),
+        cause: cause !== undefined ? this.serializeError(cause) : undefined,
+      };
+    }
+    const message = redactString(String(error));
+    return { name: 'Error', message, stack: undefined, cause: undefined };
+  }
+
   /** Replace credentials with the redaction token in the surfaced error. */
   private redact(error: unknown): Error {
     if (error instanceof Error) {
-      if (/password|credentials/i.test(error.message)) {
-        const copy = new Error(error.message.replace(/(password|credentials)[^,:;)}"]*/gi, `$1: ${REDACTED}`));
+      if (carriesCredentials(error.message)) {
+        const copy = new Error(redactString(error.message));
         copy.name = error.name;
-        copy.stack = error.stack;
+        copy.stack = redactOptional(error.stack);
+        const cause = (error as Error & { cause?: unknown }).cause;
+        if (cause !== undefined) {
+          (copy as Error & { cause?: unknown }).cause = this.redact(cause);
+        }
+        return copy;
+      }
+      // Even when the top-level message is clean, the stack or cause may carry
+      // credentials; sanitize those too.
+      if (carriesCredentials(error.stack) || this.causeCarriesCredentials(error)) {
+        const copy = new Error(error.message);
+        copy.name = error.name;
+        copy.stack = redactOptional(error.stack);
+        const cause = (error as Error & { cause?: unknown }).cause;
+        if (cause !== undefined) {
+          (copy as Error & { cause?: unknown }).cause = this.redact(cause);
+        }
         return copy;
       }
       return error;
     }
-    return new Error(String(error));
+    return new Error(redactString(String(error)));
+  }
+
+  /** True when the error's cause chain (recursively) carries credentials. */
+  private causeCarriesCredentials(error: Error): boolean {
+    let current: unknown = (error as Error & { cause?: unknown }).cause;
+    while (current !== undefined && current !== null) {
+      if (current instanceof Error) {
+        if (carriesCredentials(current.message) || carriesCredentials(current.stack)) {
+          return true;
+        }
+        current = (current as Error & { cause?: unknown }).cause;
+      } else {
+        return carriesCredentials(String(current));
+      }
+    }
+    return false;
   }
 }

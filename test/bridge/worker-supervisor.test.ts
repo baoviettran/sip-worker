@@ -14,16 +14,23 @@ import { FakeTransport } from '../support/fake-transport.js';
 import { UserAgent } from '../../src/ua/user-agent.js';
 import type {
   RegistrationSnapshot,
+  SerializedError,
   SupervisorToWorker,
   WorkerRuntimePort,
   WorkerToSupervisor,
 } from '../../src/bridge/worker-protocol.js';
+import {
+  WorkerClosedError,
+  WorkerRegistrationError,
+  WorkerRestartError,
+} from '../../src/bridge/worker-protocol.js';
 import { WorkerSupervisor } from '../../src/bridge/worker-supervisor.js';
-import { WorkerRuntime } from '../../src/bridge/worker-runtime.js';
 import type {
   SupervisedWorker,
   WorkerFactory,
+  WorkerSupervisorOptions,
 } from '../../src/bridge/worker-supervisor.js';
+import { WorkerRuntime } from '../../src/bridge/worker-runtime.js';
 
 const HEARTBEAT_MS = 1000;
 const TIMEOUT_MS = 3000;
@@ -153,7 +160,10 @@ interface Harness {
   events: { type: string; generation: number }[];
 }
 
-function setup(over: Partial<RegistrationSnapshot> = {}): Harness {
+function setup(
+  over: Partial<RegistrationSnapshot> = {},
+  options: Partial<Pick<WorkerSupervisorOptions, 'maxRestarts' | 'restartWindowMs'>> = {},
+): Harness {
   const clock = new FakeClock();
   const factory = new FakeWorkerFactory();
   const supervisor = new WorkerSupervisor({
@@ -162,6 +172,7 @@ function setup(over: Partial<RegistrationSnapshot> = {}): Harness {
     registration: snapshot(over),
     heartbeatIntervalMs: HEARTBEAT_MS,
     heartbeatTimeoutMs: TIMEOUT_MS,
+    ...options,
   });
   const events: { type: string; generation: number }[] = [];
   supervisor.subscribe((event) => {
@@ -324,6 +335,363 @@ describe('WorkerSupervisor stop', () => {
   });
 });
 
+/** Drive a full death+restart cycle on the current generation. */
+function killAndAdvance(h: Harness): void {
+  h.clock.advance(HEARTBEAT_MS);
+  h.clock.advance(TIMEOUT_MS);
+}
+
+describe('WorkerSupervisor start-before-register', () => {
+  it('rejects register() called before start with a typed WorkerRestartError', async () => {
+    const clock = new FakeClock();
+    const factory = new FakeWorkerFactory();
+    const supervisor = new WorkerSupervisor({
+      factory,
+      clock,
+      registration: snapshot(),
+      heartbeatIntervalMs: HEARTBEAT_MS,
+      heartbeatTimeoutMs: TIMEOUT_MS,
+    });
+    // Not started: register must reject immediately with generation 0 context.
+    const result = supervisor.register();
+    await expect(result).rejects.toBeInstanceOf(WorkerRestartError);
+    await expect(result).rejects.toMatchObject({ generation: 0 });
+  });
+
+  it('rejects register() after stop() with a typed WorkerRestartError', async () => {
+    const h = setup();
+    boot(h);
+    h.supervisor.stop();
+    const result = h.supervisor.register();
+    await expect(result).rejects.toBeInstanceOf(WorkerRestartError);
+    // The stopped supervisor reports generation 0 (no live worker to register against).
+    await expect(result).rejects.toMatchObject({ generation: 0 });
+  });
+});
+
+describe('WorkerSupervisor registration failure', () => {
+  it('rejects the pending register() with WorkerRegistrationError carrying generation context', async () => {
+    const h = setup();
+    // Bootstrap delivered, but not yet `registered`: a registrationFailed arrives.
+    const gen = h.factory.current.bootstrap?.generation;
+    expect(gen).toBe(1);
+    const registration = h.supervisor.register();
+    await expectPending(registration);
+    const failure: SerializedError = {
+      name: 'Error',
+      message: 'authentication failed for [redacted]',
+      stack: 'Error: authentication failed for [redacted]',
+    };
+    h.factory.current.port.deliver({ type: 'registrationFailed', generation: gen!, error: failure });
+    await expect(registration).rejects.toBeInstanceOf(WorkerRegistrationError);
+    await expect(registration).rejects.toMatchObject({ generation: gen });
+    // The supervisor emits a registrationFailed event for observers.
+    const failed = h.events.find((e) => e.type === 'registrationFailed');
+    expect(failed?.generation).toBe(gen);
+  });
+
+  it('ignores a registrationFailed carrying a stale generation', async () => {
+    const h = setup();
+    boot(h);
+    // Move to generation 2 so generation 1 is stale.
+    killAndAdvance(h);
+    expect(h.supervisor.generation).toBe(2);
+    const preEvents = h.events.length;
+    h.factory.current.port.deliver({
+      type: 'registrationFailed',
+      generation: 1,
+      error: { name: 'Error', message: 'stale' },
+    });
+    expect(h.events.length).toBe(preEvents);
+  });
+});
+
+describe('WorkerSupervisor death after send (pre-send identity checkpoint)', () => {
+  it('checkpoints the sent REGISTER CSeq before the worker may die', () => {
+    const h = setup({ callId: 'reg-a', nextCSeq: 18 });
+    boot(h); // identity report advances snapshot to nextCSeq 19
+    // Worker dies after a send; the supervisor must already have checkpointed
+    // the advanced identity from the registrationIdentity report, so the
+    // replacement never reuses CSeq 18.
+    killAndAdvance(h);
+    const replaced = h.factory.worker(2).bootstrap;
+    expect(replaced).toBeDefined();
+    if (replaced?.type === 'bootstrap') {
+      expect(replaced.registration.callId).toBe('reg-a');
+      // Checkpointed at 19 — the replacement resumes from 19, not 18.
+      expect(replaced.registration.nextCSeq).toBe(19);
+    }
+  });
+
+  it('never lowers the persisted CSeq across replacement', () => {
+    const h = setup({ callId: 'reg-a', nextCSeq: 18 });
+    boot(h); // identity report advances snapshot to nextCSeq 19
+    // A late registrationIdentity from the dead generation reports a LOWER CSeq
+    // (5) than the checkpointed one (19); the supervisor must not lower the
+    // persisted value. Since the dead gen's port is detached at death, this
+    // message arrives via the stale-generation guard and is dropped — but even
+    // if it had arrived before death, the never-lower rule would reject it.
+    const deadGen = h.factory.worker(1).bootstrap?.generation;
+    h.factory.worker(1).port.deliver({
+      type: 'registrationIdentity',
+      generation: deadGen!,
+      callId: 'reg-a',
+      nextCSeq: 5,
+    });
+    killAndAdvance(h);
+    const replaced = h.factory.worker(2).bootstrap;
+    expect(replaced).toBeDefined();
+    if (replaced?.type === 'bootstrap') {
+      // The checkpointed value (19 from boot's identity report) wins; 5 is rejected.
+      expect(replaced.registration.nextCSeq).toBe(19);
+    }
+  });
+});
+
+describe('WorkerSupervisor concurrent waiters', () => {
+  it('resolves all concurrent register() waiters on a single registered', async () => {
+    const h = setup();
+    // Bootstrap delivered but no `registered` yet: park multiple waiters.
+    const gen = h.factory.current.bootstrap?.generation;
+    expect(gen).toBe(1);
+    const a = h.supervisor.register();
+    const b = h.supervisor.register();
+    const c = h.supervisor.register();
+    await expectPending(a);
+    await expectPending(b);
+    await expectPending(c);
+    // A single `registered` for the current generation resolves ALL of them.
+    h.factory.current.port.deliver({ type: 'registered', generation: gen! });
+    await expect(a).resolves.toBeUndefined();
+    await expect(b).resolves.toBeUndefined();
+    await expect(c).resolves.toBeUndefined();
+  });
+
+  it('rejects all concurrent waiters when the generation dies', async () => {
+    const h = setup();
+    boot(h);
+    const a = h.supervisor.register();
+    const b = h.supervisor.register();
+    await expectPending(a);
+    await expectPending(b);
+    killAndAdvance(h);
+    await expect(a).rejects.toBeInstanceOf(WorkerRestartError);
+    await expect(b).rejects.toBeInstanceOf(WorkerRestartError);
+  });
+});
+
+describe('WorkerSupervisor stop/start', () => {
+  it('restarts the heartbeat loop and spawns a fresh generation after stop then start', () => {
+    const h = setup();
+    boot(h);
+    const firstGen = h.supervisor.generation;
+    expect(firstGen).toBe(1);
+    h.supervisor.stop();
+    // After stop, no new pings fire.
+    h.clock.advance(HEARTBEAT_MS * 5);
+    const pingsAfterStop = h.factory.current.port.delivered.filter((m) => m.type === 'heartbeatPing').length;
+    expect(pingsAfterStop).toBe(0);
+    // Start again: a new generation is spawned and heartbeats resume.
+    h.supervisor.start();
+    expect(h.supervisor.generation).toBeGreaterThan(firstGen);
+    expect(h.factory.count).toBe(2);
+    h.clock.advance(HEARTBEAT_MS);
+    expect(h.factory.current.latestPing).toBeDefined();
+  });
+});
+
+describe('WorkerSupervisor observer throw isolation', () => {
+  it('keeps heartbeating and emitting events when one observer throws', () => {
+    const h = setup();
+    boot(h);
+    // A throwing observer must not break the supervisor's emit loop.
+    const thrower = (): void => {
+      throw new Error('observer blew up');
+    };
+    h.supervisor.subscribe(thrower);
+    // Suppress the expected console error noise from the throwing observer.
+    const consoleError = console.error;
+    console.error = () => undefined;
+    try {
+      killAndAdvance(h);
+    } finally {
+      console.error = consoleError;
+    }
+    // Both events were still emitted despite the thrower.
+    expect(h.events.map((e) => e.type)).toContain('workerDied');
+    expect(h.events.map((e) => e.type)).toContain('workerRestarted');
+    expect(h.supervisor.generation).toBe(2);
+    // The replacement keeps heartbeating.
+    h.clock.advance(HEARTBEAT_MS);
+    expect(h.factory.current.latestPing).toBeDefined();
+  });
+});
+
+describe('WorkerSupervisor stale generations', () => {
+  it('ignores registered from a dead generation and does not resolve new waiters', async () => {
+    const h = setup();
+    boot(h);
+    killAndAdvance(h);
+    expect(h.supervisor.generation).toBe(2);
+    // Park a waiter on the live generation 2.
+    const registration = h.supervisor.register();
+    await expectPending(registration);
+    // A late `registered` from the dead generation 1 must be ignored.
+    h.factory.worker(1).port.deliver({ type: 'registered', generation: 1 });
+    await expectPending(registration);
+    // The live generation's `registered` resolves the waiter.
+    h.factory.current.port.deliver({ type: 'registered', generation: 2 });
+    await expect(registration).resolves.toBeUndefined();
+  });
+
+  it('ignores heartbeatPong from a dead generation', () => {
+    const h = setup();
+    boot(h);
+    const deadGen = h.factory.worker(1).bootstrap?.generation;
+    killAndAdvance(h);
+    expect(h.supervisor.generation).toBe(2);
+    // Advance to arm a deadline on the live generation 2.
+    h.clock.advance(HEARTBEAT_MS);
+    const livePing = h.factory.current.latestPing;
+    expect(livePing).toBeDefined();
+    // A late pong from the dead generation must not clear the live deadline.
+    h.factory.worker(1).port.deliver({
+      type: 'heartbeatPong',
+      generation: deadGen!,
+      nonce: 'irrelevant',
+    });
+    // The live deadline is still armed: answering the live ping clears it.
+    h.factory.current.port.deliver({
+      type: 'heartbeatPong',
+      generation: livePing!.generation,
+      nonce: livePing!.nonce,
+    });
+    expect(h.events).not.toContainEqual({ type: 'workerDied', generation: 2 });
+  });
+});
+
+describe('WorkerSupervisor close', () => {
+  it('terminates the worker and rejects all waiters with WorkerClosedError', async () => {
+    const h = setup();
+    boot(h);
+    const a = h.supervisor.register();
+    const b = h.supervisor.register();
+    await expectPending(a);
+    await expectPending(b);
+    h.supervisor.close();
+    await expect(a).rejects.toBeInstanceOf(WorkerClosedError);
+    await expect(b).rejects.toBeInstanceOf(WorkerClosedError);
+    // The worker is terminated.
+    expect(h.factory.current.terminated).toBe(true);
+  });
+
+  it('stops scheduling heartbeats after close', () => {
+    const h = setup();
+    boot(h);
+    h.supervisor.close();
+    const beforePings = h.factory.workers
+      .flatMap((w) => w.port.delivered)
+      .filter((m) => m.type === 'heartbeatPing').length;
+    h.clock.advance(HEARTBEAT_MS * 10);
+    const afterPings = h.factory.workers
+      .flatMap((w) => w.port.delivered)
+      .filter((m) => m.type === 'heartbeatPing').length;
+    expect(afterPings).toBe(beforePings);
+  });
+
+  it('register() after close rejects with WorkerClosedError', async () => {
+    const h = setup();
+    boot(h);
+    h.supervisor.close();
+    const result = h.supervisor.register();
+    await expect(result).rejects.toBeInstanceOf(WorkerClosedError);
+  });
+
+  it('close is idempotent', () => {
+    const h = setup();
+    boot(h);
+    expect(() => {
+      h.supervisor.close();
+      h.supervisor.close();
+    }).not.toThrow();
+  });
+});
+
+describe('WorkerSupervisor bounded restart policy', () => {
+  it('emits restartLimitReached and stops restarting past the bound within the window', () => {
+    // maxRestarts=2 within a 10s window: generations 1, 2, 3 are spawned; the
+    // 3rd death (would-be gen 4) hits the bound and restart stops.
+    const h = setup({}, { maxRestarts: 2, restartWindowMs: 10000 });
+    boot(h);
+    // Death 1 -> gen 2 (restart 1)
+    killAndAdvance(h);
+    expect(h.supervisor.generation).toBe(2);
+    // Death 2 -> gen 3 (restart 2)
+    killAndAdvance(h);
+    expect(h.supervisor.generation).toBe(3);
+    // Death 3 -> bound hit: no gen 4, restartLimitReached emitted.
+    killAndAdvance(h);
+    expect(h.events.map((e) => e.type)).toContain('restartLimitReached');
+    expect(h.factory.count).toBe(3);
+    // The last worker is terminated and no new one spawned.
+    expect(h.factory.current.terminated).toBe(true);
+  });
+
+  it('rejects register() after the bound is hit, and stop/start resets the window', async () => {
+    const h = setup({}, { maxRestarts: 1, restartWindowMs: 10000 });
+    boot(h);
+    // Death 1 -> gen 2 (restart 1, the only allowed restart).
+    killAndAdvance(h);
+    expect(h.supervisor.generation).toBe(2);
+    // Death 2 -> bound hit.
+    killAndAdvance(h);
+    expect(h.events.map((e) => e.type)).toContain('restartLimitReached');
+    // The supervisor has no live worker (generation 0); register() rejects.
+    expect(h.supervisor.generation).toBe(0);
+    const result = h.supervisor.register();
+    // gen===0 path rejects with WorkerRestartError (supervisor not started
+    // shape), pinning the post-limit behavior.
+    await expect(result).rejects.toBeInstanceOf(WorkerRestartError);
+
+    // Operator intervention: stop() resets the restart window, start() spawns
+    // a fresh generation, and the supervisor can restart again.
+    h.supervisor.stop();
+    h.supervisor.start();
+    expect(h.supervisor.generation).toBeGreaterThan(0);
+    const freshGen = h.supervisor.generation;
+    boot(h);
+    expect(h.supervisor.generation).toBe(freshGen);
+    // After reset, a death spawns a replacement (restart allowed again).
+    killAndAdvance(h);
+    expect(h.supervisor.generation).toBe(freshGen + 1);
+    expect(h.events.map((e) => e.type)).toContain('workerRestarted');
+  });
+
+  it('resumes restarting after the sliding window evicts old restart timestamps', () => {
+    // maxRestarts=1 within a 5s window: one restart allowed per 5s.
+    const h = setup({}, { maxRestarts: 1, restartWindowMs: 5000 });
+    boot(h);
+    // Death 1 -> gen 2 (restart 1).
+    killAndAdvance(h);
+    expect(h.supervisor.generation).toBe(2);
+    // Death 2 -> bound hit (only 1 restart in the window).
+    killAndAdvance(h);
+    expect(h.events.map((e) => e.type).filter((t) => t === 'restartLimitReached').length).toBe(1);
+    // Advance the clock past the window so the old restart timestamp evicts.
+    // The supervisor is in the post-limit "started but no live worker" state;
+    // stop/start clears the window and spawns a fresh generation.
+    h.clock.advance(6000);
+    h.supervisor.stop();
+    h.supervisor.start();
+    const freshGen = h.supervisor.generation;
+    boot(h);
+    expect(h.supervisor.generation).toBe(freshGen);
+    // After the window evicted, a death spawns a replacement again.
+    killAndAdvance(h);
+    expect(h.supervisor.generation).toBe(freshGen + 1);
+  });
+});
+
 describe('WorkerRuntime credential redaction', () => {
   /** A worker-half port capturing what the runtime posts out. */
   class WorkerRuntimePortCapture implements WorkerRuntimePort {
@@ -392,8 +760,98 @@ describe('WorkerRuntime credential redaction', () => {
     expect(message).not.toContain('SuperSecret123');
     // The redaction token is present.
     expect(message).toContain('[redacted]');
-    // No outbound event echoes the credential (register failed before any report).
-    expect(port.sent).toHaveLength(0);
+    // No outbound event echoes the credential. The runtime emits a
+    // `registrationFailed` message on failure, which must also be redacted.
+    const serialized = port.sent.map((m) => JSON.stringify(m)).join('\n');
+    expect(serialized).not.toContain('SuperSecret123');
+    runtime.close();
+  });
+
+  it('emits registrationFailed with a serialized, redacted error and rejects ready()', async () => {
+    const port = new WorkerRuntimePortCapture();
+    const clock = new FakeClock();
+    const ua = new UserAgent({
+      transport: new FakeTransport({ reliable: true, framing: 'stream' }),
+      clock,
+      registrarUri: 'sip:r.example.com',
+      aor: 'sip:a@example.com',
+      contact: '<sip:a@192.0.2.1:5060>',
+      credentials: { username: 'alice', password: 'SuperSecret123' },
+      idGenerator: makeIdGen(),
+    });
+    const failingCause = new Error('inner: password SuperSecret123 leaked');
+    failingCause.stack = 'Error: inner: password SuperSecret123 leaked\n  at row';
+    const uaShim = new Proxy(ua, {
+      get(target, prop) {
+        if (prop === 'register') {
+          return () => Promise.reject(new Error('auth failed for password SuperSecret123', { cause: failingCause }));
+        }
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const runtime = new WorkerRuntime({
+      port,
+      buildUserAgent: () => uaShim as unknown as UserAgent,
+    });
+    port.push({ type: 'bootstrap', generation: 7, registration: snapshot() });
+    let error: unknown;
+    try {
+      await runtime.ready();
+    } catch (e) {
+      error = e;
+    }
+    // ready() rejects with the redacted top-level error.
+    expect(error instanceof Error).toBe(true);
+    expect((error as Error).message).toContain('[redacted]');
+    expect((error as Error).message).not.toContain('SuperSecret123');
+
+    // Exactly one registrationFailed message, carrying generation 7 + serialized cause.
+    const failures = port.sent.filter((m) => m.type === 'registrationFailed');
+    expect(failures).toHaveLength(1);
+    const failure = failures[0]!;
+    if (failure.type !== 'registrationFailed') throw new Error('expected registrationFailed');
+    expect(failure.generation).toBe(7);
+    expect(failure.error.message).not.toContain('SuperSecret123');
+    expect(failure.error.message).toContain('[redacted]');
+    // The stack is sanitized too.
+    expect(failure.error.stack).not.toContain('SuperSecret123');
+    // The cause chain is sanitized.
+    expect(failure.error.cause?.message).not.toContain('SuperSecret123');
+    expect(failure.error.cause?.stack).not.toContain('SuperSecret123');
+    // No `registered` or `registrationIdentity` was emitted (registration failed).
+    expect(port.sent.some((m) => m.type === 'registered')).toBe(false);
+    runtime.close();
+  });
+
+  it('does not emit registrationFailed when registration succeeds', async () => {
+    const port = new WorkerRuntimePortCapture();
+    const clock = new FakeClock();
+    const transport = new FakeTransport({ reliable: true, framing: 'stream' });
+    const ua = new UserAgent({
+      transport,
+      clock,
+      registrarUri: 'sip:r.example.com',
+      aor: 'sip:a@example.com',
+      contact: '<sip:a@192.0.2.1:5060>',
+      credentials: { username: 'alice', password: 'pw' },
+      idGenerator: makeIdGen(),
+    });
+    // Wire a mock registrar that grants 200 OK synchronously.
+    const { MockRegistrar } = await import('../support/mock-registrar.js');
+    const server = new MockRegistrar({ transport });
+    server.start();
+    const runtime = new WorkerRuntime({
+      port,
+      buildUserAgent: () => ua,
+    });
+    port.push({ type: 'bootstrap', generation: 1, registration: snapshot() });
+    await runtime.ready();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(port.sent.some((m) => m.type === 'registrationFailed')).toBe(false);
+    expect(port.sent.some((m) => m.type === 'registered')).toBe(true);
+    server.stop();
     runtime.close();
   });
 });

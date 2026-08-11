@@ -23,6 +23,7 @@ import type {
   WorkerToSupervisor,
   WorkerRuntimePort,
 } from '../../src/bridge/worker-protocol.js';
+import { WorkerRegistrationError } from '../../src/bridge/worker-protocol.js';
 import { WorkerSupervisor } from '../../src/bridge/worker-supervisor.js';
 import type { SupervisedWorker, WorkerFactory } from '../../src/bridge/worker-supervisor.js';
 import { WorkerRuntime } from '../../src/bridge/worker-runtime.js';
@@ -200,5 +201,61 @@ describe('worker recovery (integration)', () => {
     expect(beat2.calls).toBeGreaterThan(0);
     expect(beat2.latestCSeq).toBe(19);
     expect(beat2.callIds[0]).toBe('reg-a');
+  });
+
+  it('rejects the caller promise with WorkerRegistrationError when registration fails', async () => {
+    const clock = new FakeClock();
+
+    // A beat whose registrar never responds, so the REGISTER exchange times out
+    // and the runtime emits registrationFailed end-to-end.
+    class FailingBeat extends FakeWorkerBeat {
+      constructor() {
+        super(clock);
+        // Stop the mock registrar from granting: silence it.
+        this.server.stop();
+        this.server.setResponding(false);
+        this.server.start();
+      }
+    }
+
+    const beats: FailingBeat[] = [];
+    const factory: WorkerFactory = {
+      spawn: () => {
+        const beat = new FailingBeat();
+        beats.push(beat);
+        return { port: beat.port, terminate: () => beat.terminate() };
+      },
+    };
+
+    const supervisor = new WorkerSupervisor({
+      factory,
+      clock,
+      registration: snapshot,
+      heartbeatIntervalMs: HEARTBEAT_MS,
+      heartbeatTimeoutMs: TIMEOUT_MS,
+    });
+    const events: string[] = [];
+    supervisor.subscribe((e) => events.push(e.type));
+
+    supervisor.start();
+    // Park a waiter on generation 1 before the registration settles.
+    const registration = supervisor.register();
+    // Drive the virtual clock far enough for the registrar's transaction timers
+    // to fire the REGISTER timeout. Non-INVITE Timer F is 64*T1 = 32s; advance
+    // past that horizon so the transaction layer fails the REGISTER exchange.
+    // The runtime catches the failure and emits registrationFailed end-to-end.
+    for (let i = 0; i < 80; i += 1) {
+      clock.advance(500);
+      // Yield microtasks between ticks so async settle progresses.
+      await Promise.resolve();
+    }
+    // The registrationFailed event reached the supervisor's observers.
+    expect(events).toContain('registrationFailed');
+    // The caller's promise rejected with a typed WorkerRegistrationError.
+    await expect(registration).rejects.toBeInstanceOf(WorkerRegistrationError);
+    const failure = await registration.catch((e) => e);
+    expect(failure.generation).toBe(1);
+    // The beat's runtime also rejected ready().
+    await expect(beats[0]!.runtime.ready()).rejects.toBeInstanceOf(Error);
   });
 });
