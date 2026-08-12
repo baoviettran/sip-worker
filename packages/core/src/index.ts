@@ -71,6 +71,7 @@ export type {
 } from './ua/index.js';
 export {
   AuthManager,
+  computeDigest,
 } from './auth/index.js';
 export type {
   AuthContext,

@@ -127,6 +127,11 @@ export interface Clock {
     setTimeout(callback: () => void, delayMs: number): number;
 }
 
+// Warning: (ae-missing-release-tag) "computeDigest" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export function computeDigest(params: DigestParams): string;
+
 // Warning: (ae-missing-release-tag) "DerivedTimers" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public (undocumented)
