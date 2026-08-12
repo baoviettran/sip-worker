@@ -144,6 +144,21 @@ describe('WorkerMediaController serialization', () => {
     await expect(offer).rejects.toThrow('no codecs');
   });
 
+  it('preserves the thrown cause when postMessage fails on send', async () => {
+    const throwing = new Error('port blew up');
+    const port = {
+      postMessage: (): void => {
+        throw throwing;
+      },
+      subscribe: (): (() => void) => () => undefined,
+    };
+    const controller = new WorkerMediaController(port);
+    const offer = controller.createOffer('session-1');
+    await expect(offer).rejects.toMatchObject({ code: 'MEDIA_UNAVAILABLE' });
+    await expect(offer).rejects.toMatchObject({ message: 'port blew up' });
+    await expect(offer).rejects.toHaveProperty('cause', throwing);
+  });
+
   it('ignores replies for unknown requestIds', async () => {
     const { controller, port } = makeBridge();
     const offer = controller.createOffer('session-1');

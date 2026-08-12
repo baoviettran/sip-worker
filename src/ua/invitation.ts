@@ -386,7 +386,8 @@ export class Invitation {
     const deferred = this.takeAnswerDeferred();
     if (deferred !== undefined) {
       deferred.reject(new SipError(0, 'BYE received before ACK'));
-    }    this.session.transition('terminated');
+    }
+    this.session.transition('terminated');
   }
 
   private takeAnswerDeferred(): { resolve: () => void; reject: (reason: unknown) => void } | undefined {

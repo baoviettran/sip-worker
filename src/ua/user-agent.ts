@@ -236,7 +236,8 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     }
     const previousState = this.registerState;
     try {
-      await this.registrar.register();      if (this.registerState !== previousState) {
+      await this.registrar.register();
+      if (this.registerState !== previousState) {
         this.emit('stateChanged', {
           type: 'stateChanged',
           state: this.registerState,

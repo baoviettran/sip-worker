@@ -154,7 +154,8 @@ export class WorkerMediaController {
         this.port.postMessage(command);
       } catch (error) {
         this.disposePending(command.requestId);
-        reject(new SipError(0, error instanceof Error ? error.message : String(error), 'MEDIA_UNAVAILABLE'));
+        const cause = error instanceof Error ? error : new Error(String(error));
+        reject(new SipError(0, cause.message, 'MEDIA_UNAVAILABLE', { cause }));
       }
     });
   }
