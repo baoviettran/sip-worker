@@ -1,63 +1,13 @@
-import {
-  NodeTcpTransport,
-  type StreamSocketLike,
-} from '../../src/transport/tcp.js';
+import { NodeTcpTransport } from '../../src/transport/tcp.js';
 import type { TransportContractHarness } from '../../../../test/compatibility/transport-contract.js';
+import { FakeStreamSocket } from './fake-stream-socket.js';
 
-type StreamEvent = 'data' | 'error' | 'close';
-
-class FakeStreamSocket implements StreamSocketLike {
-  readonly writes: Uint8Array[] = [];
-  private readonly listeners = new Map<StreamEvent, Set<(...args: unknown[]) => void>>();
-  private connectCallback?: () => void;
-
-  connect(_port: number, _host: string, callback: () => void): void {
-    this.connectCallback = callback;
-  }
-
-  write(data: Uint8Array, callback: (error?: Error) => void): void {
-    this.writes.push(data);
-    callback();
-  }
-
-  end(_callback: () => void): void {
-    // Half-close: the transport settles only once the socket emits `close`.
-  }
-
-  on(event: StreamEvent, listener: (...args: unknown[]) => void): void {
-    let set = this.listeners.get(event);
-    if (set === undefined) {
-      set = new Set();
-      this.listeners.set(event, set);
-    }
-    set.add(listener);
-  }
-
-  off(event: StreamEvent, listener: (...args: unknown[]) => void): void {
-    this.listeners.get(event)?.delete(listener);
-  }
-
-  private emit(event: StreamEvent, ...args: unknown[]): void {
-    for (const listener of [...(this.listeners.get(event) ?? [])]) listener(...args);
-  }
-
-  completeConnect(): void {
-    this.connectCallback?.();
-  }
-
-  emitData(data: Uint8Array): void {
-    this.emit('data', data);
-  }
-
-  emitError(error: Error): void {
-    this.emit('error', error);
-  }
-
-  emitClose(): void {
-    this.emit('close');
-  }
-}
-
+/**
+ * Wraps the shared FakeStreamSocket (also used by node-tcp.test.ts) and exposes
+ * its lifecycle controls through the five-member TransportContractHarness.
+ * `open()` fires the socket's real connect callback; `remoteClose()` drives the
+ * shared fake's `error`/`close` events.
+ */
 export function createNodeTcpTransportHarness(): TransportContractHarness {
   const socket = new FakeStreamSocket();
   const transport = new NodeTcpTransport(socket, {
@@ -72,11 +22,11 @@ export function createNodeTcpTransportHarness(): TransportContractHarness {
       socket.completeConnect();
     },
     deliver(data: Uint8Array): void {
-      socket.emitData(data);
+      socket.emit('data', data);
     },
     remoteClose(error?: Error): void {
-      if (error !== undefined) socket.emitError(error);
-      socket.emitClose();
+      if (error !== undefined) socket.emit('error', error);
+      socket.emit('close');
     },
   };
 }

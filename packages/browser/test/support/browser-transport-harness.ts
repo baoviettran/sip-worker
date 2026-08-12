@@ -1,65 +1,14 @@
 import {
   BrowserWebSocketTransport,
   type BrowserWebSocketFactory,
-  type BrowserWebSocketLike,
 } from '../../src/transport/ws.js';
 import type { TransportContractHarness } from '../../../../test/compatibility/transport-contract.js';
+import { FakeBrowserWebSocket } from './fake-browser-web-socket.js';
 
-type BrowserWebSocketEvent = 'open' | 'message' | 'error' | 'close';
-
-class FakeBrowserWebSocket implements BrowserWebSocketLike {
-  readyState = 0;
-  protocol = '';
-  binaryType = 'blob';
-  readonly sent: Uint8Array[] = [];
-  private readonly listeners = new Map<BrowserWebSocketEvent, Set<(event: Event) => void>>();
-
-  addEventListener(type: string, listener: (event: Event) => void): void {
-    const event = type as BrowserWebSocketEvent;
-    let set = this.listeners.get(event);
-    if (set === undefined) {
-      set = new Set();
-      this.listeners.set(event, set);
-    }
-    set.add(listener);
-  }
-
-  removeEventListener(type: string, listener: (event: Event) => void): void {
-    this.listeners.get(type as BrowserWebSocketEvent)?.delete(listener);
-  }
-
-  send(data: Uint8Array): void {
-    this.sent.push(data);
-  }
-
-  close(): void {
-    this.readyState = 3;
-  }
-
-  private emit(type: BrowserWebSocketEvent, event: object): void {
-    for (const listener of [...(this.listeners.get(type) ?? [])]) listener(event as Event);
-  }
-
-  emitOpen(): void {
-    this.protocol = 'sip';
-    this.readyState = 1;
-    this.emit('open', {});
-  }
-
-  emitMessage(data: unknown): void {
-    this.emit('message', { data });
-  }
-
-  emitClose(code = 1005): void {
-    this.readyState = 3;
-    this.emit('close', { code, reason: '' });
-  }
-
-  emitError(error: Error): void {
-    this.emit('error', { error });
-  }
-}
-
+/**
+ * Wraps the shared FakeBrowserWebSocket (also used by browser-ws.test.ts) and
+ * exposes its lifecycle controls through the five-member TransportContractHarness.
+ */
 export function createBrowserTransportHarness(): TransportContractHarness {
   const socket = new FakeBrowserWebSocket();
   const factory: BrowserWebSocketFactory = () => socket;

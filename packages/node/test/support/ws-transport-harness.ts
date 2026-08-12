@@ -1,63 +1,11 @@
-import {
-  NodeWebSocketTransport,
-  type NodeWebSocketLike,
-} from '../../src/transport/ws.js';
+import { NodeWebSocketTransport } from '../../src/transport/ws.js';
 import type { TransportContractHarness } from '../../../../test/compatibility/transport-contract.js';
+import { FakeNodeWebSocket } from './fake-node-web-socket.js';
 
-type NodeWebSocketEvent = 'open' | 'message' | 'error' | 'close';
-
-class FakeNodeWebSocket implements NodeWebSocketLike {
-  readyState = 0;
-  protocol = '';
-  readonly sent: Uint8Array[] = [];
-  private readonly listeners = new Map<NodeWebSocketEvent, Set<(...args: unknown[]) => void>>();
-
-  on(event: NodeWebSocketEvent, listener: (...args: unknown[]) => void): void {
-    let set = this.listeners.get(event);
-    if (set === undefined) {
-      set = new Set();
-      this.listeners.set(event, set);
-    }
-    set.add(listener);
-  }
-
-  off(event: NodeWebSocketEvent, listener: (...args: unknown[]) => void): void {
-    this.listeners.get(event)?.delete(listener);
-  }
-
-  send(data: Uint8Array, callback: (error?: Error) => void): void {
-    this.sent.push(data);
-    callback();
-  }
-
-  close(): void {
-    this.readyState = 3;
-  }
-
-  private emit(event: NodeWebSocketEvent, ...args: unknown[]): void {
-    for (const listener of [...(this.listeners.get(event) ?? [])]) listener(...args);
-  }
-
-  emitOpen(): void {
-    this.protocol = 'sip';
-    this.readyState = 1;
-    this.emit('open');
-  }
-
-  emitMessage(data: unknown): void {
-    this.emit('message', data);
-  }
-
-  emitClose(code = 1005): void {
-    this.readyState = 3;
-    this.emit('close', code, new Uint8Array());
-  }
-
-  emitError(error: Error): void {
-    this.emit('error', error);
-  }
-}
-
+/**
+ * Wraps the shared FakeNodeWebSocket (also used by node-ws.test.ts) and exposes
+ * its lifecycle controls through the five-member TransportContractHarness.
+ */
 export function createNodeWebSocketTransportHarness(): TransportContractHarness {
   const socket = new FakeNodeWebSocket();
   const transport = new NodeWebSocketTransport(socket);
