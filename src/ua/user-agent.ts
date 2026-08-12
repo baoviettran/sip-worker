@@ -576,7 +576,10 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
     }
     const mediaController = this.options.mediaController;
     if (mediaController === undefined) {
-      console.warn('Media controller not configured, rejecting incoming call');
+      this.layer?.sendResponse(
+        transaction.key,
+        this.requestResponse(request, 488, 'Not Acceptable Here'),
+      );
       return;
     }
 

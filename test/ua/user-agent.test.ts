@@ -4,7 +4,7 @@ import { FakeTransport } from '../support/fake-transport.js';
 import { UserAgent } from '../../src/ua/user-agent.js';
 import type { LivenessStrategy } from '../../src/reliability/index.js';
 import { parseMessage } from '../../src/messages/parser.js';
-import type { SipRequestMessage } from '../../src/messages/message.js';
+import type { SipRequestMessage, SipResponseMessage } from '../../src/messages/message.js';
 import { Headers, makeRequest, makeResponse, serializeMessage } from '../../src/messages/index.js';
 import { WorkerMediaController } from '../../src/media/worker-controller.js';
 import { STUB_SDP } from '../../src/media/index.js';
@@ -120,13 +120,13 @@ class FakeMediaPort {
 
 function setup(options: {
   liveness?: LivenessStrategy; intervalMs?: number; viaAddress?: string; transport?: FakeTransport;
-  credentials?: boolean;
+  credentials?: boolean; media?: boolean;
 } = {}) {
   const clock = new FakeClock();
   const transport = options.transport ?? new FakeTransport({ reliable: true, framing: 'stream' });
   const idGenerator = makeIdGenerator();
   const media = new FakeMediaPort();
-  const mediaController = new WorkerMediaController(media);
+  const mediaController = options.media === false ? undefined : new WorkerMediaController(media);
   const ua = new UserAgent({
     transport,
     clock,
@@ -185,13 +185,8 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-/** Deliver an initial INVITE and return the public Invitation emitted by the UA. */
-function receiveIncomingCall(ua: UserAgent, transport: FakeTransport): Invitation {
-  let invitation: Invitation | undefined;
-  ua.once('incomingCall', (event: { type: 'incomingCall'; invitation: Invitation }) => {
-    invitation = event.invitation;
-  });
-
+/** Build an initial INVITE from a remote peer (the UAC of an incoming call). */
+function makeIncomingInvite(): SipRequestMessage {
   const headers = new Headers();
   headers.set('Via', 'SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-incoming');
   headers.set('Max-Forwards', '70');
@@ -201,15 +196,37 @@ function receiveIncomingCall(ua: UserAgent, transport: FakeTransport): Invitatio
   headers.set('CSeq', '1 INVITE');
   headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
   headers.set('Content-Type', 'application/sdp');
-  transport.emitData(serializeMessage(makeRequest(
+  return makeRequest(
     'INVITE',
     'sip:alice@example.com',
     headers,
     new TextEncoder().encode(STUB_SDP),
-  )));
+  );
+}
+
+/** Deliver an initial INVITE and return the public Invitation emitted by the UA. */
+function receiveIncomingCall(ua: UserAgent, transport: FakeTransport): Invitation {
+  let invitation: Invitation | undefined;
+  ua.once('incomingCall', (event: { type: 'incomingCall'; invitation: Invitation }) => {
+    invitation = event.invitation;
+  });
+
+  transport.emitData(serializeMessage(makeIncomingInvite()));
 
   if (invitation === undefined) throw new Error('UA did not emit an incoming invitation');
   return invitation;
+}
+
+/** The last response the UA sent on the transport, parsed. */
+function lastResponse(transport: FakeTransport): SipResponseMessage {
+  const responses = transport.sent
+    .map((bytes) => parseMessage(bytes))
+    .filter((message) => message.ok && message.value.kind === 'response');
+  const last = responses.at(-1);
+  if (last === undefined || !last.ok || last.value.kind !== 'response') {
+    throw new Error('no outbound response');
+  }
+  return last.value;
 }
 
 function sentResponses(transport: FakeTransport, statusCode: number): number {
@@ -1079,6 +1096,22 @@ describe('UserAgent truthful event surface', () => {
     expect(incomingEvents[0]!.invitation).toBeDefined();
     expect(incomingEvents[0]!.invitation).not.toBe(incomingEvents[0]); // raw object vs shaped event
 
+    await ua.disconnect();
+  });
+
+  it('answers an incoming INVITE with 488 when media is unavailable', async () => {
+    const { ua, transport } = setup({ media: false });
+    const incoming: unknown[] = [];
+    ua.on('incomingCall', (event) => incoming.push(event));
+    await ua.connect();
+
+    transport.emitData(serializeMessage(makeIncomingInvite()));
+    await flush();
+
+    const response = lastResponse(transport);
+    expect(response.statusCode).toBe(488);
+    expect(response.reasonPhrase).toBe('Not Acceptable Here');
+    expect(incoming).toHaveLength(0);
     await ua.disconnect();
   });
 });
