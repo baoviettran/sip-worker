@@ -27,7 +27,7 @@ import type { RegistrarOptions } from './registrar.js';
 import type { RegistrationIdentity, RegisterState } from './registration-types.js';
 import { AuthManager, type IdGenerator } from '../auth/manager.js';
 import { TypedEventEmitter } from './events.js';
-import type { RegistrationEventEmitter } from './events.js';
+import type { UserAgentEventEmitter, UserAgentEventMap } from './events.js';
 import { Inviter } from './inviter.js';
 import type { SessionEvent } from './session.js';
 import { Invitation } from './invitation.js';
@@ -79,7 +79,7 @@ export interface UserAgentOptions {
   readonly initialIdentity?: RegistrationIdentity;
 }
 
-export class UserAgent extends TypedEventEmitter implements RegistrationEventEmitter {
+export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements UserAgentEventEmitter {
   private readonly transport: Transport;
   private readonly clock: Clock;
   private readonly options: UserAgentOptions;
@@ -269,8 +269,8 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     try {
       await this.registrar.register();
       if (this.registerState !== previousState) {
-        this.emit('stateChanged', {
-          type: 'stateChanged',
+        this.emit('registrationStateChanged', {
+          type: 'registrationStateChanged',
           state: this.registerState,
           identity: this.identity!,
         });
@@ -295,8 +295,8 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     try {
       await this.registrar.unregister();
       if (this.registerState !== previousState) {
-        this.emit('stateChanged', {
-          type: 'stateChanged',
+        this.emit('registrationStateChanged', {
+          type: 'registrationStateChanged',
           state: this.registerState,
           identity: this.identity!,
         });
@@ -348,8 +348,8 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
 
     // Listen to session state changes
     const sessionListener = (event: SessionEvent): void => {
-      this.emit('stateChanged', {
-        type: 'stateChanged',
+      this.emit('callStateChanged', {
+        type: 'callStateChanged',
         state: event.state,
         identity: this.identity!,
       });
@@ -601,8 +601,8 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
 
     // Listen to session state changes
     const sessionListener = (event: SessionEvent): void => {
-      this.emit('stateChanged', {
-        type: 'stateChanged',
+      this.emit('callStateChanged', {
+        type: 'callStateChanged',
         state: event.state,
         identity: this.identity!,
       });
@@ -623,6 +623,6 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     invitation.session.on(sessionListener);
     this.ownerSessionUnsubscribers.set(invitation, () => invitation.session.off(sessionListener));
 
-    this.emit('incomingCall', invitation);
+    this.emit('incomingCall', { type: 'incomingCall', invitation });
   }
 }

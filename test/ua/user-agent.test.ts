@@ -188,8 +188,8 @@ function flush(): Promise<void> {
 /** Deliver an initial INVITE and return the public Invitation emitted by the UA. */
 function receiveIncomingCall(ua: UserAgent, transport: FakeTransport): Invitation {
   let invitation: Invitation | undefined;
-  ua.once('incomingCall', (incoming: Invitation) => {
-    invitation = incoming;
+  ua.once('incomingCall', (event: { type: 'incomingCall'; invitation: Invitation }) => {
+    invitation = event.invitation;
   });
 
   const headers = new Headers();
@@ -589,7 +589,7 @@ describe('UserAgent shutdown settlement', () => {
     await invite;
 
     let disconnect: Promise<void> | undefined;
-    ua.on('stateChanged', (event: { state: string }) => {
+    ua.on('callStateChanged', (event: { state: string }) => {
       if (event.state === 'terminating') disconnect = ua.disconnect();
     });
 
@@ -612,7 +612,7 @@ describe('UserAgent shutdown settlement', () => {
     await invite;
     clock.advance(32000); // Release the accepted INVITE transaction's Timer M.
 
-    ua.on('stateChanged', (event: { state: string }) => {
+    ua.on('callStateChanged', (event: { state: string }) => {
       if (event.state === 'terminating') {
         transport.emitData(serializeMessage(createRemoteBye(transport)));
       }
@@ -636,7 +636,7 @@ describe('UserAgent shutdown settlement', () => {
     await ua.connect();
 
     let disconnect: Promise<void> | undefined;
-    ua.on('stateChanged', (event: { state: string }) => {
+    ua.on('callStateChanged', (event: { state: string }) => {
       if (event.state === 'inviting') disconnect = ua.disconnect();
     });
 
@@ -660,7 +660,7 @@ describe('UserAgent shutdown settlement', () => {
     await flush();
 
     let spawned: Promise<void> | undefined;
-    ua.on('stateChanged', (event: { state: string }) => {
+    ua.on('callStateChanged', (event: { state: string }) => {
       if (event.state === 'failed' && spawned === undefined) {
         spawned = ua.invite('sip:carol@example.com');
       }
@@ -678,7 +678,7 @@ describe('UserAgent shutdown settlement', () => {
     const { ua, transport } = setup();
     await ua.connect();
     let disconnect: Promise<void> | undefined;
-    ua.on('stateChanged', (event: { state: string }) => {
+    ua.on('callStateChanged', (event: { state: string }) => {
       if (event.state === 'confirmed') disconnect = ua.disconnect();
     });
 
@@ -787,7 +787,7 @@ describe('UserAgent shutdown settlement', () => {
     await flush();
 
     let stateEvents = 0;
-    ua.on('stateChanged', () => {
+    ua.on('callStateChanged', () => {
       stateEvents += 1;
     });
     await ua.disconnect();
@@ -1022,5 +1022,63 @@ describe('UserAgent Via transport token', () => {
     await confirmCall(transport);
     await invite;
     expect(captureOutboundVia(transport)).toMatch(new RegExp(`^${expectedPrefix}`));
+  });
+});
+
+describe('UserAgent truthful event surface', () => {
+  it('emits registrationStateChanged (not stateChanged) with the full shape', async () => {
+    const { ua, transport } = setup();
+    const registrationEvents: Array<{ type: string; state: string; identity?: unknown }> = [];
+    ua.on('registrationStateChanged', (event) => registrationEvents.push(event));
+    await ua.connect();
+
+    const registration = ua.register();
+    await flush();
+    const reg = lastRequest(transport, 'REGISTER');
+    respondTo(transport, reg, 200, { expires: '120' });
+    await registration;
+    await flush();
+
+    expect(registrationEvents.length).toBeGreaterThan(0);
+    expect(registrationEvents[0]).toMatchObject({
+      type: 'registrationStateChanged',
+      state: 'registered',
+    });
+    expect((registrationEvents[0]!.identity as { callId: string }).callId).toBeTruthy();
+
+    await ua.disconnect();
+  });
+
+  it('emits callStateChanged (not stateChanged) across an outgoing call', async () => {
+    const { ua, transport } = setup();
+    const callEvents: Array<{ type: string; state: string }> = [];
+    ua.on('callStateChanged', (event) => callEvents.push(event));
+    await ua.connect();
+
+    const invite = ua.invite('sip:bob@example.com');
+    await confirmCall(transport);
+    await invite;
+
+    expect(callEvents.some((event) => event.state === 'inviting')).toBe(true);
+    expect(callEvents.some((event) => event.state === 'confirmed')).toBe(true);
+    expect(callEvents.every((event) => event.type === 'callStateChanged')).toBe(true);
+
+    await ua.disconnect();
+  });
+
+  it('emits incomingCall as a shaped event, not the raw invitation', async () => {
+    const { ua, transport } = setup();
+    const incomingEvents: Array<{ type: string; invitation?: Invitation }> = [];
+    ua.on('incomingCall', (event) => incomingEvents.push(event));
+    await ua.connect();
+
+    receiveIncomingCall(ua, transport);
+
+    expect(incomingEvents).toHaveLength(1);
+    expect(incomingEvents[0]).toMatchObject({ type: 'incomingCall' });
+    expect(incomingEvents[0]!.invitation).toBeDefined();
+    expect(incomingEvents[0]!.invitation).not.toBe(incomingEvents[0]); // raw object vs shaped event
+
+    await ua.disconnect();
   });
 });

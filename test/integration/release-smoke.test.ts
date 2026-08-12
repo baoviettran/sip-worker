@@ -184,7 +184,8 @@ describe('release smoke: Scenario A (full lifecycle from public root)', () => {
     const server = new MockRegistrar({ transport, challenge: true });
 
     const states: string[] = [];
-    ua.on('stateChanged', (e: any) => states.push(e.state));
+    ua.on('registrationStateChanged', (e: any) => states.push(e.state));
+    ua.on('callStateChanged', (e: any) => states.push(e.state));
 
     await ua.connect();
     server.start();
@@ -269,7 +270,8 @@ describe('release smoke: Scenario B (incoming call, TU 2xx retransmission)', () 
     });
     const server = new MockRegistrar({ transport });
     const states: string[] = [];
-    ua.on('stateChanged', (e: any) => states.push(e.state));
+    ua.on('registrationStateChanged', (e: any) => states.push(e.state));
+    ua.on('callStateChanged', (e: any) => states.push(e.state));
 
     await ua.connect();
     server.start();
@@ -277,7 +279,7 @@ describe('release smoke: Scenario B (incoming call, TU 2xx retransmission)', () 
 
     // Incoming INVITE with an SDP offer.
     let invitation: any;
-    ua.on('incomingCall', (inv: any) => { invitation = inv; });
+    ua.on('incomingCall', (event: any) => { invitation = event.invitation ?? event; });
     const inviteHeaders = new Headers();
     inviteHeaders.set('Via', 'SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-inv-1');
     inviteHeaders.set('Max-Forwards', '70');

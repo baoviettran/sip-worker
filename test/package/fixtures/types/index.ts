@@ -34,10 +34,17 @@ import type {
   SipErrorCode,
 } from 'sip-worker';
 import type {
+  CallStateChangedEvent,
+  IncomingCallEvent,
+  Invitation,
   RegistrationStateChangedEvent,
-  RegistrationFailedEvent,
-  RegistrationEvent,
-  RegistrationEventEmitter,
+  SessionState,
+  UserAgentEventEmitter,
+} from 'sip-worker';
+import type {
+  RegistrationFailedEvent as DeprecatedRegistrationFailedEvent,
+  RegistrationEvent as DeprecatedRegistrationEvent,
+  RegistrationEventEmitter as DeprecatedRegistrationEventEmitter,
 } from 'sip-worker';
 
 // ---- subpaths ----
@@ -201,11 +208,26 @@ const uaOptions: UserAgentOptions = {
 void new UACls(uaOptions);
 
 // ---- registration event types belong on the root ----
-const emitter: RegistrationEventEmitter = new UserAgent(uaOptions);
-emitter.on('stateChanged', (e: RegistrationStateChangedEvent) => void e.state);
-emitter.on('failed', (e: RegistrationFailedEvent) => void e.error);
-declare const anyEvent: RegistrationEvent;
-void anyEvent;
+const emitter: UserAgentEventEmitter = new UserAgent(uaOptions);
+emitter.on('registrationStateChanged', (event: RegistrationStateChangedEvent) => {
+  const state: RegisterState = event.state;
+  void state;
+});
+emitter.on('callStateChanged', (event: CallStateChangedEvent) => {
+  const state: SessionState = event.state;
+  void state;
+});
+emitter.on('incomingCall', (event: IncomingCallEvent) => {
+  const invitation: Invitation = event.invitation;
+  void invitation;
+});
+// @ts-expect-error call state is not a RegisterState
+emitter.on('callStateChanged', (event: RegistrationStateChangedEvent) => void event);
+// Deprecated aliases remain importable for source migration.
+void (null as unknown as DeprecatedRegistrationFailedEvent);
+void (null as unknown as DeprecatedRegistrationEvent);
+declare const deprecatedEmitter: DeprecatedRegistrationEventEmitter;
+void deprecatedEmitter;
 
 // ---- messages ----
 void msgParse(new Uint8Array());
