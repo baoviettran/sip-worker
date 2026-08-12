@@ -445,4 +445,24 @@ describe('AuthManager state bounding', () => {
     manager.settle('req-1');    // new: mark exchange complete
     expect(manager.retriesByRequestSize).toBe(0);
   });
+
+  it('renders nonce-count as eight hexadecimal digits after nine uses', () => {
+    const f = fixture();
+    const manager = new AuthManager(f.ids());
+    const headers = buildResponseHeaders(REALM, 'reused-nonce');
+    const counts: string[] = [];
+
+    for (let index = 1; index <= 16; index += 1) {
+      const result = manager.retry(f.context({
+        requestId: `hex-${index}`,
+        response: makeResponse(401, 'Unauthorized', headers),
+      })) as SipRequestMessage;
+      counts.push(result.headers.get('Authorization')!.match(/nc=([0-9a-f]{8})/)![1]!);
+    }
+
+    expect(counts[8]).toBe('00000009');
+    expect(counts[9]).toBe('0000000a');
+    expect(counts[14]).toBe('0000000f');
+    expect(counts[15]).toBe('00000010');
+  });
 });

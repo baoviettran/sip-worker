@@ -334,7 +334,7 @@ export class AuthManager {
     }
     const next = (this.nonceCounts.get(key) ?? 0) + 1;
     this.nonceCounts.set(key, next);
-    return next.toString().padStart(8, '0');
+    return next.toString(16).padStart(8, '0');
   }
 }
 
