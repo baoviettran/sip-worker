@@ -1,0 +1,5 @@
+{
+  "name": "sip-worker-compat-fixture-esm",
+  "private": true,
+  "type": "module"
+}
