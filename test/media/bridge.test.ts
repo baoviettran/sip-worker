@@ -12,6 +12,13 @@ function expectPending<T>(promise: Promise<T>): Promise<void> {
   return expect(Promise.race([promise, PENDING])).resolves.toBe(PENDING);
 }
 
+/** Returns the last delivered message, asserting it exists (narrows undefined). */
+function lastDelivered(port: FakePort): MediaRequestMessage {
+  const message = port.delivered[port.delivered.length - 1];
+  expect(message).toBeDefined();
+  return message as MediaRequestMessage;
+}
+
 /** Returns the first delivered message, asserting it exists (narrows undefined). */
 function firstDelivered(port: FakePort): MediaRequestMessage {
   const message = port.delivered[0];
@@ -248,6 +255,38 @@ describe('StubMainMediaHandler', () => {
 });
 
 describe('WorkerMediaController bounded lifecycle', () => {
+  it('returns pending requests and timers to baseline across repeated request/close cycles', async () => {
+    const clock = new FakeClock();
+    const { controller, port } = makeBridge({ clock, deadlineMs: 1000 });
+    expect(controller.pendingRequestCount).toBe(0);
+    expect(clock.pending()).toBe(0);
+    for (let session = 0; session < 25; session += 1) {
+      const sessionId = `session-${session}`;
+
+      // 1) A request completed by its reply must leave no pending state behind.
+      const offer = controller.createOffer(sessionId);
+      const sent = lastDelivered(port);
+      expect(controller.pendingRequestCount).toBe(1);
+      expect(clock.pending()).toBe(1); // the armed deadline timer
+      port.deliver({ type: 'mediaResult', requestId: sent.requestId, sessionId, sdp: STUB_SDP });
+      await expect(offer).resolves.toBe(STUB_SDP);
+      expect(controller.pendingRequestCount).toBe(0);
+      expect(clock.pending()).toBe(0);
+
+      // 2) A request cancelled by closeSession must also return to baseline.
+      const cancelled = controller.createOffer(sessionId);
+      lastDelivered(port);
+      expect(controller.pendingRequestCount).toBe(1);
+      controller.closeSession(sessionId);
+      await expect(cancelled).rejects.toMatchObject({ code: 'MEDIA_UNAVAILABLE' });
+      expect(controller.pendingRequestCount).toBe(0);
+      expect(clock.pending()).toBe(0);
+    }
+    controller.close();
+    expect(controller.pendingRequestCount).toBe(0);
+    expect(clock.pending()).toBe(0);
+  });
+
   it('rejects a pending request with MediaTimeoutError when its deadline elapses', async () => {
     const clock = new FakeClock();
     const { controller, port } = makeBridge({ clock, deadlineMs: 1000 });

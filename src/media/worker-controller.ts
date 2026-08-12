@@ -130,6 +130,16 @@ export class WorkerMediaController {
     this.rejectAll();
   }
 
+  /**
+   * Read-only diagnostic: number of media requests awaiting a reply. Exposed
+   * for test observability so lifecycle tests can assert pending state returns
+   * to zero. Never mutates controller state.
+   */
+  get pendingRequestCount(): number {
+    return this.pending.size;
+  }
+
+
   /** Alias for `unsubscribe`; use on worker teardown / port close. */
   close(): void {
     this.unsubscribe();

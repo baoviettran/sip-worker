@@ -591,6 +591,34 @@ describe('WorkerSupervisor concurrent waiters', () => {
 });
 
 describe('WorkerSupervisor stop/start', () => {
+  it('returns workers, listeners, and timers to baseline across repeated stop/start cycles', async () => {
+    const h = setup(); // starts generation 1
+    for (let cycle = 0; cycle < 25; cycle += 1) {
+      // Re-arm after the previous cycle's stop (no-op on cycle 0, already started).
+      h.supervisor.start();
+      const registration = h.supervisor.register();
+      const worker = h.factory.current;
+      const bootstrap = worker.bootstrap;
+      if (bootstrap === undefined) throw new Error(`cycle ${cycle}: no bootstrap delivered`);
+      worker.port.deliver({ type: 'registered', generation: bootstrap.generation });
+      await expect(registration).resolves.toBeUndefined();
+
+      // stop() tears the live generation down exactly once: no port listeners,
+      // no lingering timers, worker terminated.
+      h.supervisor.stop();
+      expect(worker.terminated).toBe(true);
+      expect(worker.port.listenerCount).toBe(0);
+      expect(h.clock.pending()).toBe(0);
+    }
+    // close() releases the final generation; no waiter remains pending.
+    h.supervisor.start();
+    const waiting = h.supervisor.register();
+    h.supervisor.close();
+    await expect(waiting).rejects.toBeInstanceOf(WorkerClosedError);
+    expect(h.factory.terminated).toBe(h.factory.count);
+    expect(h.clock.pending()).toBe(0);
+  });
+
   it('restarts the heartbeat loop and spawns a fresh generation after stop then start', () => {
     const h = setup();
     boot(h);

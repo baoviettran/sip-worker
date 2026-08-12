@@ -370,6 +370,19 @@ describe('UserAgent Digest ownership', () => {
 });
 
 describe('UserAgent liveness wiring', () => {
+  it('returns timers and listeners to baseline across repeated UA lifecycles', async () => {
+    for (let cycle = 0; cycle < 25; cycle += 1) {
+      const h = setup({ liveness: new RecordingLiveness() });
+      await h.ua.connect();
+      // A connected UA owns at least one transport listener (ingress + transport).
+      expect(h.transport.listenerCount()).toBeGreaterThan(0);
+      await h.ua.disconnect();
+      // Disconnect must detach every transport listener and clear every timer.
+      expect(h.transport.listenerCount()).toBe(0);
+      expect(h.clock.pending()).toBe(0);
+    }
+  });
+
   it('starts an injected strategy on connect and stops it on disconnect', async () => {
     const liveness = new RecordingLiveness();
     const { ua } = setup({ liveness });
