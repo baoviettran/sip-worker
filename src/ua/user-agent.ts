@@ -19,7 +19,7 @@
 import type { Transport, Clock, TransportToken } from '../transport/index.js';
 import { SipIngress } from '../transport/index.js';
 import type { MessageSink } from '../transport/ingress.js';
-import { SipError } from '../errors.js';
+import { SipError, TransportError } from '../errors.js';
 import { TransactionLayer, deriveTimers, DEFAULT_TIMERS } from '../transactions/index.js';
 import type { TransactionLayerEvent } from '../transactions/types.js';
 import { Registrar } from './registrar.js';
@@ -27,7 +27,7 @@ import type { RegistrarOptions } from './registrar.js';
 import type { RegistrationIdentity, RegisterState } from './registration-types.js';
 import { AuthManager, type IdGenerator } from '../auth/manager.js';
 import { TypedEventEmitter } from './events.js';
-import type { RegistrationEventEmitter } from './events.js';
+import type { UserAgentEventEmitter, UserAgentEventMap } from './events.js';
 import { Inviter } from './inviter.js';
 import type { SessionEvent } from './session.js';
 import { Invitation } from './invitation.js';
@@ -79,7 +79,7 @@ export interface UserAgentOptions {
   readonly initialIdentity?: RegistrationIdentity;
 }
 
-export class UserAgent extends TypedEventEmitter implements RegistrationEventEmitter {
+export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements UserAgentEventEmitter {
   private readonly transport: Transport;
   private readonly clock: Clock;
   private readonly options: UserAgentOptions;
@@ -91,6 +91,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
   private connecting = false;
   private connected = false;
   private disconnected = false;
+  private connectPromise?: Promise<void>;
   private shutdownError?: SipError;
   private readonly ownerSessionUnsubscribers = new Map<DialogOwner, () => void>();
   private activeInviter?: Inviter;
@@ -146,11 +147,36 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
 
   /**
    * Connect the transport and wire up the transaction layer, ingress, and registrar.
-   * Construction order: transport → coordinator → ingress → registrar.
+   * Concurrent calls share a single composition attempt; the first caller owns the
+   * active `connectPromise` and every subsequent caller receives the same promise.
    */
-  async connect(): Promise<void> {
+  connect(): Promise<void> {
     if (this.disconnected) {
-      throw new Error('UserAgent has been disconnected');
+      return Promise.reject(new SipError(0, 'UserAgent has been disconnected', 'LIFECYCLE_ABORTED'));
+    }
+    if (this.connected) return Promise.resolve();
+    if (this.connectPromise !== undefined) return this.connectPromise;
+
+    const attempt = this.connectOnce();
+    this.connectPromise = attempt;
+    void attempt.then(
+      () => {
+        if (this.connectPromise === attempt) this.connectPromise = undefined;
+      },
+      () => {
+        if (this.connectPromise === attempt) this.connectPromise = undefined;
+      },
+    );
+    return attempt;
+  }
+
+  /**
+   * Composition once: transport → coordinator → ingress → registrar.
+   * A disconnect that races during composition must still win.
+   */
+  private async connectOnce(): Promise<void> {
+    if (this.disconnected) {
+      throw new SipError(0, 'UserAgent has been disconnected', 'LIFECYCLE_ABORTED');
     }
     if (this.connected) return;
 
@@ -159,14 +185,19 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       await this.transport.connect();
     } catch (error) {
       if (this.disconnected) {
-        throw this.shutdownError ?? new SipError(0, 'UserAgent disconnected');
+        throw this.shutdownError ?? new SipError(0, 'UserAgent disconnected', 'LIFECYCLE_ABORTED');
       }
-      throw error;
+      if (error instanceof TransportError || error instanceof SipError) throw error;
+      throw new SipError(
+        0,
+        error instanceof Error ? error.message : String(error),
+        'CONNECTION_FAILED',
+      );
     } finally {
       this.connecting = false;
     }
     if (this.disconnected) {
-      const error = this.shutdownError ?? new SipError(0, 'UserAgent disconnected');
+      const error = this.shutdownError ?? new SipError(0, 'UserAgent disconnected', 'LIFECYCLE_ABORTED');
       await this.transport.disconnect();
       throw error;
     }
@@ -212,6 +243,11 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       authManager: this.authManager,
       refreshFraction: this.options.refreshFraction,
       initialIdentity: this.options.initialIdentity,
+      onBackgroundFailure: (error) => this.emit('failed', {
+        type: 'failed',
+        error,
+        identity: this.identity ?? { callId: '', nextCSeq: 1 },
+      }),
     };
     this.registrar = new Registrar(registrarOptions);
 
@@ -233,8 +269,8 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     try {
       await this.registrar.register();
       if (this.registerState !== previousState) {
-        this.emit('stateChanged', {
-          type: 'stateChanged',
+        this.emit('registrationStateChanged', {
+          type: 'registrationStateChanged',
           state: this.registerState,
           identity: this.identity!,
         });
@@ -259,8 +295,8 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     try {
       await this.registrar.unregister();
       if (this.registerState !== previousState) {
-        this.emit('stateChanged', {
-          type: 'stateChanged',
+        this.emit('registrationStateChanged', {
+          type: 'registrationStateChanged',
           state: this.registerState,
           identity: this.identity!,
         });
@@ -312,8 +348,8 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
 
     // Listen to session state changes
     const sessionListener = (event: SessionEvent): void => {
-      this.emit('stateChanged', {
-        type: 'stateChanged',
+      this.emit('callStateChanged', {
+        type: 'callStateChanged',
         state: event.state,
         identity: this.identity!,
       });
@@ -350,7 +386,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
   /** Disconnect the transport and clean up all listeners/timers. */
   async disconnect(): Promise<void> {
     if (this.disconnected) return;
-    const error = new SipError(0, 'UserAgent disconnected');
+    const error = new SipError(0, 'UserAgent disconnected', 'LIFECYCLE_ABORTED');
     this.shutdownError = error;
     this.disconnected = true;
 
@@ -540,7 +576,10 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     }
     const mediaController = this.options.mediaController;
     if (mediaController === undefined) {
-      console.warn('Media controller not configured, rejecting incoming call');
+      this.layer?.sendResponse(
+        transaction.key,
+        this.requestResponse(request, 488, 'Not Acceptable Here'),
+      );
       return;
     }
 
@@ -565,8 +604,8 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
 
     // Listen to session state changes
     const sessionListener = (event: SessionEvent): void => {
-      this.emit('stateChanged', {
-        type: 'stateChanged',
+      this.emit('callStateChanged', {
+        type: 'callStateChanged',
         state: event.state,
         identity: this.identity!,
       });
@@ -587,6 +626,6 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     invitation.session.on(sessionListener);
     this.ownerSessionUnsubscribers.set(invitation, () => invitation.session.off(sessionListener));
 
-    this.emit('incomingCall', invitation);
+    this.emit('incomingCall', { type: 'incomingCall', invitation });
   }
 }

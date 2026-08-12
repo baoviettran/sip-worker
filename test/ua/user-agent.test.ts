@@ -4,7 +4,7 @@ import { FakeTransport } from '../support/fake-transport.js';
 import { UserAgent } from '../../src/ua/user-agent.js';
 import type { LivenessStrategy } from '../../src/reliability/index.js';
 import { parseMessage } from '../../src/messages/parser.js';
-import type { SipRequestMessage } from '../../src/messages/message.js';
+import type { SipRequestMessage, SipResponseMessage } from '../../src/messages/message.js';
 import { Headers, makeRequest, makeResponse, serializeMessage } from '../../src/messages/index.js';
 import { WorkerMediaController } from '../../src/media/worker-controller.js';
 import { STUB_SDP } from '../../src/media/index.js';
@@ -67,8 +67,10 @@ class DelayedAckTransport extends FakeTransport {
 /** Transport that exposes a pending connection so shutdown can win the race. */
 class DelayedConnectTransport extends FakeTransport {
   private release: (() => void) | undefined;
+  connectCalls = 0;
 
   override async connect(): Promise<void> {
+    this.connectCalls += 1;
     await new Promise<void>((resolve) => {
       this.release = resolve;
     });
@@ -118,13 +120,13 @@ class FakeMediaPort {
 
 function setup(options: {
   liveness?: LivenessStrategy; intervalMs?: number; viaAddress?: string; transport?: FakeTransport;
-  credentials?: boolean;
+  credentials?: boolean; media?: boolean;
 } = {}) {
   const clock = new FakeClock();
   const transport = options.transport ?? new FakeTransport({ reliable: true, framing: 'stream' });
   const idGenerator = makeIdGenerator();
   const media = new FakeMediaPort();
-  const mediaController = new WorkerMediaController(media);
+  const mediaController = options.media === false ? undefined : new WorkerMediaController(media);
   const ua = new UserAgent({
     transport,
     clock,
@@ -148,7 +150,7 @@ function respondTo(
   transport: FakeTransport,
   request: SipRequestMessage,
   statusCode: number,
-  options: { challenge?: boolean; contact?: string } = {},
+  options: { challenge?: boolean; contact?: string; expires?: string } = {},
 ): void {
   const headers = new Headers();
   headers.set('Via', request.headers.get('Via') ?? '');
@@ -157,6 +159,7 @@ function respondTo(
   headers.set('Call-ID', request.headers.get('Call-ID') ?? '');
   headers.set('CSeq', request.headers.get('CSeq') ?? '');
   if (options.contact !== undefined) headers.set('Contact', options.contact);
+  if (options.expires !== undefined) headers.set("Expires", options.expires);
   if (options.challenge === true) {
     headers.set(
       'WWW-Authenticate',
@@ -182,13 +185,8 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-/** Deliver an initial INVITE and return the public Invitation emitted by the UA. */
-function receiveIncomingCall(ua: UserAgent, transport: FakeTransport): Invitation {
-  let invitation: Invitation | undefined;
-  ua.once('incomingCall', (incoming: Invitation) => {
-    invitation = incoming;
-  });
-
+/** Build an initial INVITE from a remote peer (the UAC of an incoming call). */
+function makeIncomingInvite(): SipRequestMessage {
   const headers = new Headers();
   headers.set('Via', 'SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-incoming');
   headers.set('Max-Forwards', '70');
@@ -198,15 +196,37 @@ function receiveIncomingCall(ua: UserAgent, transport: FakeTransport): Invitatio
   headers.set('CSeq', '1 INVITE');
   headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
   headers.set('Content-Type', 'application/sdp');
-  transport.emitData(serializeMessage(makeRequest(
+  return makeRequest(
     'INVITE',
     'sip:alice@example.com',
     headers,
     new TextEncoder().encode(STUB_SDP),
-  )));
+  );
+}
+
+/** Deliver an initial INVITE and return the public Invitation emitted by the UA. */
+function receiveIncomingCall(ua: UserAgent, transport: FakeTransport): Invitation {
+  let invitation: Invitation | undefined;
+  ua.once('incomingCall', (event: { type: 'incomingCall'; invitation: Invitation }) => {
+    invitation = event.invitation;
+  });
+
+  transport.emitData(serializeMessage(makeIncomingInvite()));
 
   if (invitation === undefined) throw new Error('UA did not emit an incoming invitation');
   return invitation;
+}
+
+/** The last response the UA sent on the transport, parsed. */
+function lastResponse(transport: FakeTransport): SipResponseMessage {
+  const responses = transport.sent
+    .map((bytes) => parseMessage(bytes))
+    .filter((message) => message.ok && message.value.kind === 'response');
+  const last = responses.at(-1);
+  if (last === undefined || !last.ok || last.value.kind !== 'response') {
+    throw new Error('no outbound response');
+  }
+  return last.value;
 }
 
 function sentResponses(transport: FakeTransport, statusCode: number): number {
@@ -267,6 +287,13 @@ function sentRequests(transport: FakeTransport, method: string): SipRequestMessa
   }
   return requests;
 }
+
+const lastRequest = (transport: FakeTransport, method: string): SipRequestMessage => {
+  const requests = sentRequests(transport, method);
+  const last = requests.at(-1);
+  if (last === undefined) throw new Error(`no outbound ${method} request`);
+  return last;
+};
 
 function createRemoteBye(
   transport: FakeTransport,
@@ -343,11 +370,42 @@ describe('UserAgent Digest ownership', () => {
 });
 
 describe('UserAgent liveness wiring', () => {
+  it('returns timers and listeners to baseline across repeated UA lifecycles', async () => {
+    for (let cycle = 0; cycle < 25; cycle += 1) {
+      const h = setup({ liveness: new RecordingLiveness() });
+      await h.ua.connect();
+      // A connected UA owns at least one transport listener (ingress + transport).
+      expect(h.transport.listenerCount()).toBeGreaterThan(0);
+      await h.ua.disconnect();
+      // Disconnect must detach every transport listener and clear every timer.
+      expect(h.transport.listenerCount()).toBe(0);
+      expect(h.clock.pending()).toBe(0);
+    }
+  });
+
   it('starts an injected strategy on connect and stops it on disconnect', async () => {
     const liveness = new RecordingLiveness();
     const { ua } = setup({ liveness });
 
     await ua.connect();
+    expect(liveness.calls).toEqual(['start']);
+
+    await ua.disconnect();
+    expect(liveness.calls).toEqual(['start', 'stop']);
+  });
+
+  it('shares one promise and composes one stack across concurrent connect calls', async () => {
+    const transport = new DelayedConnectTransport({ reliable: true, framing: 'stream' });
+    const liveness = new RecordingLiveness();
+    const { ua } = setup({ transport, liveness });
+
+    const first = ua.connect();
+    const second = ua.connect();
+
+    expect(second).toBe(first);
+    expect(transport.connectCalls).toBe(1);
+    transport.releaseConnect();
+    await Promise.all([first, second]);
     expect(liveness.calls).toEqual(['start']);
 
     await ua.disconnect();
@@ -404,6 +462,27 @@ describe('UserAgent liveness wiring', () => {
     // Shutdown owns both the registrar refresh and its completed client transaction.
     expect(clock.pending()).toBe(0);
   });
+
+  it('emits failed when an automatic registration refresh fails', async () => {
+    const { ua, transport, clock } = setup();
+    const failures: Error[] = [];
+    ua.on('failed', (event: { error: Error }) => failures.push(event.error));
+    await ua.connect();
+
+    const registration = ua.register();
+    await flush();
+    const request = lastRequest(transport, 'REGISTER');
+    respondTo(transport, request, 200, { expires: '2' });
+    await registration;
+
+    clock.advance(1000);
+    await flush();
+    clock.advance(32000);
+    await flush();
+
+    expect(failures).toContainEqual(expect.objectContaining({ code: 'REGISTRATION_FAILED' }));
+    await ua.disconnect();
+  });
 });
 
 describe('UserAgent shutdown settlement', () => {
@@ -439,6 +518,7 @@ describe('UserAgent shutdown settlement', () => {
     await ua.disconnect();
 
     await expect(registration).rejects.toThrow('UserAgent disconnected');
+    await expect(registration).rejects.toMatchObject({ code: 'LIFECYCLE_ABORTED' });
     expect(rejections).toBe(1);
   });
 
@@ -539,7 +619,7 @@ describe('UserAgent shutdown settlement', () => {
     await invite;
 
     let disconnect: Promise<void> | undefined;
-    ua.on('stateChanged', (event: { state: string }) => {
+    ua.on('callStateChanged', (event: { state: string }) => {
       if (event.state === 'terminating') disconnect = ua.disconnect();
     });
 
@@ -562,7 +642,7 @@ describe('UserAgent shutdown settlement', () => {
     await invite;
     clock.advance(32000); // Release the accepted INVITE transaction's Timer M.
 
-    ua.on('stateChanged', (event: { state: string }) => {
+    ua.on('callStateChanged', (event: { state: string }) => {
       if (event.state === 'terminating') {
         transport.emitData(serializeMessage(createRemoteBye(transport)));
       }
@@ -586,7 +666,7 @@ describe('UserAgent shutdown settlement', () => {
     await ua.connect();
 
     let disconnect: Promise<void> | undefined;
-    ua.on('stateChanged', (event: { state: string }) => {
+    ua.on('callStateChanged', (event: { state: string }) => {
       if (event.state === 'inviting') disconnect = ua.disconnect();
     });
 
@@ -610,7 +690,7 @@ describe('UserAgent shutdown settlement', () => {
     await flush();
 
     let spawned: Promise<void> | undefined;
-    ua.on('stateChanged', (event: { state: string }) => {
+    ua.on('callStateChanged', (event: { state: string }) => {
       if (event.state === 'failed' && spawned === undefined) {
         spawned = ua.invite('sip:carol@example.com');
       }
@@ -628,7 +708,7 @@ describe('UserAgent shutdown settlement', () => {
     const { ua, transport } = setup();
     await ua.connect();
     let disconnect: Promise<void> | undefined;
-    ua.on('stateChanged', (event: { state: string }) => {
+    ua.on('callStateChanged', (event: { state: string }) => {
       if (event.state === 'confirmed') disconnect = ua.disconnect();
     });
 
@@ -737,7 +817,7 @@ describe('UserAgent shutdown settlement', () => {
     await flush();
 
     let stateEvents = 0;
-    ua.on('stateChanged', () => {
+    ua.on('callStateChanged', () => {
       stateEvents += 1;
     });
     await ua.disconnect();
@@ -972,5 +1052,100 @@ describe('UserAgent Via transport token', () => {
     await confirmCall(transport);
     await invite;
     expect(captureOutboundVia(transport)).toMatch(new RegExp(`^${expectedPrefix}`));
+  });
+});
+
+describe('UserAgent truthful event surface', () => {
+  it('emits registrationStateChanged (not stateChanged) with the full shape', async () => {
+    const { ua, transport } = setup();
+    const registrationEvents: Array<{ type: string; state: string; identity?: unknown }> = [];
+    ua.on('registrationStateChanged', (event) => registrationEvents.push(event));
+    await ua.connect();
+
+    const registration = ua.register();
+    await flush();
+    const reg = lastRequest(transport, 'REGISTER');
+    respondTo(transport, reg, 200, { expires: '120' });
+    await registration;
+    await flush();
+
+    expect(registrationEvents.length).toBeGreaterThan(0);
+    expect(registrationEvents[0]).toMatchObject({
+      type: 'registrationStateChanged',
+      state: 'registered',
+    });
+    expect((registrationEvents[0]!.identity as { callId: string }).callId).toBeTruthy();
+
+    await ua.disconnect();
+  });
+
+  it('isolates throwing registrationStateChanged observers and still resolves register()', async () => {
+    const { ua, transport } = setup();
+    const observed: Array<{ type: string; state: string }> = [];
+    ua.on('registrationStateChanged', () => {
+      throw new Error('observer failed');
+    });
+    ua.on('registrationStateChanged', (event) => observed.push(event));
+    await ua.connect();
+
+    const registration = ua.register();
+    await flush();
+    const reg = lastRequest(transport, 'REGISTER');
+    respondTo(transport, reg, 200, { expires: '120' });
+    await registration;
+    await flush();
+
+    expect(observed.some((event) => event.state === 'registered')).toBe(true);
+
+    await ua.disconnect();
+  });
+
+  it('emits callStateChanged (not stateChanged) across an outgoing call', async () => {
+    const { ua, transport } = setup();
+    const callEvents: Array<{ type: string; state: string }> = [];
+    ua.on('callStateChanged', (event) => callEvents.push(event));
+    await ua.connect();
+
+    const invite = ua.invite('sip:bob@example.com');
+    await confirmCall(transport);
+    await invite;
+
+    expect(callEvents.some((event) => event.state === 'inviting')).toBe(true);
+    expect(callEvents.some((event) => event.state === 'confirmed')).toBe(true);
+    expect(callEvents.every((event) => event.type === 'callStateChanged')).toBe(true);
+
+    await ua.disconnect();
+  });
+
+  it('emits incomingCall as a shaped event, not the raw invitation', async () => {
+    const { ua, transport } = setup();
+    const incomingEvents: Array<{ type: string; invitation?: Invitation }> = [];
+    ua.on('incomingCall', (event) => incomingEvents.push(event));
+    await ua.connect();
+
+    receiveIncomingCall(ua, transport);
+
+    expect(incomingEvents).toHaveLength(1);
+    expect(incomingEvents[0]).toMatchObject({ type: 'incomingCall' });
+    expect(incomingEvents[0]!.invitation).toBeDefined();
+    expect(incomingEvents[0]!.invitation).not.toBe(incomingEvents[0]); // raw object vs shaped event
+
+    await ua.disconnect();
+  });
+
+  it('answers an incoming INVITE with 488 when media is unavailable', async () => {
+    const { ua, transport } = setup({ media: false });
+    const incoming: unknown[] = [];
+    ua.on('incomingCall', (event) => incoming.push(event));
+    await ua.connect();
+
+    transport.emitData(serializeMessage(makeIncomingInvite()));
+    await flush();
+
+    const response = lastResponse(transport);
+    expect(response.statusCode).toBe(488);
+    expect(response.reasonPhrase).toBe('Not Acceptable Here');
+    expect(incoming).toHaveLength(0);
+    await ua.disconnect();
   });
 });

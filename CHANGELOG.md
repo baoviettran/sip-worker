@@ -15,6 +15,35 @@ All notable changes to this project are documented in this file, following
 - `npm run test:docs` documentation-contract gate (README links resolve,
   documented scripts exist, 0.1.0 framing is honest), wired into `pretest`.
 
+## [0.2.0] - 2026-08-12
+
+### Added
+
+- **Typed public event surface** on the `UserAgent`: `registrationStateChanged`,
+  `callStateChanged`, `incomingCall`, and `failed` (replacing the earlier
+  `stateChanged` shorthand).
+- **Browser v1.0 production roadmap** linking real media, WSS, and interop work:
+  `docs/superpowers/specs/2026-08-12-browser-v1-production-roadmap-design.md`.
+
+### Fixed
+
+- **Bounded auth state.** `AuthManager` nonce counters are capped at 64 and
+  per-exchange retry state settles, replacing the earlier unbounded-map
+  limitation. No claim of general memory safety is made beyond the tested
+  lifecycle boundaries.
+- **Fail-closed UDP peer identity.** UDP handling now resolves to an explicit
+  allowlist rather than trusting ambient peers.
+- **Observer isolation.** A throwing observer no longer breaks other subscribers.
+- **Lifecycle resource baselines.** Repeated registration/call/teardown cycles
+  return timing and state resources to baseline.
+
+### Security
+
+- 0.2.0 remains a signaling-only prototype, not production-ready for general
+  deployment. This milestone does not claim WebRTC compatibility, WSS
+  production readiness, or SIP interoperability — those are tracked in the
+  browser v1.0 roadmap. See [SECURITY.md](SECURITY.md).
+
 ## [0.1.0] - 2026-08-11
 
 ### Added
@@ -46,4 +75,5 @@ All notable changes to this project are documented in this file, following
   observability). A real media adapter plus interop evidence gate the 1.0
   framing.
 
+[0.2.0]: https://github.com/baoviettran/sip-worker/releases/tag/v0.2.0
 [0.1.0]: https://github.com/baoviettran/sip-worker/releases/tag/v0.1.0

@@ -46,6 +46,12 @@ export interface RegistrarOptions {
    * generation preserves its Call-ID and never reuses a CSeq.
    */
   readonly initialIdentity?: RegistrationIdentity;
+  /**
+   * Optional observer for a failure in a *background* refresh (one not awaited
+   * by the caller). Called exactly once when a scheduled re-registration fails.
+   * A throwing observer is swallowed so it cannot leak a second unhandled rejection.
+   */
+  readonly onBackgroundFailure?: (error: Error) => void;
 }
 
 /** Snapshot of the registrar's externally visible state. */
@@ -99,6 +105,7 @@ export class Registrar {
   private readonly credentials?: { readonly username: string; readonly password: string };
   private readonly refreshAfter: (granted: number) => number;
   private readonly identity: RegistrationIdentity;
+  private readonly onBackgroundFailure: (error: Error) => void;
   private branchCounter = 0;
 
   private redirectCount = 0;
@@ -130,6 +137,7 @@ export class Registrar {
       callId: options.initialIdentity?.callId ?? options.idGenerator.branch(),
       nextCSeq: options.initialIdentity?.nextCSeq ?? 1,
     };
+    this.onBackgroundFailure = options.onBackgroundFailure ?? (() => {});
     this.fromTag = options.idGenerator.branch();
   }
 
@@ -150,10 +158,10 @@ export class Registrar {
    */
   register(): Promise<void> {
     if (this.disposed) {
-      return Promise.reject(new SipError(0, 'Registrar has been disposed'));
+      return Promise.reject(new SipError(0, 'Registrar has been disposed', 'LIFECYCLE_ABORTED'));
     }
     if (this.stateValue === 'registering' || this.stateValue === 'unregistering') {
-      return Promise.reject(new SipError(0, 'a registration exchange is already in progress'));
+      return Promise.reject(new SipError(0, 'a registration exchange is already in progress', 'INVALID_STATE'));
     }
     this.reconnectPending = false;
     this.redirectCount = 0;
@@ -171,10 +179,10 @@ export class Registrar {
    */
   unregister(): Promise<void> {
     if (this.disposed) {
-      return Promise.reject(new SipError(0, 'Registrar has been disposed'));
+      return Promise.reject(new SipError(0, 'Registrar has been disposed', 'LIFECYCLE_ABORTED'));
     }
     if (this.stateValue === 'registering' || this.stateValue === 'unregistering') {
-      return Promise.reject(new SipError(0, 'a registration exchange is already in progress'));
+      return Promise.reject(new SipError(0, 'a registration exchange is already in progress', 'INVALID_STATE'));
     }
     this.cancelRefresh();
     this.stateValue = 'unregistering';
@@ -200,7 +208,7 @@ export class Registrar {
     if (deferred !== undefined) {
       // An exchange was in flight; settle it with a rejection rather than hang.
       this.stateValue = 'failed';
-      deferred.reject(new SipError(0, 'transport disconnected during a registration exchange'));
+      deferred.reject(new SipError(0, 'transport disconnected during a registration exchange', 'TRANSPORT_FAILED'));
     } else if (this.stateValue !== 'unregistering') {
       this.stateValue = 'unregistered';
     }
@@ -266,7 +274,7 @@ export class Registrar {
             break;
           case 'timeout':
           case 'transportError':
-            this.fail(new SipError(0, `REGISTER ${event.type}`));
+            this.fail(new SipError(0, `REGISTER ${event.type}`, event.type === 'transportError' ? 'TRANSPORT_FAILED' : 'TIMEOUT'));
             break;
           default:
             break;
@@ -287,18 +295,18 @@ export class Registrar {
     } else if ((code === 301 || code === 302) && this.redirectCount < MAX_REDIRECTS) {
       this.handleRedirect(base, response);
     } else if (code >= 300) {
-      this.fail(new SipError(code, `REGISTER rejected with ${code}`));
+      this.fail(new SipError(code, `REGISTER rejected with ${code}`, 'REGISTRATION_FAILED'));
     }
   }
 
   private handleAuth(base: SipRequestMessage, response: SipResponseMessage): void {
     if (this.authManager === undefined || this.credentials === undefined) {
-      this.fail(new SipError(response.statusCode, `${response.statusCode} received but no credentials configured`));
+      this.fail(new SipError(response.statusCode, `${response.statusCode} received but no credentials configured`, 'AUTHENTICATION_FAILED'));
       return;
     }
     const requestId = this.authExchangeId;
     if (requestId === undefined) {
-      this.fail(new SipError(0, 'REGISTER authentication exchange is not active'));
+      this.fail(new SipError(0, 'REGISTER authentication exchange is not active', 'INVALID_STATE'));
       return;
     }
     const result = this.authManager.retry({
@@ -338,7 +346,7 @@ export class Registrar {
   private handleRedirect(base: SipRequestMessage, response: SipResponseMessage): void {
     const contact = extractUri(response.headers.get('Contact'));
     if (contact === undefined) {
-      this.fail(new SipError(response.statusCode, 'REGISTER redirect without a Contact'));
+      this.fail(new SipError(response.statusCode, 'REGISTER redirect without a Contact', 'PROTOCOL_ERROR'));
       return;
     }
     this.redirectCount += 1;
@@ -354,7 +362,7 @@ export class Registrar {
     if (!hasAuthorization) return request;
     const requestId = this.authExchangeId;
     if (this.authManager === undefined || this.credentials === undefined || requestId === undefined) {
-      this.fail(new SipError(0, 'REGISTER authentication exchange cannot be regenerated'));
+      this.fail(new SipError(0, 'REGISTER authentication exchange cannot be regenerated', 'INVALID_STATE'));
       return undefined;
     }
     const result = this.authManager.reauthorize({ requestId, request, credentials: this.credentials });
@@ -405,7 +413,17 @@ export class Registrar {
     this.cancelRefresh();
     this.refreshMs = this.refreshAfter(granted);
     this.refreshTimer = this.clock.setTimeout(() => {
-      if (this.stateValue === 'registered') void this.register();
+      if (this.stateValue !== 'registered' || this.disposed) return;
+      void this.register().catch((reason: unknown) => {
+        const error = reason instanceof Error
+          ? new SipError(0, reason.message, 'REGISTRATION_FAILED', { cause: reason })
+          : new SipError(0, String(reason), 'REGISTRATION_FAILED');
+        try {
+          this.onBackgroundFailure(error);
+        } catch {
+          // A reporting observer cannot create a second unhandled rejection.
+        }
+      });
     }, this.refreshMs * 1000);
   }
 

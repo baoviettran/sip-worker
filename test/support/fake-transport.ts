@@ -61,6 +61,11 @@ export class FakeTransport implements Transport {
     return () => this.listeners.delete(listener);
   }
 
+  /** Number of active transport listeners (test observability). */
+  listenerCount(): number {
+    return this.listeners.size;
+  }
+
   isConnected(): boolean {
     return this.connected;
   }

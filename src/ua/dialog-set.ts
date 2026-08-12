@@ -82,17 +82,17 @@ export class DialogSet {
     // Extract remote To tag
     const toHeader = response.headers.get('To');
     if (!toHeader) {
-      throw new SipError(400, '2xx response missing To header');
+      throw new SipError(400, '2xx response missing To header', 'PROTOCOL_ERROR');
     }
     const remoteTag = extractTag(toHeader);
     if (!remoteTag) {
-      throw new SipError(400, '2xx response missing To tag');
+      throw new SipError(400, '2xx response missing To tag', 'PROTOCOL_ERROR');
     }
 
     // A 2xx INVITE response must carry a Contact (RFC 3261 12.1.1)
     const contact = response.headers.get('Contact');
     if (!contact) {
-      throw new SipError(400, '2xx response missing Contact header');
+      throw new SipError(400, '2xx response missing Contact header', 'PROTOCOL_ERROR');
     }
 
     // Repeated 2xx for an existing dialog - resend that dialog's cached ACK

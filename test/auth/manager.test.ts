@@ -188,6 +188,7 @@ describe('AuthManager.retry', () => {
     const result = new AuthManager(f.ids()).retry(ctx);
     const failure = expectFailure(result, 'unsupported');
     expect(failure.error.statusCode).toBe(401);
+    expect(failure.error.code).toBe('AUTHENTICATION_UNSUPPORTED');
   });
 
   it('declines an auth-int-only challenge without throwing or consuming the retry budget', () => {
@@ -212,6 +213,7 @@ describe('AuthManager.retry', () => {
     }).not.toThrow();
     const failure = expectFailure(result!, 'unsupported');
     expect(failure.error.statusCode).toBe(401);
+    expect(failure.error.code).toBe('AUTHENTICATION_UNSUPPORTED');
     // The decline is zero-cost: no ordinary retry slot was reserved.
     expect(manager.retriesByRequestSize).toBe(0);
     // A later ordinary qop="auth" retry on the same requestId is still allowed.
@@ -232,6 +234,7 @@ describe('AuthManager.retry', () => {
     const fourth = manager.retry(f.context({ requestId: 'req-X', credentials: plain }));
     const failure = expectFailure(fourth, 'exhausted');
     expect(failure.error.statusCode).toBe(401);
+    expect(failure.error.code).toBe('AUTHENTICATION_FAILED');
   });
 
   it('reuses the nonce and nc count across distinct requestIds', () => {
@@ -441,5 +444,25 @@ describe('AuthManager state bounding', () => {
     manager.retry(f.context()); // consumes one budget entry
     manager.settle('req-1');    // new: mark exchange complete
     expect(manager.retriesByRequestSize).toBe(0);
+  });
+
+  it('renders nonce-count as eight hexadecimal digits after nine uses', () => {
+    const f = fixture();
+    const manager = new AuthManager(f.ids());
+    const headers = buildResponseHeaders(REALM, 'reused-nonce');
+    const counts: string[] = [];
+
+    for (let index = 1; index <= 16; index += 1) {
+      const result = manager.retry(f.context({
+        requestId: `hex-${index}`,
+        response: makeResponse(401, 'Unauthorized', headers),
+      })) as SipRequestMessage;
+      counts.push(result.headers.get('Authorization')!.match(/nc=([0-9a-f]{8})/)![1]!);
+    }
+
+    expect(counts[8]).toBe('00000009');
+    expect(counts[9]).toBe('0000000a');
+    expect(counts[14]).toBe('0000000f');
+    expect(counts[15]).toBe('00000010');
   });
 });

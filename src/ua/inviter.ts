@@ -117,10 +117,10 @@ export class Inviter {
    */
   invite(): Promise<void> {
     if (this.disposed) {
-      return Promise.reject(new SipError(0, 'Inviter has been disposed'));
+      return Promise.reject(new SipError(0, 'Inviter has been disposed', 'LIFECYCLE_ABORTED'));
     }
     if (this.invitePromise !== undefined) {
-      return Promise.reject(new SipError(0, 'invite() already called'));
+      return Promise.reject(new SipError(0, 'invite() already called', 'INVALID_STATE'));
     }
 
     this.invitePromise = new Promise<void>((resolve, reject) => {
@@ -137,13 +137,13 @@ export class Inviter {
    */
   hangup(): Promise<void> {
     if (this.disposed) {
-      return Promise.reject(new SipError(0, 'Inviter has been disposed'));
+      return Promise.reject(new SipError(0, 'Inviter has been disposed', 'LIFECYCLE_ABORTED'));
     }
     if (this.dialog === undefined) {
-      return Promise.reject(new SipError(0, 'hangup() called before call was confirmed'));
+      return Promise.reject(new SipError(0, 'hangup() called before call was confirmed', 'INVALID_STATE'));
     }
     if (this.hangingUp) {
-      return Promise.reject(new SipError(0, 'hangup() already in progress'));
+      return Promise.reject(new SipError(0, 'hangup() already in progress', 'INVALID_STATE'));
     }
 
     this.hangingUp = true;
@@ -161,7 +161,7 @@ export class Inviter {
         || this.session.state !== 'terminating'
       ) return;
       if (dialog === undefined) {
-        this.failHangup(new SipError(0, 'hangup() called before call was confirmed'));
+        this.failHangup(new SipError(0, 'hangup() called before call was confirmed', 'INVALID_STATE'));
         return;
       }
       this.sendBye(dialog);
@@ -265,7 +265,7 @@ export class Inviter {
         if (event.type === 'response') {
           this.onResponse(request, event.response);
         } else if (event.type === 'timeout' || event.type === 'transportError') {
-          this.fail(new SipError(0, `INVITE ${event.type}`));
+          this.fail(new SipError(0, `INVITE ${event.type}`, event.type === 'transportError' ? 'TRANSPORT_FAILED' : 'TIMEOUT'));
         } else if (event.type === 'terminated') {
           this.dialogSet?.expireExtraOwners();
           this.teardownInvite();
@@ -309,7 +309,7 @@ export class Inviter {
     }
 
     // Any other 3xx-6xx: fail
-    this.fail(new SipError(code, `INVITE rejected with ${code}`));
+    this.fail(new SipError(code, `INVITE rejected with ${code}`, 'CALL_FAILED'));
   }
 
   private async onSuccess(response: SipResponseMessage): Promise<void> {
@@ -357,7 +357,7 @@ export class Inviter {
 
   private handleAuth(base: SipRequestMessage, response: SipResponseMessage): void {
     if (this.authManager === undefined || this.credentials === undefined) {
-      this.fail(new SipError(response.statusCode, `${response.statusCode} received but no credentials configured`));
+      this.fail(new SipError(response.statusCode, `${response.statusCode} received but no credentials configured`, 'AUTHENTICATION_FAILED'));
       return;
     }
 
@@ -436,11 +436,11 @@ export class Inviter {
                 if (code >= 200 && code < 300) {
                   settle(true);
                 } else if (code >= 300) {
-                  settle(false, new SipError(code, `BYE rejected with ${code}`));
+                  settle(false, new SipError(code, `BYE rejected with ${code}`, 'CALL_FAILED'));
                 }
               }
             } else if (event.type === 'timeout' || event.type === 'transportError') {
-              settle(false, new SipError(0, `BYE ${event.type}`));
+              settle(false, new SipError(0, `BYE ${event.type}`, event.type === 'transportError' ? 'TRANSPORT_FAILED' : 'TIMEOUT'));
             }
           },
         );
@@ -471,11 +471,11 @@ export class Inviter {
               this.settleHangup();
               this.session.transition('terminated');
             } else if (code >= 300) {
-              this.failHangup(new SipError(code, `BYE rejected with ${code}`));
+              this.failHangup(new SipError(code, `BYE rejected with ${code}`, 'CALL_FAILED'));
             }
           }
         } else if (event.type === 'timeout' || event.type === 'transportError') {
-          this.failHangup(new SipError(0, `BYE ${event.type}`));
+          this.failHangup(new SipError(0, `BYE ${event.type}`, event.type === 'transportError' ? 'TRANSPORT_FAILED' : 'TIMEOUT'));
         }
       },
     );

@@ -829,7 +829,7 @@ describe('Inviter (outgoing SIP call session)', () => {
     await flush();
 
     respond(h, 486);
-    await expect(invite).rejects.toMatchObject({ statusCode: 486 });
+    await expect(invite).rejects.toMatchObject({ statusCode: 486, code: 'CALL_FAILED' });
     expect(h.inviter.session.state).toBe('failed');
   });
 
@@ -840,7 +840,7 @@ describe('Inviter (outgoing SIP call session)', () => {
 
     // INVITE timer B = 64*T1 = 32000ms on a reliable transport.
     h.clock.advance(32000);
-    await expect(invite).rejects.toThrow();
+    await expect(invite).rejects.toMatchObject({ code: 'TIMEOUT' });
     expect(h.inviter.session.state).toBe('failed');
   });
 

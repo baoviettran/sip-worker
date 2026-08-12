@@ -1,4 +1,5 @@
 export { SipError, ParseError, TransportError } from './errors.js';
+export type { SipErrorCode } from './error-codes.js';
 export {
   Headers,
   isRequest, isResponse, makeRequest, makeResponse, bodyText, withTextBody,
@@ -27,16 +28,22 @@ export type {
   TransactionKey,
   TransactionLayerEvent,
 } from './transactions/index.js';
-export { UserAgent, Registrar } from './ua/index.js';
+export { UserAgent, Registrar, Invitation } from './ua/index.js';
 export type { RegistrationIdentity, RegisterState } from './ua/index.js';
+export type { SessionState, SessionEvent } from './ua/index.js';
 export {
   TypedEventEmitter,
 } from './ua/index.js';
 export type {
+  CallStateChangedEvent,
+  IncomingCallEvent,
   RegistrationEvent,
   RegistrationEventEmitter,
   RegistrationStateChangedEvent,
   RegistrationFailedEvent,
+  UserAgentEventEmitter,
+  UserAgentEventMap,
+  UserAgentFailedEvent,
 } from './ua/index.js';
 export { AuthManager } from './auth/manager.js';
 export { computeDigest } from './auth/digest.js';

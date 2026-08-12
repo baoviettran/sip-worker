@@ -47,7 +47,8 @@ describe('Full Call Integration', () => {
 
   it('should complete outgoing call flow: register → invite → confirmed → bye', async () => {
     const states: string[] = [];
-    ua.on('stateChanged', (event: any) => {
+    ua.on('registrationStateChanged', (event: any) => states.push(event.state));
+    ua.on('callStateChanged', (event: any) => {
       states.push(event.state);
     });
 
@@ -84,7 +85,8 @@ describe('Full Call Integration', () => {
 
   it('handles forked 2xx: first dialog selected, extra dialog ACKed with correct To tag then BYEd', async () => {
     const states: string[] = [];
-    ua.on('stateChanged', (event: any) => {
+    ua.on('registrationStateChanged', (event: any) => states.push(event.state));
+    ua.on('callStateChanged', (event: any) => {
       states.push(event.state);
     });
 
@@ -191,7 +193,7 @@ describe('Full Call Integration', () => {
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(incomingCalls.length).toBe(1);
 
-    const invitation = incomingCalls[0];
+    const invitation = incomingCalls[0].invitation ?? incomingCalls[0];
     const answerPromise = invitation.answer('v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n');
 
     // Wait for 200 OK to be sent (answer() is async)
@@ -225,8 +227,8 @@ describe('Full Call Integration', () => {
 
   it('routes a BYE to its incoming dialog while an outgoing dialog remains active', async () => {
     const incomingCalls: any[] = [];
-    ua.on('incomingCall', (invitation: any) => {
-      incomingCalls.push(invitation);
+    ua.on('incomingCall', (event: any) => {
+      incomingCalls.push(event);
     });
 
     await ua.connect();
@@ -240,7 +242,7 @@ describe('Full Call Integration', () => {
     await flush();
     expect(incomingCalls).toHaveLength(1);
 
-    const invitation = incomingCalls[0]!;
+    const invitation = incomingCalls[0]!.invitation ?? incomingCalls[0]!;
     const answer = invitation.answer('v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n');
     await flush();
     transport.emitData(serializeMessage(createAckRequest(invitation.dialog.localTag)));
@@ -261,14 +263,15 @@ describe('Full Call Integration', () => {
 
   it('emits a local rejection accepted by the full response identity policy', async () => {
     const incomingCalls: any[] = [];
-    ua.on('incomingCall', (invitation: any) => incomingCalls.push(invitation));
+    ua.on('incomingCall', (event: any) => incomingCalls.push(event));
 
     await ua.connect();
     const invite = createInviteRequest();
     transport.emitData(serializeMessage(invite));
     await flush();
 
-    incomingCalls[0]!.reject(486, 'Busy Here');
+    incomingCalls[0]!;
+    (incomingCalls[0]!.invitation ?? incomingCalls[0]!).reject(486, 'Busy Here');
     await flush();
 
     const rejection = transport.sent
@@ -284,8 +287,8 @@ describe('Full Call Integration', () => {
 
   it('accepts a matching CANCEL and terminates the pending incoming invitation', async () => {
     const incomingCalls: any[] = [];
-    ua.on('incomingCall', (invitation: any) => {
-      incomingCalls.push(invitation);
+    ua.on('incomingCall', (event: any) => {
+      incomingCalls.push(event);
     });
 
     await ua.connect();
@@ -311,19 +314,19 @@ describe('Full Call Integration', () => {
     expect(inviteTerminated).toBeDefined();
     expect(responseMatchesRequestIdentity(cancel, cancelOk!)).toBe(true);
     expect(responseMatchesRequestIdentity(invite, inviteTerminated!)).toBe(true);
-    expect(incomingCalls[0]!.session.state).toBe('terminated');
+    expect((incomingCalls[0]!.invitation ?? incomingCalls[0]!).session.state).toBe('terminated');
   });
 
   it('reuses an accepted Invitation for a duplicate INVITE on a new transaction', async () => {
     const incomingCalls: any[] = [];
-    ua.on('incomingCall', (invitation: any) => {
-      incomingCalls.push(invitation);
+    ua.on('incomingCall', (event: any) => {
+      incomingCalls.push(event);
     });
 
     await ua.connect();
     transport.emitData(serializeMessage(createInviteRequest()));
     await flush();
-    const invitation = incomingCalls[0]!;
+    const invitation = incomingCalls[0]!.invitation ?? incomingCalls[0]!;
     const answer = invitation.answer('v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n');
     await flush();
 
@@ -348,7 +351,7 @@ describe('Full Call Integration', () => {
 
   it('routes an immediate remote BYE sent while the outgoing ACK is completing', async () => {
     const states: string[] = [];
-    ua.on('stateChanged', (event: any) => states.push(event.state));
+    ua.on('callStateChanged', (event: any) => states.push(event.state));
 
     await ua.connect();
     const outgoing = ua.invite('sip:bob@example.com');
@@ -488,7 +491,7 @@ describe('Full Call Integration', () => {
       mediaController,
     });
     const incomingCalls: any[] = [];
-    closingUa.on('incomingCall', (invitation: any) => incomingCalls.push(invitation));
+    closingUa.on('incomingCall', (event: any) => incomingCalls.push(event));
 
     await closingUa.connect();
     registrar.start();
@@ -498,7 +501,7 @@ describe('Full Call Integration', () => {
     await flush();
     expect(incomingCalls).toHaveLength(1);
 
-    const invitation = incomingCalls[0];
+    const invitation = incomingCalls[0]!.invitation ?? incomingCalls[0]!;
     const answerPromise = invitation.answer('v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n');
     await waitForSentResponse(transport, 200);
     transport.emitData(serializeMessage(createAckRequest(invitation.dialog.localTag)));

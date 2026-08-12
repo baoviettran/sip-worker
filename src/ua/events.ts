@@ -1,62 +1,94 @@
 /**
- * Typed registration events for the UserAgent.
+ * Typed UserAgent events.
  *
- * Uses overload-based typing so listeners receive the correct event shape
- * based on the event name.
+ * A generic `TypedEventEmitter<Events>` maps each event name to its payload type,
+ * so `on`/`off`/`once` give listeners the correct event shape for the name they
+ * subscribe to. `UserAgent extends TypedEventEmitter<UserAgentEventMap>`, so
+ * registration, call, and failure transitions each have a distinct event name —
+ * runtime no longer overloads one `stateChanged` name with incompatible states.
+ *
+ * All domain imports are type-only so this module introduces no runtime cycle.
  */
 
+import type { Invitation } from './invitation.js';
 import type { RegistrationIdentity, RegisterState } from './registration-types.js';
+import type { SessionState } from './session.js';
 
 export interface RegistrationStateChangedEvent {
-  readonly type: 'stateChanged';
+  readonly type: 'registrationStateChanged';
   readonly state: RegisterState;
   readonly identity: RegistrationIdentity;
 }
 
-export interface RegistrationFailedEvent {
+export interface CallStateChangedEvent {
+  readonly type: 'callStateChanged';
+  readonly state: SessionState;
+  readonly identity: RegistrationIdentity;
+}
+
+export interface IncomingCallEvent {
+  readonly type: 'incomingCall';
+  readonly invitation: Invitation;
+}
+
+export interface UserAgentFailedEvent {
   readonly type: 'failed';
   readonly error: Error;
   readonly identity: RegistrationIdentity;
 }
 
-export type RegistrationEvent = RegistrationStateChangedEvent | RegistrationFailedEvent;
-
-export interface RegistrationEventEmitter {
-  on(event: 'stateChanged', listener: (event: RegistrationStateChangedEvent) => void): void;
-  on(event: 'failed', listener: (event: RegistrationFailedEvent) => void): void;
-  off(event: 'stateChanged', listener: (event: RegistrationStateChangedEvent) => void): void;
-  off(event: 'failed', listener: (event: RegistrationFailedEvent) => void): void;
-  once(event: 'stateChanged', listener: (event: RegistrationStateChangedEvent) => void): void;
-  once(event: 'failed', listener: (event: RegistrationFailedEvent) => void): void;
+export interface UserAgentEventMap {
+  readonly registrationStateChanged: RegistrationStateChangedEvent;
+  readonly callStateChanged: CallStateChangedEvent;
+  readonly incomingCall: IncomingCallEvent;
+  readonly failed: UserAgentFailedEvent;
 }
 
-export class TypedEventEmitter implements RegistrationEventEmitter {
-  private readonly listeners = new Map<string, Set<Function>>();
+export interface UserAgentEventEmitter {
+  on<K extends keyof UserAgentEventMap>(event: K, listener: (value: UserAgentEventMap[K]) => void): void;
+  off<K extends keyof UserAgentEventMap>(event: K, listener: (value: UserAgentEventMap[K]) => void): void;
+  once<K extends keyof UserAgentEventMap>(event: K, listener: (value: UserAgentEventMap[K]) => void): void;
+}
 
-  on(event: string, listener: Function): void {
-    let set = this.listeners.get(event);
-    if (set === undefined) {
-      set = new Set();
-      this.listeners.set(event, set);
-    }
-    set.add(listener);
+/** @deprecated Use UserAgentFailedEvent. */
+export type RegistrationFailedEvent = UserAgentFailedEvent;
+
+/** @deprecated Preserved for source migration. */
+export type RegistrationEvent = RegistrationStateChangedEvent | UserAgentFailedEvent;
+
+/** @deprecated Use UserAgentEventEmitter. */
+export type RegistrationEventEmitter = UserAgentEventEmitter;
+
+type Listener<T> = (event: T) => void;
+
+export class TypedEventEmitter<Events extends object = UserAgentEventMap> {
+  private readonly listeners = new Map<keyof Events, Set<Listener<Events[keyof Events]>>>();
+
+  on<K extends keyof Events>(event: K, listener: Listener<Events[K]>): void {
+    const set = this.listeners.get(event) ?? new Set<Listener<Events[keyof Events]>>();
+    set.add(listener as Listener<Events[keyof Events]>);
+    this.listeners.set(event, set);
   }
 
-  off(event: string, listener: Function): void {
-    this.listeners.get(event)?.delete(listener);
+  off<K extends keyof Events>(event: K, listener: Listener<Events[K]>): void {
+    this.listeners.get(event)?.delete(listener as Listener<Events[keyof Events]>);
   }
 
-  once(event: string, listener: Function): void {
-    const wrapper = (...args: unknown[]) => {
+  once<K extends keyof Events>(event: K, listener: Listener<Events[K]>): void {
+    const wrapper: Listener<Events[K]> = (value) => {
       this.off(event, wrapper);
-      listener(...args);
+      listener(value);
     };
     this.on(event, wrapper);
   }
 
-  protected emit(event: string, ...args: unknown[]): void {
-    const set = this.listeners.get(event);
-    if (set === undefined) return;
-    for (const listener of set) listener(...args);
+  protected emit<K extends keyof Events>(event: K, value: Events[K]): void {
+    for (const listener of [...(this.listeners.get(event) ?? [])]) {
+      try {
+        listener(value);
+      } catch {
+        // User observers cannot corrupt an already-committed state transition.
+      }
+    }
   }
 }

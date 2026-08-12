@@ -90,6 +90,7 @@ function readChallenge(
       error: new SipError(
         response.statusCode,
         `cannot retry: no Digest challenge (${CHALLENGE_HEADERS.join('/')}) present in ${response.statusCode} response`,
+        'PROTOCOL_ERROR',
       ),
     };
   }
@@ -98,7 +99,7 @@ function readChallenge(
   if (!parsed.ok) {
     return {
       type: 'malformed',
-      error: new SipError(response.statusCode, `cannot retry: malformed Digest challenge (${parsed.error.message})`),
+      error: new SipError(response.statusCode, `cannot retry: malformed Digest challenge (${parsed.error.message})`, 'PROTOCOL_ERROR'),
     };
   }
 
@@ -106,7 +107,7 @@ function readChallenge(
   if (challenge === undefined) {
     return {
       type: 'unsupported',
-      error: new SipError(response.statusCode, 'cannot retry: no supported Digest challenge received'),
+      error: new SipError(response.statusCode, 'cannot retry: no supported Digest challenge received', 'AUTHENTICATION_UNSUPPORTED'),
     };
   }
 
@@ -177,6 +178,7 @@ export class AuthManager {
         error: new SipError(
           response.statusCode,
           'authentication qop "auth-int" is not supported',
+          'AUTHENTICATION_UNSUPPORTED',
         ),
       };
     }
@@ -189,7 +191,7 @@ export class AuthManager {
     if (spent >= maximum) {
       return {
         type: 'exhausted',
-        error: new SipError(response.statusCode, `authentication retry budget exhausted for request "${requestId}"`),
+        error: new SipError(response.statusCode, `authentication retry budget exhausted for request "${requestId}"`, 'AUTHENTICATION_FAILED'),
       };
     }
     budget.set(requestId, spent + 1);
@@ -208,7 +210,7 @@ export class AuthManager {
     if (answered === undefined) {
       return {
         type: 'malformed',
-        error: new SipError(0, `cannot regenerate authentication for unknown exchange "${context.requestId}"`),
+        error: new SipError(0, `cannot regenerate authentication for unknown exchange "${context.requestId}"`, 'PROTOCOL_ERROR'),
       };
     }
     return this.authorize(context.request, context.credentials, answered, false);
@@ -332,7 +334,7 @@ export class AuthManager {
     }
     const next = (this.nonceCounts.get(key) ?? 0) + 1;
     this.nonceCounts.set(key, next);
-    return next.toString().padStart(8, '0');
+    return next.toString(16).padStart(8, '0');
   }
 }
 

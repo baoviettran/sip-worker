@@ -277,6 +277,7 @@ describe('WorkerSupervisor replacement + pending commands', () => {
     h.clock.advance(HEARTBEAT_MS);
     h.clock.advance(TIMEOUT_MS); // worker 1 dies
     await expect(registration).rejects.toThrow(/worker 1 died/);
+    await expect(registration).rejects.toMatchObject({ code: 'WORKER_RESTARTED' });
     // The replacement can be registered again and resolves on its own `registered`.
     const replacement = h.supervisor.register();
     const gen = h.factory.current.bootstrap?.generation;
@@ -333,6 +334,44 @@ describe('WorkerSupervisor stop', () => {
     expect(pings).toBe(0);
     expect(h.events).toEqual([]);
   });
+
+  it('rejects pending register waiters and terminates the generation on stop', async () => {
+    const h = setup();
+    h.supervisor.start();
+    const generation = h.supervisor.generation;
+    const worker = h.factory.current;
+    const pending = h.supervisor.register();
+
+    h.supervisor.stop();
+
+    await expect(pending).rejects.toMatchObject({
+      name: 'WorkerRestartError',
+      generation,
+      message: 'worker supervisor stopped',
+    });
+    expect(worker.terminated).toBe(true);
+    expect(worker.port.listenerCount).toBe(0);
+    expect(h.factory.terminated).toBe(1);
+    expect(h.clock.pending()).toBe(0);
+  });
+
+  it('starts a fresh generation after stop without retaining old waiters', async () => {
+    const h = setup();
+    h.supervisor.start();
+    const oldWaiter = h.supervisor.register();
+    h.supervisor.stop();
+    await expect(oldWaiter).rejects.toBeInstanceOf(WorkerRestartError);
+
+    h.supervisor.start();
+    const generation = h.supervisor.generation;
+    const next = h.supervisor.register();
+    h.factory.current.port.deliver({ type: 'registered', generation });
+    await expect(next).resolves.toBeUndefined();
+    expect(h.factory.count).toBe(2);
+
+    h.supervisor.close();
+    expect(h.factory.terminated).toBe(2);
+  });
 });
 
 /** Drive a full death+restart cycle on the current generation. */
@@ -385,6 +424,7 @@ describe('WorkerSupervisor registration failure', () => {
     h.factory.current.port.deliver({ type: 'registrationFailed', generation: gen!, error: failure });
     await expect(registration).rejects.toBeInstanceOf(WorkerRegistrationError);
     await expect(registration).rejects.toMatchObject({ generation: gen });
+    await expect(registration).rejects.toMatchObject({ code: 'WORKER_REGISTRATION_FAILED' });
     // The supervisor emits a registrationFailed event for observers.
     const failed = h.events.find((e) => e.type === 'registrationFailed');
     expect(failed?.generation).toBe(gen);
@@ -551,6 +591,34 @@ describe('WorkerSupervisor concurrent waiters', () => {
 });
 
 describe('WorkerSupervisor stop/start', () => {
+  it('returns workers, listeners, and timers to baseline across repeated stop/start cycles', async () => {
+    const h = setup(); // starts generation 1
+    for (let cycle = 0; cycle < 25; cycle += 1) {
+      // Re-arm after the previous cycle's stop (no-op on cycle 0, already started).
+      h.supervisor.start();
+      const registration = h.supervisor.register();
+      const worker = h.factory.current;
+      const bootstrap = worker.bootstrap;
+      if (bootstrap === undefined) throw new Error(`cycle ${cycle}: no bootstrap delivered`);
+      worker.port.deliver({ type: 'registered', generation: bootstrap.generation });
+      await expect(registration).resolves.toBeUndefined();
+
+      // stop() tears the live generation down exactly once: no port listeners,
+      // no lingering timers, worker terminated.
+      h.supervisor.stop();
+      expect(worker.terminated).toBe(true);
+      expect(worker.port.listenerCount).toBe(0);
+      expect(h.clock.pending()).toBe(0);
+    }
+    // close() releases the final generation; no waiter remains pending.
+    h.supervisor.start();
+    const waiting = h.supervisor.register();
+    h.supervisor.close();
+    await expect(waiting).rejects.toBeInstanceOf(WorkerClosedError);
+    expect(h.factory.terminated).toBe(h.factory.count);
+    expect(h.clock.pending()).toBe(0);
+  });
+
   it('restarts the heartbeat loop and spawns a fresh generation after stop then start', () => {
     const h = setup();
     boot(h);
@@ -651,6 +719,7 @@ describe('WorkerSupervisor close', () => {
     h.supervisor.close();
     await expect(a).rejects.toBeInstanceOf(WorkerClosedError);
     await expect(b).rejects.toBeInstanceOf(WorkerClosedError);
+    await expect(a).rejects.toMatchObject({ code: 'WORKER_CLOSED' });
     // The worker is terminated.
     expect(h.factory.current.terminated).toBe(true);
   });

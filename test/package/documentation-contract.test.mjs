@@ -21,6 +21,7 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const readProject = (rel) => readFileSync(join(packageRoot, rel), 'utf8');
 
 const readme = readProject('README.md');
+const security = readProject('SECURITY.md');
 const pkg = JSON.parse(readProject('package.json'));
 
 // ---- (1) every relative markdown link in README resolves to an existing file ----
@@ -74,9 +75,21 @@ for (const rel of ['LICENSE', 'SECURITY.md', 'CHANGELOG.md']) {
   assert.ok(existsSync(join(packageRoot, rel)), `required release file ${rel} is missing`);
 }
 assert.equal(pkg.license, 'MIT', 'package.json license mismatch vs LICENSE');
-assert.equal(pkg.version, '0.1.0', 'package.json version drift');
+assert.equal(pkg.version, '0.2.0', 'package.json version drift');
 assert.ok(pkg.engines?.node, 'package.json must declare node engines');
 assert.ok(pkg.repository?.url, 'package.json must declare repository metadata');
 assert.ok(pkg.support?.url, 'package.json must declare support metadata');
 
-console.error(`documentation contract OK: ${links} README links resolve, scripts present, 0.1.0 framing honest`);
+// ---- (5) browser v1.0 roadmap is linked from the README ----
+assert.match(readme, /browser-v1-production-roadmap-design\.md/);
+
+// ---- (6) no stale "unbounded AuthManager maps" limitation anywhere ----
+for (const [name, text] of [['README.md', readme], ['SECURITY.md', security]]) {
+  assert.doesNotMatch(text, /AuthManager maps are unbounded|Unbounded `AuthManager` maps/i, `${name} contains stale AuthManager limitation`);
+}
+
+// ---- (7) current public event names are documented in the README ----
+assert.match(readme, /registrationStateChanged/);
+assert.match(readme, /callStateChanged/);
+
+console.error(`documentation contract OK: ${links} README links resolve, scripts present, 0.2.0 framing honest`);

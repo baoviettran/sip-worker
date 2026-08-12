@@ -5,6 +5,7 @@
 // ---- root ----
 import {
   SipError,
+  TransportError,
   SipStreamDecoder,
   SipIngress,
   UserAgent,
@@ -30,12 +31,20 @@ import type {
   RegistrationIdentity,
   RegisterState,
   MediaMessage,
+  SipErrorCode,
 } from 'sip-worker';
 import type {
+  CallStateChangedEvent,
+  IncomingCallEvent,
+  Invitation,
   RegistrationStateChangedEvent,
-  RegistrationFailedEvent,
-  RegistrationEvent,
-  RegistrationEventEmitter,
+  SessionState,
+  UserAgentEventEmitter,
+} from 'sip-worker';
+import type {
+  RegistrationFailedEvent as DeprecatedRegistrationFailedEvent,
+  RegistrationEvent as DeprecatedRegistrationEvent,
+  RegistrationEventEmitter as DeprecatedRegistrationEventEmitter,
 } from 'sip-worker';
 
 // ---- subpaths ----
@@ -165,6 +174,7 @@ const authManager = new AuthManager(idGenerator);
 // ---- root values + types ----
 const rootValues: unknown[] = [
   SipError,
+  TransportError,
   SipStreamDecoder,
   SipIngress,
   UserAgent,
@@ -182,6 +192,10 @@ const rootValues: unknown[] = [
 ];
 for (const v of rootValues) void v;
 
+const code: SipErrorCode = 'REGISTRATION_FAILED';
+void new SipError(0, 'failed', code);
+void new TransportError('transport failed');
+
 const uaOptions: UserAgentOptions = {
   transport,
   clock,
@@ -194,11 +208,26 @@ const uaOptions: UserAgentOptions = {
 void new UACls(uaOptions);
 
 // ---- registration event types belong on the root ----
-const emitter: RegistrationEventEmitter = new UserAgent(uaOptions);
-emitter.on('stateChanged', (e: RegistrationStateChangedEvent) => void e.state);
-emitter.on('failed', (e: RegistrationFailedEvent) => void e.error);
-declare const anyEvent: RegistrationEvent;
-void anyEvent;
+const emitter: UserAgentEventEmitter = new UserAgent(uaOptions);
+emitter.on('registrationStateChanged', (event: RegistrationStateChangedEvent) => {
+  const state: RegisterState = event.state;
+  void state;
+});
+emitter.on('callStateChanged', (event: CallStateChangedEvent) => {
+  const state: SessionState = event.state;
+  void state;
+});
+emitter.on('incomingCall', (event: IncomingCallEvent) => {
+  const invitation: Invitation = event.invitation;
+  void invitation;
+});
+// @ts-expect-error call state is not a RegisterState
+emitter.on('callStateChanged', (event: RegistrationStateChangedEvent) => void event);
+// Deprecated aliases remain importable for source migration.
+void (null as unknown as DeprecatedRegistrationFailedEvent);
+void (null as unknown as DeprecatedRegistrationEvent);
+declare const deprecatedEmitter: DeprecatedRegistrationEventEmitter;
+void deprecatedEmitter;
 
 // ---- messages ----
 void msgParse(new Uint8Array());
@@ -216,7 +245,12 @@ void dec;
 // ---- transport/node ----
 void new NodeUdpTransport(
   null as unknown as DatagramSocketLike,
-  { localPort: 5060, remoteHost: 'sip.example.test', remotePort: 5060 } as NodeUdpTransportOptions,
+  {
+    localPort: 5060,
+    remoteHost: 'sip.example.test',
+    remotePort: 5060,
+    remoteAddresses: ['192.0.2.10'],
+  } as NodeUdpTransportOptions,
 );
 void new NodeTcpTransport(
   null as unknown as StreamSocketLike,

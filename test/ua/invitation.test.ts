@@ -507,6 +507,7 @@ describe('Invitation (incoming SIP call session)', () => {
     const first = h.invitation.answer(STUB_SDP);
 
     await expect(h.invitation.answer(STUB_SDP)).rejects.toThrow('answer() already called');
+    await expect(h.invitation.answer(STUB_SDP)).rejects.toMatchObject({ code: 'INVALID_STATE' });
     await flush();
 
     expect(okResponses(h.sent)).toHaveLength(1);

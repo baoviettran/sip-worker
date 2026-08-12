@@ -35,8 +35,9 @@ interface Harness {
 function setup(options: {
   credentials?: boolean;
   refreshFraction?: number;
+  onBackgroundFailure?: (error: Error) => void;
 } = {}): Harness {
-  const { credentials = true, refreshFraction = 0.5 } = options;
+  const { credentials = true, refreshFraction = 0.5, onBackgroundFailure } = options;
   const clock = new FakeClock();
   const transport = new FakeTransport({ reliable: true, framing: 'stream' });
   void transport.connect();
@@ -65,6 +66,7 @@ function setup(options: {
     clock,
     authManager,
     refreshFraction,
+    onBackgroundFailure,
   };
   const registrar = new Registrar(options_);
   return { clock, transport, layer, events, sent, registrar, authManager };
@@ -513,6 +515,21 @@ describe('Registrar', () => {
     expect(finalCSeq(refresh)).toBe(2);
   });
 
+  it('reports a scheduled refresh failure through the background callback', async () => {
+    const failures: Error[] = [];
+    const h = setup({ onBackgroundFailure: (error) => failures.push(error) });
+    await completeRegister(h, [{ status: 200, over: { expires: '2' } }]);
+
+    h.clock.advance(1000);
+    await flush();
+    h.clock.advance(32000);
+    await flush();
+
+    expect(h.registrar.state).toBe('failed');
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ code: 'REGISTRATION_FAILED' });
+  });
+
   it('unregisters with Contact * and Expires 0', async () => {
     const h = setup();
     await completeRegister(h, [{ status: 200 }]);
@@ -633,7 +650,7 @@ describe('Registrar', () => {
     const registration = h.registrar.register();
     await flush();
     respond(h, 403);
-    await expect(registration).rejects.toThrow();
+    await expect(registration).rejects.toMatchObject({ code: 'REGISTRATION_FAILED' });
     expect(h.registrar.state).toBe('failed');
   });
 
@@ -643,7 +660,10 @@ describe('Registrar', () => {
     await flush();
     // UA hook fires mid-exchange; the pending promise must reject, not hang.
     h.registrar.onTransportDisconnected();
-    await expect(Promise.race([registration, new Promise((resolve) => setTimeout(resolve, 20))])).rejects.toThrow('transport disconnected');
+    await expect(Promise.race([registration, new Promise((resolve) => setTimeout(resolve, 20))])).rejects.toMatchObject({
+      message: 'transport disconnected during a registration exchange',
+      code: 'TRANSPORT_FAILED',
+    });
     expect(h.registrar.state).toBe('failed');
     expect(h.registrar.status()).toMatchObject({ nextCSeq: 2 });
   });

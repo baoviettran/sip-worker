@@ -178,16 +178,20 @@ describe('NodeTcpTransport', () => {
     const cause = new Error('connect failed');
     transport.subscribe((event) => events.push(event));
     transport.subscribe(() => {
-      throw new Error('subscriber failed');
+      throw new Error('observer failed');
     });
 
     const pending = transport.connect();
-    expect(() => socket.emit('error', cause)).toThrow('subscriber failed');
+    expect(() => socket.emit('error', cause)).not.toThrow();
     await expect(pending).rejects.toMatchObject({ name: 'TransportError', cause });
     socket.completeConnect();
 
     expect(transport.isConnected()).toBe(false);
     expect(events.filter((event) => event.type === 'connected')).toHaveLength(0);
+    expect(events).toContainEqual({
+      type: 'error',
+      error: expect.objectContaining({ name: 'TransportError', cause }),
+    });
   });
 
   it('is one-shot: a failed connect permanently closes the transport', async () => {
@@ -261,7 +265,7 @@ describe('NodeTcpTransport', () => {
       () => { outcome = 'rejected'; },
     );
 
-    expect(() => socket.emit('close')).toThrow('subscriber failed');
+    expect(() => socket.emit('close')).not.toThrow();
     await Promise.resolve();
 
     expect(outcome).toBe('resolved');
