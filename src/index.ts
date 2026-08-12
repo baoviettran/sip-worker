@@ -1,4 +1,5 @@
 export { SipError, ParseError, TransportError } from './errors.js';
+export type { SipErrorCode } from './error-codes.js';
 export {
   Headers,
   isRequest, isResponse, makeRequest, makeResponse, bodyText, withTextBody,

@@ -246,6 +246,7 @@ describe('WorkerMediaController bounded lifecycle', () => {
     clock.advance(1);
     await expect(offer).rejects.toBeInstanceOf(MediaTimeoutError);
     await expect(offer).rejects.toThrow(/createOffer.*session-1/);
+    await expect(offer).rejects.toMatchObject({ code: 'TIMEOUT' });
   });
 
   it('clears the deadline timer when the matching reply arrives', async () => {
@@ -269,6 +270,7 @@ describe('WorkerMediaController bounded lifecycle', () => {
     // No reply yet; close() must reject the pending offer (not the deadline).
     controller.close();
     await expect(offer).rejects.toThrow(/media port closed/);
+    await expect(offer).rejects.toMatchObject({ code: 'MEDIA_UNAVAILABLE' });
     await expect(offer).rejects.not.toBeInstanceOf(MediaTimeoutError);
     // Closing cleared the deadline timer.
     expect(clock.pending()).toBe(0);
@@ -311,6 +313,7 @@ describe('WorkerMediaController bounded lifecycle', () => {
     const { controller } = makeBridge();
     controller.close();
     await expect(controller.createOffer('session-1')).rejects.toThrow(/media port closed/);
+    await expect(controller.createOffer('session-1')).rejects.toMatchObject({ code: 'MEDIA_UNAVAILABLE' });
   });
 
   it('does not configure a deadline when no clock/deadline is provided', async () => {

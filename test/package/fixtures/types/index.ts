@@ -5,6 +5,7 @@
 // ---- root ----
 import {
   SipError,
+  TransportError,
   SipStreamDecoder,
   SipIngress,
   UserAgent,
@@ -30,6 +31,7 @@ import type {
   RegistrationIdentity,
   RegisterState,
   MediaMessage,
+  SipErrorCode,
 } from 'sip-worker';
 import type {
   RegistrationStateChangedEvent,
@@ -165,6 +167,7 @@ const authManager = new AuthManager(idGenerator);
 // ---- root values + types ----
 const rootValues: unknown[] = [
   SipError,
+  TransportError,
   SipStreamDecoder,
   SipIngress,
   UserAgent,
@@ -181,6 +184,10 @@ const rootValues: unknown[] = [
   computeDigest,
 ];
 for (const v of rootValues) void v;
+
+const code: SipErrorCode = 'REGISTRATION_FAILED';
+void new SipError(0, 'failed', code);
+void new TransportError('transport failed');
 
 const uaOptions: UserAgentOptions = {
   transport,

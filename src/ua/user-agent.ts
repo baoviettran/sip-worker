@@ -19,7 +19,7 @@
 import type { Transport, Clock, TransportToken } from '../transport/index.js';
 import { SipIngress } from '../transport/index.js';
 import type { MessageSink } from '../transport/ingress.js';
-import { SipError } from '../errors.js';
+import { SipError, TransportError } from '../errors.js';
 import { TransactionLayer, deriveTimers, DEFAULT_TIMERS } from '../transactions/index.js';
 import type { TransactionLayerEvent } from '../transactions/types.js';
 import { Registrar } from './registrar.js';
@@ -159,14 +159,19 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       await this.transport.connect();
     } catch (error) {
       if (this.disconnected) {
-        throw this.shutdownError ?? new SipError(0, 'UserAgent disconnected');
+        throw this.shutdownError ?? new SipError(0, 'UserAgent disconnected', 'LIFECYCLE_ABORTED');
       }
-      throw error;
+      if (error instanceof TransportError || error instanceof SipError) throw error;
+      throw new SipError(
+        0,
+        error instanceof Error ? error.message : String(error),
+        'CONNECTION_FAILED',
+      );
     } finally {
       this.connecting = false;
     }
     if (this.disconnected) {
-      const error = this.shutdownError ?? new SipError(0, 'UserAgent disconnected');
+      const error = this.shutdownError ?? new SipError(0, 'UserAgent disconnected', 'LIFECYCLE_ABORTED');
       await this.transport.disconnect();
       throw error;
     }
@@ -231,8 +236,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
     }
     const previousState = this.registerState;
     try {
-      await this.registrar.register();
-      if (this.registerState !== previousState) {
+      await this.registrar.register();      if (this.registerState !== previousState) {
         this.emit('stateChanged', {
           type: 'stateChanged',
           state: this.registerState,
@@ -350,7 +354,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
   /** Disconnect the transport and clean up all listeners/timers. */
   async disconnect(): Promise<void> {
     if (this.disconnected) return;
-    const error = new SipError(0, 'UserAgent disconnected');
+    const error = new SipError(0, 'UserAgent disconnected', 'LIFECYCLE_ABORTED');
     this.shutdownError = error;
     this.disconnected = true;
 

@@ -1,4 +1,5 @@
 import type { Clock } from '../transport/index.js';
+import { SipError } from '../errors.js';
 import type { MediaMessage, MediaPort, MediaReply, MediaRequestMessage } from './protocol.js';
 
 /** Default deadline (ms) for pending media requests when a clock is present. */
@@ -10,6 +11,7 @@ const DEFAULT_MEDIA_DEADLINE_MS = 1000;
  * operational message so it crosses the worker boundary cleanly.
  */
 export class MediaTimeoutError extends Error {
+  readonly code = 'TIMEOUT' as const;
   readonly commandType: string;
   readonly sessionId: string;
   readonly deadlineMs: number;
@@ -135,7 +137,7 @@ export class WorkerMediaController {
 
   private sendAndAwait<T extends string | void>(command: MediaRequestMessage): Promise<T> {
     if (this.closed) {
-      return Promise.reject(new Error(`media port closed, cannot send ${command.type}`));
+      return Promise.reject(new SipError(0, `media port closed, cannot send ${command.type}`, 'MEDIA_UNAVAILABLE'));
     }
     return new Promise<T>((resolve, reject) => {
       const pending: Pending = {
@@ -152,7 +154,7 @@ export class WorkerMediaController {
         this.port.postMessage(command);
       } catch (error) {
         this.disposePending(command.requestId);
-        reject(error instanceof Error ? error : new Error(String(error)));
+        reject(new SipError(0, error instanceof Error ? error.message : String(error), 'MEDIA_UNAVAILABLE'));
       }
     });
   }
@@ -183,7 +185,7 @@ export class WorkerMediaController {
     if (reply.type === 'mediaResult') {
       pending.resolve(reply.sdp);
     } else {
-      pending.reject(new Error(reply.message));
+      pending.reject(new SipError(0, reply.message, 'MEDIA_UNAVAILABLE'));
     }
   }
 
@@ -196,7 +198,7 @@ export class WorkerMediaController {
 
   private rejectAll(): void {
     for (const { reject } of this.pending.values()) {
-      reject(new Error('media port closed'));
+      reject(new SipError(0, 'media port closed', 'MEDIA_UNAVAILABLE'));
     }
     this.clearAllDeadlines();
     this.pending.clear();
@@ -207,7 +209,7 @@ export class WorkerMediaController {
       if (pending.sessionId !== sessionId) continue;
       this.pending.delete(id);
       this.clearDeadline(pending);
-      pending.reject(new Error(message));
+      pending.reject(new SipError(0, message, 'MEDIA_UNAVAILABLE'));
     }
   }
 

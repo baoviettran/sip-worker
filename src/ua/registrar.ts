@@ -150,10 +150,10 @@ export class Registrar {
    */
   register(): Promise<void> {
     if (this.disposed) {
-      return Promise.reject(new SipError(0, 'Registrar has been disposed'));
+      return Promise.reject(new SipError(0, 'Registrar has been disposed', 'LIFECYCLE_ABORTED'));
     }
     if (this.stateValue === 'registering' || this.stateValue === 'unregistering') {
-      return Promise.reject(new SipError(0, 'a registration exchange is already in progress'));
+      return Promise.reject(new SipError(0, 'a registration exchange is already in progress', 'INVALID_STATE'));
     }
     this.reconnectPending = false;
     this.redirectCount = 0;
@@ -171,10 +171,10 @@ export class Registrar {
    */
   unregister(): Promise<void> {
     if (this.disposed) {
-      return Promise.reject(new SipError(0, 'Registrar has been disposed'));
+      return Promise.reject(new SipError(0, 'Registrar has been disposed', 'LIFECYCLE_ABORTED'));
     }
     if (this.stateValue === 'registering' || this.stateValue === 'unregistering') {
-      return Promise.reject(new SipError(0, 'a registration exchange is already in progress'));
+      return Promise.reject(new SipError(0, 'a registration exchange is already in progress', 'INVALID_STATE'));
     }
     this.cancelRefresh();
     this.stateValue = 'unregistering';
@@ -200,7 +200,7 @@ export class Registrar {
     if (deferred !== undefined) {
       // An exchange was in flight; settle it with a rejection rather than hang.
       this.stateValue = 'failed';
-      deferred.reject(new SipError(0, 'transport disconnected during a registration exchange'));
+      deferred.reject(new SipError(0, 'transport disconnected during a registration exchange', 'TRANSPORT_FAILED'));
     } else if (this.stateValue !== 'unregistering') {
       this.stateValue = 'unregistered';
     }
@@ -266,7 +266,7 @@ export class Registrar {
             break;
           case 'timeout':
           case 'transportError':
-            this.fail(new SipError(0, `REGISTER ${event.type}`));
+            this.fail(new SipError(0, `REGISTER ${event.type}`, event.type === 'transportError' ? 'TRANSPORT_FAILED' : 'TIMEOUT'));
             break;
           default:
             break;
@@ -287,18 +287,18 @@ export class Registrar {
     } else if ((code === 301 || code === 302) && this.redirectCount < MAX_REDIRECTS) {
       this.handleRedirect(base, response);
     } else if (code >= 300) {
-      this.fail(new SipError(code, `REGISTER rejected with ${code}`));
+      this.fail(new SipError(code, `REGISTER rejected with ${code}`, 'REGISTRATION_FAILED'));
     }
   }
 
   private handleAuth(base: SipRequestMessage, response: SipResponseMessage): void {
     if (this.authManager === undefined || this.credentials === undefined) {
-      this.fail(new SipError(response.statusCode, `${response.statusCode} received but no credentials configured`));
+      this.fail(new SipError(response.statusCode, `${response.statusCode} received but no credentials configured`, 'AUTHENTICATION_FAILED'));
       return;
     }
     const requestId = this.authExchangeId;
     if (requestId === undefined) {
-      this.fail(new SipError(0, 'REGISTER authentication exchange is not active'));
+      this.fail(new SipError(0, 'REGISTER authentication exchange is not active', 'INVALID_STATE'));
       return;
     }
     const result = this.authManager.retry({
@@ -338,7 +338,7 @@ export class Registrar {
   private handleRedirect(base: SipRequestMessage, response: SipResponseMessage): void {
     const contact = extractUri(response.headers.get('Contact'));
     if (contact === undefined) {
-      this.fail(new SipError(response.statusCode, 'REGISTER redirect without a Contact'));
+      this.fail(new SipError(response.statusCode, 'REGISTER redirect without a Contact', 'PROTOCOL_ERROR'));
       return;
     }
     this.redirectCount += 1;
@@ -354,7 +354,7 @@ export class Registrar {
     if (!hasAuthorization) return request;
     const requestId = this.authExchangeId;
     if (this.authManager === undefined || this.credentials === undefined || requestId === undefined) {
-      this.fail(new SipError(0, 'REGISTER authentication exchange cannot be regenerated'));
+      this.fail(new SipError(0, 'REGISTER authentication exchange cannot be regenerated', 'INVALID_STATE'));
       return undefined;
     }
     const result = this.authManager.reauthorize({ requestId, request, credentials: this.credentials });

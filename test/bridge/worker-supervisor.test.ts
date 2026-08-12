@@ -277,6 +277,7 @@ describe('WorkerSupervisor replacement + pending commands', () => {
     h.clock.advance(HEARTBEAT_MS);
     h.clock.advance(TIMEOUT_MS); // worker 1 dies
     await expect(registration).rejects.toThrow(/worker 1 died/);
+    await expect(registration).rejects.toMatchObject({ code: 'WORKER_RESTARTED' });
     // The replacement can be registered again and resolves on its own `registered`.
     const replacement = h.supervisor.register();
     const gen = h.factory.current.bootstrap?.generation;
@@ -385,6 +386,7 @@ describe('WorkerSupervisor registration failure', () => {
     h.factory.current.port.deliver({ type: 'registrationFailed', generation: gen!, error: failure });
     await expect(registration).rejects.toBeInstanceOf(WorkerRegistrationError);
     await expect(registration).rejects.toMatchObject({ generation: gen });
+    await expect(registration).rejects.toMatchObject({ code: 'WORKER_REGISTRATION_FAILED' });
     // The supervisor emits a registrationFailed event for observers.
     const failed = h.events.find((e) => e.type === 'registrationFailed');
     expect(failed?.generation).toBe(gen);
@@ -651,6 +653,7 @@ describe('WorkerSupervisor close', () => {
     h.supervisor.close();
     await expect(a).rejects.toBeInstanceOf(WorkerClosedError);
     await expect(b).rejects.toBeInstanceOf(WorkerClosedError);
+    await expect(a).rejects.toMatchObject({ code: 'WORKER_CLOSED' });
     // The worker is terminated.
     expect(h.factory.current.terminated).toBe(true);
   });

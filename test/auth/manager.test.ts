@@ -188,6 +188,7 @@ describe('AuthManager.retry', () => {
     const result = new AuthManager(f.ids()).retry(ctx);
     const failure = expectFailure(result, 'unsupported');
     expect(failure.error.statusCode).toBe(401);
+    expect(failure.error.code).toBe('AUTHENTICATION_UNSUPPORTED');
   });
 
   it('declines an auth-int-only challenge without throwing or consuming the retry budget', () => {
@@ -212,6 +213,7 @@ describe('AuthManager.retry', () => {
     }).not.toThrow();
     const failure = expectFailure(result!, 'unsupported');
     expect(failure.error.statusCode).toBe(401);
+    expect(failure.error.code).toBe('AUTHENTICATION_UNSUPPORTED');
     // The decline is zero-cost: no ordinary retry slot was reserved.
     expect(manager.retriesByRequestSize).toBe(0);
     // A later ordinary qop="auth" retry on the same requestId is still allowed.
@@ -232,6 +234,7 @@ describe('AuthManager.retry', () => {
     const fourth = manager.retry(f.context({ requestId: 'req-X', credentials: plain }));
     const failure = expectFailure(fourth, 'exhausted');
     expect(failure.error.statusCode).toBe(401);
+    expect(failure.error.code).toBe('AUTHENTICATION_FAILED');
   });
 
   it('reuses the nonce and nc count across distinct requestIds', () => {

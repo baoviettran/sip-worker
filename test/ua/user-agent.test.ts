@@ -439,6 +439,7 @@ describe('UserAgent shutdown settlement', () => {
     await ua.disconnect();
 
     await expect(registration).rejects.toThrow('UserAgent disconnected');
+    await expect(registration).rejects.toMatchObject({ code: 'LIFECYCLE_ABORTED' });
     expect(rejections).toBe(1);
   });
 

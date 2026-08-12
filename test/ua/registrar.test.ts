@@ -633,7 +633,7 @@ describe('Registrar', () => {
     const registration = h.registrar.register();
     await flush();
     respond(h, 403);
-    await expect(registration).rejects.toThrow();
+    await expect(registration).rejects.toMatchObject({ code: 'REGISTRATION_FAILED' });
     expect(h.registrar.state).toBe('failed');
   });
 
@@ -643,7 +643,10 @@ describe('Registrar', () => {
     await flush();
     // UA hook fires mid-exchange; the pending promise must reject, not hang.
     h.registrar.onTransportDisconnected();
-    await expect(Promise.race([registration, new Promise((resolve) => setTimeout(resolve, 20))])).rejects.toThrow('transport disconnected');
+    await expect(Promise.race([registration, new Promise((resolve) => setTimeout(resolve, 20))])).rejects.toMatchObject({
+      message: 'transport disconnected during a registration exchange',
+      code: 'TRANSPORT_FAILED',
+    });
     expect(h.registrar.state).toBe('failed');
     expect(h.registrar.status()).toMatchObject({ nextCSeq: 2 });
   });

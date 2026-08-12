@@ -52,6 +52,7 @@ export type SupervisorEvent =
 
 /** Raised when a worker generation is lost and its pending operations are rejected. */
 export class WorkerRestartError extends Error {
+  readonly code = 'WORKER_RESTARTED' as const;
   constructor(
     readonly generation: number,
     message?: string,
@@ -68,6 +69,7 @@ export class WorkerRestartError extends Error {
  * distinguish a registration failure from a heartbeat death.
  */
 export class WorkerRegistrationError extends Error {
+  readonly code = 'WORKER_REGISTRATION_FAILED' as const;
   constructor(
     readonly generation: number,
     readonly failureCause?: SerializedError,
@@ -87,6 +89,7 @@ export class WorkerRegistrationError extends Error {
  * carries no generation context because the whole supervisor is gone.
  */
 export class WorkerClosedError extends Error {
+  readonly code = 'WORKER_CLOSED' as const;
   constructor(message?: string) {
     super(message ?? 'worker supervisor closed');
     this.name = 'WorkerClosedError';

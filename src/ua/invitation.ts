@@ -102,10 +102,10 @@ export class Invitation {
    */
   answer(localSdp: string): Promise<void> {
     if (this.disposed) {
-      return Promise.reject(new SipError(0, 'Invitation has been disposed'));
+      return Promise.reject(new SipError(0, 'Invitation has been disposed', 'LIFECYCLE_ABORTED'));
     }
     if (this.state !== 'pending') {
-      return Promise.reject(new SipError(0, 'answer() already called'));
+      return Promise.reject(new SipError(0, 'answer() already called', 'INVALID_STATE'));
     }
     this.state = 'answering';
     return new Promise<void>((resolve, reject) => {
@@ -147,7 +147,7 @@ export class Invitation {
   reject(statusCode: number, reason?: string): void {
     if (this.state !== 'pending') return;
     this.state = 'rejected';
-    const error = new SipError(statusCode, `INVITE rejected with ${statusCode}`);
+    const error = new SipError(statusCode, `INVITE rejected with ${statusCode}`, 'CALL_FAILED');
     const response = this.buildErrorResponse(statusCode, reason ?? 'Rejected');
     try {
       this.layer.sendResponse(this.transaction.key, response);
@@ -343,7 +343,7 @@ export class Invitation {
 
     this.state = 'cancelled';
     this.teardown();
-    const error = new SipError(487, 'INVITE cancelled');
+    const error = new SipError(487, 'INVITE cancelled', 'CALL_FAILED');
     const deferred = this.takeAnswerDeferred();
     deferred?.reject(error);
 
@@ -369,7 +369,7 @@ export class Invitation {
   }
 
   private onRetransmitTimeout(): void {
-    this.fail(new SipError(0, 'ACK timeout'));
+    this.fail(new SipError(0, 'ACK timeout', 'TIMEOUT'));
   }
 
   private fail(reason: unknown): void {
@@ -386,8 +386,7 @@ export class Invitation {
     const deferred = this.takeAnswerDeferred();
     if (deferred !== undefined) {
       deferred.reject(new SipError(0, 'BYE received before ACK'));
-    }
-    this.session.transition('terminated');
+    }    this.session.transition('terminated');
   }
 
   private takeAnswerDeferred(): { resolve: () => void; reject: (reason: unknown) => void } | undefined {
