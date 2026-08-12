@@ -21,10 +21,10 @@
   ],
   "scripts": {
     "build": "npm run build -w @sip-worker/core && npm run build -w sip-worker && npm run build -w @sip-worker/node",
-    "typecheck": "tsc -b && npm run typecheck:test -ws --if-present",
+    "typecheck": "tsc -b && npm run typecheck:test --workspaces --if-present",
     "test": "vitest run",
     "test:architecture": "node --test test/architecture/*.test.mjs",
-    "test:api": "npm run api:check -ws --if-present",
+    "test:api": "npm run api:check --workspaces --if-present",
     "test:bundle": "node test/browser-bundle/browser-bundle.test.mjs",
     "test:package": "node test/package/workspace-pack.test.mjs",
     "test:compatibility": "node test/compatibility/packed-compatibility.test.mjs",
