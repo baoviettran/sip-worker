@@ -91,6 +91,7 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
   private connecting = false;
   private connected = false;
   private disconnected = false;
+  private connectPromise?: Promise<void>;
   private shutdownError?: SipError;
   private readonly ownerSessionUnsubscribers = new Map<DialogOwner, () => void>();
   private activeInviter?: Inviter;
@@ -146,11 +147,36 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
 
   /**
    * Connect the transport and wire up the transaction layer, ingress, and registrar.
-   * Construction order: transport → coordinator → ingress → registrar.
+   * Concurrent calls share a single composition attempt; the first caller owns the
+   * active `connectPromise` and every subsequent caller receives the same promise.
    */
-  async connect(): Promise<void> {
+  connect(): Promise<void> {
     if (this.disconnected) {
-      throw new Error('UserAgent has been disconnected');
+      return Promise.reject(new SipError(0, 'UserAgent has been disconnected', 'LIFECYCLE_ABORTED'));
+    }
+    if (this.connected) return Promise.resolve();
+    if (this.connectPromise !== undefined) return this.connectPromise;
+
+    const attempt = this.connectOnce();
+    this.connectPromise = attempt;
+    void attempt.then(
+      () => {
+        if (this.connectPromise === attempt) this.connectPromise = undefined;
+      },
+      () => {
+        if (this.connectPromise === attempt) this.connectPromise = undefined;
+      },
+    );
+    return attempt;
+  }
+
+  /**
+   * Composition once: transport → coordinator → ingress → registrar.
+   * A disconnect that races during composition must still win.
+   */
+  private async connectOnce(): Promise<void> {
+    if (this.disconnected) {
+      throw new SipError(0, 'UserAgent has been disconnected', 'LIFECYCLE_ABORTED');
     }
     if (this.connected) return;
 

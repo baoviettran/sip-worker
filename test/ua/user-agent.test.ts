@@ -67,8 +67,10 @@ class DelayedAckTransport extends FakeTransport {
 /** Transport that exposes a pending connection so shutdown can win the race. */
 class DelayedConnectTransport extends FakeTransport {
   private release: (() => void) | undefined;
+  connectCalls = 0;
 
   override async connect(): Promise<void> {
+    this.connectCalls += 1;
     await new Promise<void>((resolve) => {
       this.release = resolve;
     });
@@ -356,6 +358,24 @@ describe('UserAgent liveness wiring', () => {
     const { ua } = setup({ liveness });
 
     await ua.connect();
+    expect(liveness.calls).toEqual(['start']);
+
+    await ua.disconnect();
+    expect(liveness.calls).toEqual(['start', 'stop']);
+  });
+
+  it('shares one promise and composes one stack across concurrent connect calls', async () => {
+    const transport = new DelayedConnectTransport({ reliable: true, framing: 'stream' });
+    const liveness = new RecordingLiveness();
+    const { ua } = setup({ transport, liveness });
+
+    const first = ua.connect();
+    const second = ua.connect();
+
+    expect(second).toBe(first);
+    expect(transport.connectCalls).toBe(1);
+    transport.releaseConnect();
+    await Promise.all([first, second]);
     expect(liveness.calls).toEqual(['start']);
 
     await ua.disconnect();
