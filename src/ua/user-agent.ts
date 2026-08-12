@@ -217,6 +217,11 @@ export class UserAgent extends TypedEventEmitter implements RegistrationEventEmi
       authManager: this.authManager,
       refreshFraction: this.options.refreshFraction,
       initialIdentity: this.options.initialIdentity,
+      onBackgroundFailure: (error) => this.emit('failed', {
+        type: 'failed',
+        error,
+        identity: this.identity ?? { callId: '', nextCSeq: 1 },
+      }),
     };
     this.registrar = new Registrar(registrarOptions);
 

@@ -148,7 +148,7 @@ function respondTo(
   transport: FakeTransport,
   request: SipRequestMessage,
   statusCode: number,
-  options: { challenge?: boolean; contact?: string } = {},
+  options: { challenge?: boolean; contact?: string; expires?: string } = {},
 ): void {
   const headers = new Headers();
   headers.set('Via', request.headers.get('Via') ?? '');
@@ -157,6 +157,7 @@ function respondTo(
   headers.set('Call-ID', request.headers.get('Call-ID') ?? '');
   headers.set('CSeq', request.headers.get('CSeq') ?? '');
   if (options.contact !== undefined) headers.set('Contact', options.contact);
+  if (options.expires !== undefined) headers.set("Expires", options.expires);
   if (options.challenge === true) {
     headers.set(
       'WWW-Authenticate',
@@ -267,6 +268,13 @@ function sentRequests(transport: FakeTransport, method: string): SipRequestMessa
   }
   return requests;
 }
+
+const lastRequest = (transport: FakeTransport, method: string): SipRequestMessage => {
+  const requests = sentRequests(transport, method);
+  const last = requests.at(-1);
+  if (last === undefined) throw new Error(`no outbound ${method} request`);
+  return last;
+};
 
 function createRemoteBye(
   transport: FakeTransport,
@@ -403,6 +411,27 @@ describe('UserAgent liveness wiring', () => {
     await ua.disconnect();
     // Shutdown owns both the registrar refresh and its completed client transaction.
     expect(clock.pending()).toBe(0);
+  });
+
+  it('emits failed when an automatic registration refresh fails', async () => {
+    const { ua, transport, clock } = setup();
+    const failures: Error[] = [];
+    ua.on('failed', (event: { error: Error }) => failures.push(event.error));
+    await ua.connect();
+
+    const registration = ua.register();
+    await flush();
+    const request = lastRequest(transport, 'REGISTER');
+    respondTo(transport, request, 200, { expires: '2' });
+    await registration;
+
+    clock.advance(1000);
+    await flush();
+    clock.advance(32000);
+    await flush();
+
+    expect(failures).toContainEqual(expect.objectContaining({ code: 'REGISTRATION_FAILED' }));
+    await ua.disconnect();
   });
 });
 

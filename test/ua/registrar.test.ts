@@ -35,8 +35,9 @@ interface Harness {
 function setup(options: {
   credentials?: boolean;
   refreshFraction?: number;
+  onBackgroundFailure?: (error: Error) => void;
 } = {}): Harness {
-  const { credentials = true, refreshFraction = 0.5 } = options;
+  const { credentials = true, refreshFraction = 0.5, onBackgroundFailure } = options;
   const clock = new FakeClock();
   const transport = new FakeTransport({ reliable: true, framing: 'stream' });
   void transport.connect();
@@ -65,6 +66,7 @@ function setup(options: {
     clock,
     authManager,
     refreshFraction,
+    onBackgroundFailure,
   };
   const registrar = new Registrar(options_);
   return { clock, transport, layer, events, sent, registrar, authManager };
@@ -511,6 +513,21 @@ describe('Registrar', () => {
     // Refresh reuses the same Call-ID and the next CSeq number.
     expect(refresh.headers.get('Call-ID')).toBe(h.sent[0]!.headers.get('Call-ID'));
     expect(finalCSeq(refresh)).toBe(2);
+  });
+
+  it('reports a scheduled refresh failure through the background callback', async () => {
+    const failures: Error[] = [];
+    const h = setup({ onBackgroundFailure: (error) => failures.push(error) });
+    await completeRegister(h, [{ status: 200, over: { expires: '2' } }]);
+
+    h.clock.advance(1000);
+    await flush();
+    h.clock.advance(32000);
+    await flush();
+
+    expect(h.registrar.state).toBe('failed');
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ code: 'REGISTRATION_FAILED' });
   });
 
   it('unregisters with Contact * and Expires 0', async () => {

@@ -46,6 +46,12 @@ export interface RegistrarOptions {
    * generation preserves its Call-ID and never reuses a CSeq.
    */
   readonly initialIdentity?: RegistrationIdentity;
+  /**
+   * Optional observer for a failure in a *background* refresh (one not awaited
+   * by the caller). Called exactly once when a scheduled re-registration fails.
+   * A throwing observer is swallowed so it cannot leak a second unhandled rejection.
+   */
+  readonly onBackgroundFailure?: (error: Error) => void;
 }
 
 /** Snapshot of the registrar's externally visible state. */
@@ -99,6 +105,7 @@ export class Registrar {
   private readonly credentials?: { readonly username: string; readonly password: string };
   private readonly refreshAfter: (granted: number) => number;
   private readonly identity: RegistrationIdentity;
+  private readonly onBackgroundFailure: (error: Error) => void;
   private branchCounter = 0;
 
   private redirectCount = 0;
@@ -130,6 +137,7 @@ export class Registrar {
       callId: options.initialIdentity?.callId ?? options.idGenerator.branch(),
       nextCSeq: options.initialIdentity?.nextCSeq ?? 1,
     };
+    this.onBackgroundFailure = options.onBackgroundFailure ?? (() => {});
     this.fromTag = options.idGenerator.branch();
   }
 
@@ -405,7 +413,17 @@ export class Registrar {
     this.cancelRefresh();
     this.refreshMs = this.refreshAfter(granted);
     this.refreshTimer = this.clock.setTimeout(() => {
-      if (this.stateValue === 'registered') void this.register();
+      if (this.stateValue !== 'registered' || this.disposed) return;
+      void this.register().catch((reason: unknown) => {
+        const error = reason instanceof Error
+          ? new SipError(0, reason.message, 'REGISTRATION_FAILED', { cause: reason })
+          : new SipError(0, String(reason), 'REGISTRATION_FAILED');
+        try {
+          this.onBackgroundFailure(error);
+        } catch {
+          // A reporting observer cannot create a second unhandled rejection.
+        }
+      });
     }, this.refreshMs * 1000);
   }
 
