@@ -29,7 +29,7 @@
     "test:package": "node test/package/workspace-pack.test.mjs",
     "test:compatibility": "node test/compatibility/packed-compatibility.test.mjs",
     "test:docs": "node test/package/documentation-contract.test.mjs",
-    "verify": "npm run test:docs && npm run test:architecture && npm run typecheck && npm test && npm run build && npm run test:api && npm run test:bundle && npm run test:package && npm run test:compatibility"
+    "verify": "npm run test:docs && npm run typecheck && npm run build && npm test && npm run test:architecture && npm run test:api && npm run test:bundle && npm run test:package && npm run test:compatibility"
   },
   "devDependencies": {
     "@microsoft/api-extractor": "7.58.12",
