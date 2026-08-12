@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { TransportError } from '../../errors.js';
 import type {
   Transport,
@@ -26,6 +27,12 @@ export interface NodeUdpTransportOptions {
   readonly localPort: number;
   readonly remoteHost: string;
   readonly remotePort: number;
+  /**
+   * Exact IP addresses allowed to originate inbound datagrams. Required when
+   * `remoteHost` is a hostname, which is otherwise ambiguous for the fail-closed
+   * match below. Resolution/refresh happens at the integration layer, not here.
+   */
+  readonly remoteAddresses?: readonly string[];
 }
 
 interface ConnectAttempt {
@@ -44,6 +51,7 @@ export class NodeUdpTransport implements Transport {
   });
 
   private readonly listeners = new Set<(event: TransportEvent) => void>();
+  private readonly remoteAddresses: ReadonlySet<string>;
   private connected = false;
   private closing = false;
   private closed = false;
@@ -67,7 +75,8 @@ export class NodeUdpTransport implements Transport {
   private isFromConfiguredPeer(rinfo: unknown): boolean {
     if (typeof rinfo !== 'object' || rinfo === null) return false;
     const info = rinfo as { address?: unknown; port?: unknown };
-    return info.address === this.options.remoteHost && info.port === this.options.remotePort;
+    if (info.port !== this.options.remotePort || typeof info.address !== 'string') return false;
+    return this.remoteAddresses.has(info.address);
   }
 
   private readonly handleError: SocketListener = (...args) => {
@@ -95,6 +104,12 @@ export class NodeUdpTransport implements Transport {
     private readonly socket: DatagramSocketLike,
     private readonly options: NodeUdpTransportOptions,
   ) {
+    const configured = options.remoteAddresses
+      ?? (isIP(options.remoteHost) !== 0 ? [options.remoteHost] : undefined);
+    if (configured === undefined || configured.length === 0) {
+      throw new TypeError('remoteAddresses is required when remoteHost is a hostname');
+    }
+    this.remoteAddresses = new Set(configured);
     socket.on('message', this.handleMessage);
     socket.on('error', this.handleError);
     socket.on('close', this.handleClose);

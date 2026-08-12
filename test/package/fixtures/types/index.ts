@@ -245,7 +245,12 @@ void dec;
 // ---- transport/node ----
 void new NodeUdpTransport(
   null as unknown as DatagramSocketLike,
-  { localPort: 5060, remoteHost: 'sip.example.test', remotePort: 5060 } as NodeUdpTransportOptions,
+  {
+    localPort: 5060,
+    remoteHost: 'sip.example.test',
+    remotePort: 5060,
+    remoteAddresses: ['192.0.2.10'],
+  } as NodeUdpTransportOptions,
 );
 void new NodeTcpTransport(
   null as unknown as StreamSocketLike,
