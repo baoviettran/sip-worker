@@ -1,7 +1,7 @@
 {
   "name": "sip-worker",
-  "version": "0.1.0",
-  "description": "Signaling-only SIP stack (RFC 3261) as a TypeScript library with worker-supervised recovery. 0.1.0 is a prototype; real media and interop evidence gate the 1.0 framing.",
+  "version": "0.2.0",
+  "description": "Signaling-only SIP stack (RFC 3261) as a TypeScript library with worker-supervised recovery. 0.2.0 is a prototype; real media and interop evidence gate the 1.0 framing.",
   "keywords": [
     "sip",
     "rfc3261",

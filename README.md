@@ -2,9 +2,11 @@
 
 A from-scratch TypeScript SIP stack with registration, calls, worker-supervised
 recovery, deterministic liveness, and verified packed ESM/CommonJS/TypeScript
-exports. **0.1.0 is a signaling-only prototype**: it ships no real media adapter
-(no RTP/RTCP, no WebRTC, no DTLS/SRTP) and no interop evidence. A real media
-adapter plus interop evidence gate the 1.0 framing.
+exports. **0.2.0 is a signaling-only prototype**: it ships no real media adapter
+(no RTP/RTCP, no WebRTC, no DTLS/SRTP) and no interop evidence, and it is not
+production-ready for general deployment. A real media adapter plus interop
+evidence gate the 1.0 framing — see the
+[browser v1.0 production roadmap](docs/superpowers/specs/2026-08-12-browser-v1-production-roadmap-design.md).
 
 Every behavior documented here is exercised by the signaling smoke gate
 (`test/integration/release-smoke.test.ts`) against the public package root, and
@@ -140,10 +142,22 @@ network exchange — not merely the send:
 - `UserAgent.register()`'s supervisor equivalent (`WorkerSupervisor.register()`)
   rejects with `WorkerRestartError` if that generation dies first.
 
-Call state progression is observable via the `stateChanged` event: `inviting →
-ringing/early → confirmed → terminating → terminated`, and `failed` on error.
-Registration state is the getter `registerState` (`unregistered | registering |
-registered | failed`).
+State changes are observable through typed events on the `UserAgent`:
+
+- `registrationStateChanged` — emitted when registration state transitions
+  (`unregistered | registering | registered | failed`), carrying the new
+  registration state.
+- `callStateChanged` — emitted on call state progression (`inviting →
+  ringing/early → confirmed → terminating → terminated`), carrying the new call
+  state.
+- `incomingCall` — emitted when an inbound INVITE arrives.
+- `failed` — emitted on a failed exchange (e.g. an OPTIONS liveness probe timing
+  out surfaces a typed `TransportError` as `failed`).
+
+Additionally, registration state is exposed as the getter `registerState`
+(`unregistered | registering | registered | failed`); the `stateChanged` /
+`registerState` shorthand from earlier releases is superseded by these named
+events.
 
 ## Liveness selection
 
@@ -175,23 +189,26 @@ application's to recreate.
 - `npm test` – vitest suite (all virtual-clock deterministic; no real-time waits);
   `pretest` runs the documentation-contract gate
 - `npm run test:docs` – asserts README links resolve, documented scripts exist,
-  and the 0.1.0 signaling-only framing stays honest
+  and the 0.2.0 signaling-only framing stays honest
 - `npm run build` – tsup emitting ESM `.js`, CommonJS `.cjs`, and `.d.ts` per subpath
 - `npm run test:package` – installs the packed tarball into fresh ESM, CommonJS,
   and TypeScript consumers and exercises every advertised subpath
 
 ## Security status
 
-0.1.0 is a **signaling-only prototype**, not production-ready for general
+0.2.0 is a **signaling-only prototype**, not production-ready for general
 deployment. It ships no real media (no RTP/RTCP, no WebRTC, no DTLS/SRTP), no
 TLS/SIPS transports, no `auth-int`, no streaming/siren (no SIP INFO / DTMF /
 RFC 2833 / MSRP), no observability, no high availability (no active/standby,
 shared state, or proxy failover), and no interop evidence (the smoke gate is a
-self-contained loopback). Its `AuthManager` maps are unbounded. See
+self-contained loopback). Its `AuthManager` nonce counters are capped at 64 and
+its per-exchange retry state settles, bounding challenge state; no claim of
+general memory safety is made beyond the tested lifecycle boundaries. See
 [SECURITY.md](SECURITY.md) and
 [docs/2026-08-11-production-readiness-review.md](docs/2026-08-11-production-readiness-review.md)
 for the complete limits. A real media adapter plus interop evidence gate the
-1.0 framing.
+1.0 framing (see the
+[browser v1.0 roadmap](docs/superpowers/specs/2026-08-12-browser-v1-production-roadmap-design.md)).
 
 ## Startup sequence
 
