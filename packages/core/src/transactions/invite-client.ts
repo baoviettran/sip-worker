@@ -27,7 +27,7 @@ export interface InviteClientOptions {
 /**
  * RFC 3261 17.1.1 client INVITE transaction.
  *
- * Calling -> Proceeding -> Accepted | Completed -> Terminated.
+ * Calling -&gt; Proceeding -&gt; Accepted | Completed -&gt; Terminated.
  * Timer A retransmits on an unreliable transport, doubling without a T2 cap.
  * Timer B is the overall timeout; Timer D lingers in Completed; Timer M
  * lingers in Accepted. The non-2xx ACK bytes are cached on first entry to

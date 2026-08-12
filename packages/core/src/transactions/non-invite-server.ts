@@ -28,7 +28,7 @@ export interface NonInviteServerOptions {
 /**
  * RFC 3261 17.2.2 server non-INVITE transaction.
  *
- * Trying -> Proceeding -> Completed -> Terminated.
+ * Trying -&gt; Proceeding -&gt; Completed -&gt; Terminated.
  * The initial request emits to the TU. A 1xx moves to Proceeding; a final
  * response moves to Completed and arms Timer J. Duplicate requests in Trying,
  * Proceeding, or Completed resend the latest response when one is cached.

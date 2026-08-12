@@ -48,6 +48,8 @@
   "scripts": {
     "build": "tsup",
     "prepack": "npm run build && node ../../test/package/prepack-check.mjs",
-    "typecheck:test": "tsc --project tsconfig.test.json --noEmit"
+    "typecheck:test": "tsc --project tsconfig.test.json --noEmit",
+    "api:local": "api-extractor run --local --config api-extractor.json",
+    "api:check": "api-extractor run --config api-extractor.json"
   }
 }

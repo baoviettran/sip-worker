@@ -28,7 +28,7 @@ const AUTOMATIC_100_MS = 200;
 /**
  * RFC 3261 17.2.1 server INVITE transaction.
  *
- * Proceeding -> Accepted | Completed -> Confirmed -> Terminated.
+ * Proceeding -&gt; Accepted | Completed -&gt; Confirmed -&gt; Terminated.
  * A 200 ms automatic-100 timer is armed on the initial request and cancelled
  * by any user-agent-server response. A 1xx or final response is cached and
  * resent on duplicate INVITEs. Timer G retransmits the final response on an

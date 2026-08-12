@@ -5,3 +5,4 @@ dist/
 .types/
 *.tsbuildinfo
 *.tgz
+packages/*/temp/

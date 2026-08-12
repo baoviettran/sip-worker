@@ -27,7 +27,7 @@ export interface NonInviteClientOptions {
 /**
  * RFC 3261 17.1.2 client non-INVITE transaction.
  *
- * Trying -> Proceeding -> Completed -> Terminated.
+ * Trying -&gt; Proceeding -&gt; Completed -&gt; Terminated.
  * Timer E retransmits on an unreliable transport, halving the interval until
  * it plateaus at T2. Timer F is the overall timeout; Timer K lingers in
  * Completed. A final response (200-699) completes the transaction.
