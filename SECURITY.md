@@ -4,10 +4,12 @@
 
 | Version | Supported |
 | ------- | --------- |
-| 0.2.x   | :white_check_mark: (active development) |
+| 0.3.x   | :white_check_mark: (active development) |
 
-`sip-worker` is at **0.2.0, a signaling-only prototype**. Only the latest
-0.2.x release is supported. There is no 1.x line yet.
+`sip-worker` is at **0.3.0, a signaling-only prototype**. The 0.3 line is the
+workspace split into `sip-worker` (browser), `@sip-worker/core`
+(environment-neutral core), and `@sip-worker/node` (Node transports). Only the
+latest 0.3.x release is supported. There is no 1.x line yet.
 
 ## Reporting a vulnerability
 
@@ -23,7 +25,22 @@ security advisories page. Please include:
 You should receive a response within 14 days. Public disclosure is coordinated
 after a fix ships.
 
-## Known limitations (0.2.0)
+## Environment boundaries
+
+The 0.3.0 workspace split introduces a hard environment boundary:
+
+- **`sip-worker` (browser)** depends only on `@sip-worker/core`. Its root
+  re-exports the common core API; only the browser WebSocket adapter lives here.
+- **`@sip-worker/core`** is environment-neutral. It imports no Node, DOM,
+  WebSocket, Worker, timer, or crypto global.
+- **`@sip-worker/node`** depends only on `@sip-worker/core`. It owns the Node
+  UDP/TCP/WebSocket transports and native ping/pong liveness.
+
+This boundary is enforced by static import audits and a bundled browser fixture
+that must build without Node polyfills. See the
+[migration guide](docs/migrations/0.2-to-0.3.md) for the exact package mapping.
+
+## Known limitations (0.3.0)
 
 This is a signaling-only prototype, **not production-ready for general
 deployment**. Before relying on it for anything carrying real traffic, review
@@ -54,7 +71,7 @@ The highlights that affect security posture:
 
 The 1.0 framing is gated on a real media adapter plus interop evidence (see the
 [browser v1.0 production roadmap](docs/superpowers/specs/2026-08-12-browser-v1-production-roadmap-design.md)).
-Treat 0.2.0 accordingly: signaling experiments and tightly-controlled
+Treat 0.3.0 accordingly: signaling experiments and tightly-controlled
 single-peer trials only.
 
 ## Deployment guidance

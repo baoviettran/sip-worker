@@ -6,14 +6,34 @@ All notable changes to this project are documented in this file, following
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-12
+
 ### Added
 
-- Release-hygiene contract: `LICENSE` (MIT), `SECURITY.md`, `CHANGELOG.md`,
-  `.github/workflows/ci.yml`, and `.github/workflows/interop.yml`.
-- Package metadata: `engines`, `repository`, `support`, `keywords`, `license`,
-  and `publishConfig` (public).
-- `npm run test:docs` documentation-contract gate (README links resolve,
-  documented scripts exist, 0.1.0 framing is honest), wired into `pretest`.
+- **Package-boundary release.** The single 0.2.0 package is split into three
+  npm workspaces: browser `sip-worker`, environment-neutral `@sip-worker/core`,
+  and Node `@sip-worker/node`. The repository root is now a private workspace
+  orchestrator and is never packed or published.
+- **Clean pre-1.0 import break.** `sip-worker/transport/node` is removed with no
+  compatibility shim. `sip-worker/messages`, `/stream`, `/transactions`,
+  `/dialogs`, `/auth`, `/ua`, `/media`, `/bridge`, and the browser part of
+  `/reliability` moved to `@sip-worker/core`; Node transports and native
+  liveness moved to `@sip-worker/node`; the browser transport moved to
+  `sip-worker/transport`. See the
+  [migration guide](docs/migrations/0.2-to-0.3.md) for the exact map.
+- **Enforced environment boundaries.** Core imports no Node, DOM, WebSocket,
+  Worker, timer, or crypto global; browser and Node depend exactly on
+  `@sip-worker/core@0.3.0`. Enforced by static import audits, a Node-clean
+  bundled browser fixture, packed-consumer tests, and per-package API reports.
+- **Dual ESM/CommonJS output** with `.d.ts`/`.d.cts` per package and per public
+  subpath, proven by fresh tarball consumers.
+
+### Security
+
+- 0.3.0 remains a signaling-only prototype, not production-ready for general
+  deployment. This release does not claim WebRTC compatibility, WSS production
+  readiness, or SIP interoperability — those are tracked in the browser v1.0
+  roadmap. See [SECURITY.md](SECURITY.md).
 
 ## [0.2.0] - 2026-08-12
 
@@ -75,5 +95,6 @@ All notable changes to this project are documented in this file, following
   observability). A real media adapter plus interop evidence gate the 1.0
   framing.
 
+[0.3.0]: https://github.com/baoviettran/sip-worker/releases/tag/v0.3.0
 [0.2.0]: https://github.com/baoviettran/sip-worker/releases/tag/v0.2.0
 [0.1.0]: https://github.com/baoviettran/sip-worker/releases/tag/v0.1.0

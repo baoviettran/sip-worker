@@ -2,10 +2,15 @@
 
 A from-scratch TypeScript SIP stack with registration, calls, worker-supervised
 recovery, deterministic liveness, and verified packed ESM/CommonJS/TypeScript
-exports. **0.2.0 is a signaling-only prototype**: it ships no real media adapter
-(no RTP/RTCP, no WebRTC, no DTLS/SRTP) and no interop evidence, and it is not
-production-ready for general deployment. A real media adapter plus interop
-evidence gate the 1.0 framing — see the
+exports. **0.3.0 is a package-boundary release**: the stack is split into a
+browser entry point (`sip-worker`), an environment-neutral core
+(`@sip-worker/core`), and Node transports (`@sip-worker/node`). This is a clean
+pre-1.0 break from 0.2 — see the
+[migration guide](docs/migrations/0.2-to-0.3.md) for the exact old-to-new import
+map. 0.3.0 remains a **signaling-only prototype**: it ships no real media
+adapter (no RTP/RTCP, no WebRTC, no DTLS/SRTP) and no interop evidence, and it
+is not production-ready for general deployment. A real media adapter plus
+interop evidence gate the 1.0 framing — see the
 [browser v1.0 production roadmap](docs/superpowers/specs/2026-08-12-browser-v1-production-roadmap-design.md).
 
 Every behavior documented here is exercised by the signaling smoke gate
@@ -16,8 +21,16 @@ tarball.
 
 ## Install
 
+For browser use, install the browser root package:
+
 ```
 npm install sip-worker
+```
+
+For Node use, install the core and Node packages:
+
+```
+npm install @sip-worker/core @sip-worker/node
 ```
 
 ## Direct Node use (ESM)
@@ -28,8 +41,8 @@ import {
   AuthManager,
   WorkerMediaController,
   StubMainMediaHandler,
-} from 'sip-worker';
-import { NodeWebSocketTransport } from 'sip-worker/transport/node';
+} from '@sip-worker/core';
+import { NodeWebSocketTransport } from '@sip-worker/node/transport';
 
 const idGenerator = { branch: () => crypto.randomUUID() };
 const authManager = new AuthManager(idGenerator);
@@ -67,8 +80,8 @@ detects death, and restores registration on a replacement. The recovery snapshot
 is the only serializable state carried across restart.
 
 ```js
-import { WorkerRuntime, WorkerSupervisor } from 'sip-worker';
-import { UserAgent } from 'sip-worker';
+import { WorkerRuntime, WorkerSupervisor } from '@sip-worker/core';
+import { UserAgent } from '@sip-worker/core';
 
 const registration = {
   aor: 'sip:alice@example.com',
@@ -113,14 +126,17 @@ await supervisor.register(); // rejects with WorkerRestartError if that generati
 
 | Transport | Path | Reliable | Framing |
 | --- | --- | --- | --- |
-| Node UDP | `sip-worker/transport/node` (`NodeUdpTransport`) | no | datagram |
-| Node TCP | `sip-worker/transport/node` (`NodeTcpTransport`) | yes | stream |
-| Node WebSocket | `sip-worker/transport/node` (`NodeWebSocketTransport`) | yes | message |
-| Browser WebSocket | `sip-worker/transport/browser` (`BrowserWebSocketTransport`) | yes | message |
+| Node UDP | `@sip-worker/node/transport` (`NodeUdpTransport`) | no | datagram |
+| Node TCP | `@sip-worker/node/transport` (`NodeTcpTransport`) | yes | stream |
+| Node WebSocket | `@sip-worker/node/transport` (`NodeWebSocketTransport`) | yes | message |
+| Browser WebSocket | `sip-worker/transport` (`BrowserWebSocketTransport`) | yes | message |
 
-Node-only adapters stay behind `sip-worker/transport/node`; the browser adapter
-is behind `sip-worker/transport/browser`. Importing the root touches none of them
-(no browser, worker, socket, timer, or crypto global).
+Node-only adapters live in `@sip-worker/node`; the browser adapter is behind
+`sip-worker/transport`. The browser root re-exports the common core API, so the
+`UserAgent` and errors resolve from `sip-worker` exactly as in 0.2; low-level
+protocol modules (messages, transactions, dialogs, auth, streams, media,
+bridge) now live in `@sip-worker/core`. Importing the browser root touches no
+Node, worker, socket, timer, or crypto global.
 
 ## Promise settlement points
 
@@ -185,18 +201,25 @@ application's to recreate.
 
 ## Project
 
-- `npm run typecheck` – tsc over `src` and `test`
+The repository root is a private npm-workspace orchestrator. It is never packed
+or published; the three workspaces are the release artifacts.
+
+- `npm run typecheck` – tsc -b over the three workspace projects plus the test
+  suites
 - `npm test` – vitest suite (all virtual-clock deterministic; no real-time waits);
   `pretest` runs the documentation-contract gate
 - `npm run test:docs` – asserts README links resolve, documented scripts exist,
-  and the 0.2.0 signaling-only framing stays honest
-- `npm run build` – tsup emitting ESM `.js`, CommonJS `.cjs`, and `.d.ts` per subpath
-- `npm run test:package` – installs the packed tarball into fresh ESM, CommonJS,
+  the 0.3.0 workspace framing stays honest, and the migration map is complete
+- `npm run test:architecture` – asserts the workspace manifests define the
+  approved dependency graph and import boundaries
+- `npm run build` – tsup across the core, browser, and Node workspaces emitting
+  ESM `.js`, CommonJS `.cjs`, and `.d.ts` per subpath
+- `npm run test:package` – packs each workspace tarball into fresh ESM, CommonJS,
   and TypeScript consumers and exercises every advertised subpath
 
 ## Security status
 
-0.2.0 is a **signaling-only prototype**, not production-ready for general
+0.3.0 is a **signaling-only prototype**, not production-ready for general
 deployment. It ships no real media (no RTP/RTCP, no WebRTC, no DTLS/SRTP), no
 TLS/SIPS transports, no `auth-int`, no streaming/siren (no SIP INFO / DTMF /
 RFC 2833 / MSRP), no observability, no high availability (no active/standby,
@@ -235,17 +258,23 @@ only serializable state carried across restart (see [Recovery rule](#recovery-ru
 Releases are gated by the local deterministic checks and the packed-consumer
 gate. To cut a release:
 
-1. `npm run typecheck` – must pass.
-2. `npm test` – full suite (including the smoke and doc-contract gates) must be
+1. `npm run test:docs` and `npm run test:architecture` – must pass.
+2. `npm run typecheck` – must pass.
+3. `npm test` – full suite (including the smoke and doc-contract gates) must be
    green.
-3. `npm run test:package` – packs the tarball and proves every advertised
-   subpath resolves for ESM, CommonJS, and TypeScript consumers; the prepack
-   gate aborts if `dist` is absent or any export fails to resolve.
-4. `npm run build` – produces the versioned `dist/` artifact.
-5. Bump the version in `package.json`, add a `[Unreleased] → [X.Y.Z]` entry in
-   `CHANGELOG.md`, and tag `vX.Y.Z`.
-6. `npm publish` – the `prepack` hook re-runs the build and export-resolution
-   gate automatically, so a broken or absent `dist` fails the publish.
+4. `npm run build` – produces the versioned `dist/` artifact in each workspace.
+5. `npm run test:api` – regenerates and compares the API reports.
+6. `npm run test:package` – packs each workspace tarball and proves every
+   advertised subpath resolves for ESM, CommonJS, and TypeScript consumers; the
+   prepack gate aborts if `dist` is absent or any export fails to resolve.
+7. `npm run test:compatibility` – installs all three tarballs together and
+   proves class identity and signaling smoke across ESM and CommonJS.
+8. Bump the version in each workspace `package.json` (they stay in lockstep
+   before 1.0), add a `[Unreleased] → [X.Y.Z]` entry in `CHANGELOG.md`, and tag
+   `vX.Y.Z`.
+9. `npm publish -w @sip-worker/core && npm publish -w sip-worker && npm publish -w @sip-worker/node` –
+   the `prepack` hook re-runs the build and export-resolution gate on each, so a
+   broken or absent `dist` fails the publish.
 
 CI runs steps 1–3 on every push and pull request
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)); a separate

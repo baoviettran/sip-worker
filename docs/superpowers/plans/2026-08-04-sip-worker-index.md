@@ -158,6 +158,7 @@ These four items were closed by the [Phase 11 Handoff Cleanup](./2026-08-11-phas
 13. [x] [Phase 11 Handoff Cleanup](./2026-08-11-phase-11-handoff-cleanup.md)
 14. [x] [Phase 12 — Release productization](./2026-08-07-12-release-productization.md)
 15. [ ] [Browser-first v1.0 production roadmap](./2026-08-12-browser-v1-production-roadmap-design.md) — successor track to Phase 12; real media (WebRTC/DTLS-SRTP), WSS, and interop evidence gate the 1.0 framing.
+16. [x] [v0.3 package separation](./2026-08-12-03-v0.3-package-separation.md) — split the single 0.2.0 package into `sip-worker`, `@sip-worker/core`, and `@sip-worker/node` 0.3.0 workspaces with a clean pre-1.0 import break; signaling-only, no production claim.
 
 ## Plan Gates
 
