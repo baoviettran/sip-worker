@@ -1,10 +1,10 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
-import { TransportError } from '../../src/errors.js';
+import { TransportError } from '@sip-worker/core';
 import {
   NodeUdpTransport,
   type DatagramSocketLike,
-} from '../../src/transport/node/udp.js';
-import type { TransportEvent } from '../../src/transport/index.js';
+} from '../../src/transport/udp.js';
+import type { TransportEvent } from '@sip-worker/core/transport';
 
 type DatagramEvent = 'message' | 'error' | 'close';
 type SocketListener = (...args: unknown[]) => void;

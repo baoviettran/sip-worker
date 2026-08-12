@@ -24,32 +24,38 @@ import {
   AuthManager,
   WorkerMediaController,
   StubMainMediaHandler,
-  NodeWebSocketLiveness,
   WorkerRuntime,
   WorkerSupervisor,
   WorkerRestartError,
   STUB_SDP,
-} from '../../packages/core/src/index.js';
-import { TransportError } from '../../packages/core/src/errors.js';
-import { Headers, makeRequest, makeResponse } from '../../packages/core/src/messages/index.js';
-import type { SipRequestMessage, SipResponseMessage } from '../../packages/core/src/messages/message.js';
-import { parseMessage } from '../../packages/core/src/messages/parser.js';
-import { serializeMessage } from '../../packages/core/src/messages/serializer.js';
-import { bodyText } from '../../packages/core/src/messages/message.js';
+  TransportError,
+  Headers,
+  makeRequest,
+  makeResponse,
+  parseMessage,
+  serializeMessage,
+  bodyText,
+} from '@sip-worker/core';
+import type {
+  SipRequestMessage,
+  SipResponseMessage,
+  RegistrationSnapshot,
+  SupervisorToWorker,
+  WorkerSupervisorPort,
+  WorkerToSupervisor,
+  SupervisedWorker,
+  WorkerFactory,
+} from '@sip-worker/core';
+import type { WorkerRuntimePort } from '@sip-worker/core/bridge';
+import {
+  NodeWebSocketLiveness,
+  toNativePingSocket,
+  NodeWebSocketTransport,
+} from '@sip-worker/node';
+import type { NodeWebSocketLike, NativeNodeWebSocket } from '@sip-worker/node';
 import { FakeClock } from '../../packages/core/test/support/fake-clock.js';
 import { FakeTransport } from '../../packages/core/test/support/fake-transport.js';
 import { MockRegistrar } from '../../packages/core/test/support/mock-registrar.js';
-import { toNativePingSocket, NodeWebSocketTransport } from '../../src/transport/node/ws.js';
-import type { NodeWebSocketLike } from '../../src/transport/node/ws.js';
-import type {
-  RegistrationSnapshot,
-  SupervisorToWorker,
-  WorkerRuntimePort,
-  WorkerSupervisorPort,
-  WorkerToSupervisor,
-} from '../../packages/core/src/bridge/worker-protocol.js';
-import type { SupervisedWorker, WorkerFactory } from '../../packages/core/src/bridge/worker-supervisor.js';
-import type { NativeNodeWebSocket } from '../../src/transport/node/ws.js';
 
 const REGISTRAR_URI = 'sip:registrar.example.com';
 const AOR = 'sip:alice@example.com';

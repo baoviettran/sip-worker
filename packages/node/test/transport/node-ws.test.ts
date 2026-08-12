@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { TransportError } from '../../src/errors.js';
+import { TransportError } from '@sip-worker/core';
 import {
   NodeWebSocketTransport,
   type NodeWebSocketLike,
-} from '../../src/transport/node/ws.js';
-import type { TransportEvent } from '../../src/transport/index.js';
+} from '../../src/transport/ws.js';
+import type { TransportEvent } from '@sip-worker/core/transport';
 
 type NodeWebSocketEvent = 'open' | 'message' | 'error' | 'close';
 type SocketListener = (...args: unknown[]) => void;

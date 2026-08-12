@@ -1,9 +1,9 @@
-import { TransportError } from '../../errors.js';
+import { TransportError } from '@sip-worker/core';
 import type {
   Transport,
   TransportCapabilities,
   TransportEvent,
-} from '../transport.js';
+} from '@sip-worker/core/transport';
 
 const OPEN = 1;
 const CLOSED = 3;

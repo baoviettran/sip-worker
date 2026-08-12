@@ -1,6 +1,6 @@
-import { TransportError } from '../errors.js';
-import type { Clock } from '../transport/transport.js';
-import type { LivenessStrategy } from './liveness.js';
+import { TransportError } from '@sip-worker/core';
+import type { Clock } from '@sip-worker/core/transport';
+import type { LivenessStrategy } from '@sip-worker/core/reliability';
 
 /**
  * The narrow socket surface a liveness strategy needs to run protocol-level

@@ -1,10 +1,10 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
-import { ParseError, TransportError } from '../../src/errors.js';
+import { ParseError, TransportError } from '@sip-worker/core';
 import {
   NodeTcpTransport,
   type StreamSocketLike,
-} from '../../src/transport/node/tcp.js';
-import type { TransportEvent } from '../../src/transport/index.js';
+} from '../../src/transport/tcp.js';
+import type { TransportEvent } from '@sip-worker/core/transport';
 
 type StreamEvent = 'data' | 'error' | 'close';
 type SocketListener = (...args: unknown[]) => void;

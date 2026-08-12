@@ -1,10 +1,10 @@
 import { isIP } from 'node:net';
-import { TransportError } from '../../errors.js';
+import { TransportError } from '@sip-worker/core';
 import type {
   Transport,
   TransportCapabilities,
   TransportEvent,
-} from '../transport.js';
+} from '@sip-worker/core/transport';
 
 type DatagramEvent = 'message' | 'error' | 'close';
 type SocketListener = (...args: unknown[]) => void;

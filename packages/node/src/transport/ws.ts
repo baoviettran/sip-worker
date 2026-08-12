@@ -1,10 +1,10 @@
-import { TransportError } from '../../errors.js';
-import type { NativePingSocket } from '../../reliability/node-ws-liveness.js';
+import { TransportError } from '@sip-worker/core';
+import type { NativePingSocket } from '../reliability/index.js';
 import type {
   Transport,
   TransportCapabilities,
   TransportEvent,
-} from '../transport.js';
+} from '@sip-worker/core/transport';
 
 type NodeWebSocketEvent = 'open' | 'message' | 'error' | 'close';
 type SocketListener = (...args: unknown[]) => void;

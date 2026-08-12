@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { TransportError } from '../../src/errors.js';
+import { TransportError } from '@sip-worker/core';
 import {
   BrowserWebSocketTransport,
   type BrowserWebSocketFactory,
   type BrowserWebSocketLike,
-} from '../../src/transport/browser/ws.js';
-import type { TransportEvent } from '../../src/transport/index.js';
+} from '../../src/transport/ws.js';
+import type { TransportEvent } from '@sip-worker/core/transport';
 
 type BrowserWebSocketEvent = 'open' | 'message' | 'error' | 'close';
 type BrowserListener = (event: Event) => void;

@@ -1,10 +1,9 @@
-import { TransportError } from '../../errors.js';
-import { SipStreamDecoder } from '../../stream/decoder.js';
+import { TransportError, SipStreamDecoder } from '@sip-worker/core';
 import type {
   Transport,
   TransportCapabilities,
   TransportEvent,
-} from '../transport.js';
+} from '@sip-worker/core/transport';
 
 type StreamEvent = 'data' | 'error' | 'close';
 type SocketListener = (...args: unknown[]) => void;

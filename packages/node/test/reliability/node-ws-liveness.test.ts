@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { TransportError } from '../../src/errors.js';
-import { NodeWebSocketLiveness } from '../../src/reliability/node-ws-liveness.js';
-import type { NativePingSocket } from '../../src/reliability/node-ws-liveness.js';
+import { TransportError } from '@sip-worker/core';
+import { NodeWebSocketLiveness } from '../../src/reliability/index.js';
+import type { NativePingSocket } from '../../src/reliability/index.js';
 import { FakeClock } from '../support/fake-clock.js';
 
 class FakeNativePingSocket implements NativePingSocket {
