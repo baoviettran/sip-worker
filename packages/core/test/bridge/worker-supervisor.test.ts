@@ -162,7 +162,7 @@ interface Harness {
 
 function setup(
   over: Partial<RegistrationSnapshot> = {},
-  options: Partial<Pick<WorkerSupervisorOptions, 'maxRestarts' | 'restartWindowMs'>> = {},
+  options: Partial<Pick<WorkerSupervisorOptions, 'maxRestarts' | 'restartWindowMs' | 'onObserverError'>> = {},
 ): Harness {
   const clock = new FakeClock();
   const factory = new FakeWorkerFactory();
@@ -639,23 +639,27 @@ describe('WorkerSupervisor stop/start', () => {
 });
 
 describe('WorkerSupervisor observer throw isolation', () => {
-  it('keeps heartbeating and emitting events when one observer throws', () => {
-    const h = setup();
+  it('reports a throwing observer through the injected sink while later observers still run', () => {
+    const captured: unknown[] = [];
+    const h = setup({}, { onObserverError: (error) => captured.push(error) });
     boot(h);
-    // A throwing observer must not break the supervisor's emit loop.
+    // A throwing observer subscribed first must not break the emit loop.
     const thrower = (): void => {
       throw new Error('observer blew up');
     };
     h.supervisor.subscribe(thrower);
-    // Suppress the expected console error noise from the throwing observer.
-    const consoleError = console.error;
-    console.error = () => undefined;
-    try {
-      killAndAdvance(h);
-    } finally {
-      console.error = consoleError;
-    }
-    // Both events were still emitted despite the thrower.
+    // A later subscriber must still receive every event after the thrower.
+    const later: string[] = [];
+    h.supervisor.subscribe((event) => later.push(event.type));
+    killAndAdvance(h);
+    // Each emit (workerDied, workerRestarted) hits the thrower once; every throw
+    // is routed to the injected observer-error sink instead of a global console.
+    expect(captured).toHaveLength(2);
+    expect((captured[0] as Error).message).toBe('observer blew up');
+    expect((captured[1] as Error).message).toBe('observer blew up');
+    // The later observer still saw both events despite the thrower.
+    expect(later).toEqual(['workerDied', 'workerRestarted']);
+    // The supervisor itself still emits + heartbeats.
     expect(h.events.map((e) => e.type)).toContain('workerDied');
     expect(h.events.map((e) => e.type)).toContain('workerRestarted');
     expect(h.supervisor.generation).toBe(2);

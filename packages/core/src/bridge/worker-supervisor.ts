@@ -89,6 +89,13 @@ export interface WorkerSupervisorOptions {
   readonly maxRestarts?: number;
   /** Sliding window for the restart bound. Defaults to Infinity ms. */
   readonly restartWindowMs?: number;
+  /**
+   * Optional sink for observer errors. When a subscribed observer throws during
+   * event fan-out, the error is passed here so the environment can record or
+   * surface it without the core depending on a global `console`. Defaults to a
+   * no-op; diagnostics are opt-in.
+   */
+  readonly onObserverError?: (error: unknown) => void;
 }
 
 /** The supervisor's live worker reference. */
@@ -114,6 +121,7 @@ export class WorkerSupervisor {
   private readonly heartbeatTimeoutMs: number;
   private readonly maxRestarts: number;
   private readonly restartWindowMs: number;
+  private readonly onObserverError: (error: unknown) => void;
   private readonly listeners = new Set<(event: SupervisorEvent) => void>();
 
   /** The private recovery snapshot; only Call-ID and next CSeq are ever updated. */
@@ -141,6 +149,7 @@ export class WorkerSupervisor {
     this.snapshot = options.registration;
     this.maxRestarts = options.maxRestarts ?? Number.POSITIVE_INFINITY;
     this.restartWindowMs = options.restartWindowMs ?? Number.POSITIVE_INFINITY;
+    this.onObserverError = options.onObserverError ?? (() => undefined);
   }
 
   /** The generation number of the live worker (0 before start or after stop/close). */
@@ -433,17 +442,17 @@ export class WorkerSupervisor {
 
   /**
    * Broadcast an event to every subscriber. A throwing observer is isolated:
-   * its error is captured and logged to console.error but does not break the
-   * fan-out — remaining observers still receive the event.
+   * its error is reported through the injected `onObserverError` sink but does
+   * not break the fan-out — remaining observers still receive the event.
    */
   private broadcast(event: SupervisorEvent): void {
     for (const listener of this.listeners) {
       try {
         listener(event);
       } catch (error) {
-        // Isolate the throwing observer: log and continue so a buggy listener
+        // Isolate the throwing observer: report and continue so a buggy listener
         // cannot silence the rest of the emit loop.
-        console.error('worker supervisor subscriber threw', error);
+        this.onObserverError(error);
       }
     }
   }

@@ -63,16 +63,14 @@ export type {
   WorkerMediaControllerOptions,
 } from './media/index.js';
 export {
-  NodeWebSocketLiveness,
   OptionsLiveness,
 } from './reliability/index.js';
 export type {
   LivenessStrategy,
-  NativePingSocket,
-  NodeWebSocketLivenessOptions,
   OptionsLivenessOptions,
   RequestFactory,
 } from './reliability/index.js';
+export type { UserAgentOptions } from './ua/index.js';
 export {
   WorkerRuntime,
   WorkerSupervisor,

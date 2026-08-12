@@ -29,16 +29,16 @@ import {
   WorkerSupervisor,
   WorkerRestartError,
   STUB_SDP,
-} from '../../src/index.js';
-import { TransportError } from '../../src/errors.js';
-import { Headers, makeRequest, makeResponse } from '../../src/messages/index.js';
-import type { SipRequestMessage, SipResponseMessage } from '../../src/messages/message.js';
-import { parseMessage } from '../../src/messages/parser.js';
-import { serializeMessage } from '../../src/messages/serializer.js';
-import { bodyText } from '../../src/messages/message.js';
-import { FakeClock } from '../support/fake-clock.js';
-import { FakeTransport } from '../support/fake-transport.js';
-import { MockRegistrar } from '../support/mock-registrar.js';
+} from '../../packages/core/src/index.js';
+import { TransportError } from '../../packages/core/src/errors.js';
+import { Headers, makeRequest, makeResponse } from '../../packages/core/src/messages/index.js';
+import type { SipRequestMessage, SipResponseMessage } from '../../packages/core/src/messages/message.js';
+import { parseMessage } from '../../packages/core/src/messages/parser.js';
+import { serializeMessage } from '../../packages/core/src/messages/serializer.js';
+import { bodyText } from '../../packages/core/src/messages/message.js';
+import { FakeClock } from '../../packages/core/test/support/fake-clock.js';
+import { FakeTransport } from '../../packages/core/test/support/fake-transport.js';
+import { MockRegistrar } from '../../packages/core/test/support/mock-registrar.js';
 import { toNativePingSocket, NodeWebSocketTransport } from '../../src/transport/node/ws.js';
 import type { NodeWebSocketLike } from '../../src/transport/node/ws.js';
 import type {
@@ -47,8 +47,8 @@ import type {
   WorkerRuntimePort,
   WorkerSupervisorPort,
   WorkerToSupervisor,
-} from '../../src/bridge/worker-protocol.js';
-import type { SupervisedWorker, WorkerFactory } from '../../src/bridge/worker-supervisor.js';
+} from '../../packages/core/src/bridge/worker-protocol.js';
+import type { SupervisedWorker, WorkerFactory } from '../../packages/core/src/bridge/worker-supervisor.js';
 import type { NativeNodeWebSocket } from '../../src/transport/node/ws.js';
 
 const REGISTRAR_URI = 'sip:registrar.example.com';
