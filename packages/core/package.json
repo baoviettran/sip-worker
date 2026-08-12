@@ -1,0 +1,90 @@
+{
+  "name": "@sip-worker/core",
+  "version": "0.3.0",
+  "description": "Signaling-only SIP stack (RFC 3261) core, transport-agnostic, as a TypeScript library.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baoviettran/sip-worker.git"
+  },
+  "support": {
+    "docs": "https://github.com/baoviettran/sip-worker#readme",
+    "url": "https://github.com/baoviettran/sip-worker/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./messages": {
+      "types": "./dist/messages/index.d.ts",
+      "import": "./dist/messages/index.js",
+      "require": "./dist/messages/index.cjs"
+    },
+    "./stream": {
+      "types": "./dist/stream/index.d.ts",
+      "import": "./dist/stream/index.js",
+      "require": "./dist/stream/index.cjs"
+    },
+    "./transport": {
+      "types": "./dist/transport/index.d.ts",
+      "import": "./dist/transport/index.js",
+      "require": "./dist/transport/index.cjs"
+    },
+    "./transactions": {
+      "types": "./dist/transactions/index.d.ts",
+      "import": "./dist/transactions/index.js",
+      "require": "./dist/transactions/index.cjs"
+    },
+    "./dialogs": {
+      "types": "./dist/dialogs/index.d.ts",
+      "import": "./dist/dialogs/index.js",
+      "require": "./dist/dialogs/index.cjs"
+    },
+    "./auth": {
+      "types": "./dist/auth/index.d.ts",
+      "import": "./dist/auth/index.js",
+      "require": "./dist/auth/index.cjs"
+    },
+    "./ua": {
+      "types": "./dist/ua/index.d.ts",
+      "import": "./dist/ua/index.js",
+      "require": "./dist/ua/index.cjs"
+    },
+    "./media": {
+      "types": "./dist/media/index.d.ts",
+      "import": "./dist/media/index.js",
+      "require": "./dist/media/index.cjs"
+    },
+    "./reliability": {
+      "types": "./dist/reliability/index.d.ts",
+      "import": "./dist/reliability/index.js",
+      "require": "./dist/reliability/index.cjs"
+    },
+    "./bridge": {
+      "types": "./dist/bridge/index.d.ts",
+      "import": "./dist/bridge/index.js",
+      "require": "./dist/bridge/index.cjs"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "prepack": "npm run build && node ../../test/package/prepack-check.mjs",
+    "typecheck:test": "tsc --project tsconfig.test.json --noEmit"
+  }
+}

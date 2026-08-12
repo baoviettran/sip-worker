@@ -1,0 +1,53 @@
+{
+  "name": "@sip-worker/node",
+  "version": "0.3.0",
+  "description": "Signaling-only SIP stack (RFC 3261) node transport and reliability entry as a TypeScript library.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baoviettran/sip-worker.git"
+  },
+  "support": {
+    "docs": "https://github.com/baoviettran/sip-worker#readme",
+    "url": "https://github.com/baoviettran/sip-worker/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./transport": {
+      "types": "./dist/transport/index.d.ts",
+      "import": "./dist/transport/index.js",
+      "require": "./dist/transport/index.cjs"
+    },
+    "./reliability": {
+      "types": "./dist/reliability/index.d.ts",
+      "import": "./dist/reliability/index.js",
+      "require": "./dist/reliability/index.cjs"
+    }
+  },
+  "dependencies": {
+    "@sip-worker/core": "0.3.0"
+  },
+  "scripts": {
+    "build": "tsup",
+    "prepack": "npm run build && node ../../test/package/prepack-check.mjs",
+    "typecheck:test": "tsc --project tsconfig.test.json --noEmit"
+  }
+}

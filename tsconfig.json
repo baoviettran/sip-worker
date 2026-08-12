@@ -1,1 +1,8 @@
-{"compilerOptions": {"target": "es2022", "module": "NodeNext", "moduleResolution": "NodeNext", "lib": ["es2022"], "strict": true, "noUncheckedIndexedAccess": true, "noFallthroughCasesInSwitch": true, "noUnusedLocals": true, "noUnusedParameters": true, "esModuleInterop": true, "skipLibCheck": true, "isolatedModules": true, "forceConsistentCasingInFileNames": true, "verbatimModuleSyntax": true, "noEmit": true}, "include": ["src", "test"], "exclude": ["test/package/fixtures"]}
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/core/tsconfig.build.json" },
+    { "path": "./packages/browser/tsconfig.build.json" },
+    { "path": "./packages/node/tsconfig.build.json" }
+  ]
+}

@@ -1,17 +1,7 @@
 {
-  "name": "sip-worker",
-  "version": "0.2.0",
-  "description": "Signaling-only SIP stack (RFC 3261) as a TypeScript library with worker-supervised recovery. 0.2.0 is a prototype; real media and interop evidence gate the 1.0 framing.",
-  "keywords": [
-    "sip",
-    "rfc3261",
-    "voip",
-    "signaling",
-    "webrtc",
-    "worker",
-    "typescript"
-  ],
-  "license": "MIT",
+  "name": "sip-worker-workspace",
+  "version": "0.3.0",
+  "private": true,
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -24,90 +14,27 @@
     "docs": "https://github.com/baoviettran/sip-worker#readme",
     "url": "https://github.com/baoviettran/sip-worker/issues"
   },
-  "publishConfig": {
-    "access": "public"
-  },
-  "files": [
-    "dist"
+  "workspaces": [
+    "packages/core",
+    "packages/browser",
+    "packages/node"
   ],
-  "main": "./dist/index.cjs",
-  "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
-    },
-    "./messages": {
-      "types": "./dist/messages/index.d.ts",
-      "import": "./dist/messages/index.js",
-      "require": "./dist/messages/index.cjs"
-    },
-    "./stream": {
-      "types": "./dist/stream/index.d.ts",
-      "import": "./dist/stream/index.js",
-      "require": "./dist/stream/index.cjs"
-    },
-    "./transport/node": {
-      "types": "./dist/transport/node/index.d.ts",
-      "import": "./dist/transport/node/index.js",
-      "require": "./dist/transport/node/index.cjs"
-    },
-    "./transport/browser": {
-      "types": "./dist/transport/browser/index.d.ts",
-      "import": "./dist/transport/browser/index.js",
-      "require": "./dist/transport/browser/index.cjs"
-    },
-    "./transactions": {
-      "types": "./dist/transactions/index.d.ts",
-      "import": "./dist/transactions/index.js",
-      "require": "./dist/transactions/index.cjs"
-    },
-    "./dialogs": {
-      "types": "./dist/dialogs/index.d.ts",
-      "import": "./dist/dialogs/index.js",
-      "require": "./dist/dialogs/index.cjs"
-    },
-    "./auth": {
-      "types": "./dist/auth/index.d.ts",
-      "import": "./dist/auth/index.js",
-      "require": "./dist/auth/index.cjs"
-    },
-    "./ua": {
-      "types": "./dist/ua/index.d.ts",
-      "import": "./dist/ua/index.js",
-      "require": "./dist/ua/index.cjs"
-    },
-    "./media": {
-      "types": "./dist/media/index.d.ts",
-      "import": "./dist/media/index.js",
-      "require": "./dist/media/index.cjs"
-    },
-    "./reliability": {
-      "types": "./dist/reliability/index.d.ts",
-      "import": "./dist/reliability/index.js",
-      "require": "./dist/reliability/index.cjs"
-    },
-    "./bridge": {
-      "types": "./dist/bridge/index.d.ts",
-      "import": "./dist/bridge/index.js",
-      "require": "./dist/bridge/index.cjs"
-    }
-  },
   "scripts": {
-    "build": "tsup",
-    "build:silent": "tsup --silent",
-    "prepack": "npm run build:silent && node test/package/prepack-check.mjs",
-    "prepack-check": "node test/package/prepack-check.mjs",
-    "typecheck": "tsc --noEmit",
-    "pretest": "node test/package/documentation-contract.test.mjs",
+    "build": "npm run build -w @sip-worker/core && npm run build -w sip-worker && npm run build -w @sip-worker/node",
+    "typecheck": "tsc -b && npm run typecheck:test -ws --if-present",
     "test": "vitest run",
+    "test:architecture": "node --test test/architecture/*.test.mjs",
+    "test:api": "npm run api:check -ws --if-present",
+    "test:bundle": "node test/browser-bundle/browser-bundle.test.mjs",
+    "test:package": "node test/package/workspace-pack.test.mjs",
+    "test:compatibility": "node test/compatibility/packed-compatibility.test.mjs",
     "test:docs": "node test/package/documentation-contract.test.mjs",
-    "test:package": "npm run build && node test/package/exports.test.mjs && node test/package/clean-pack.test.mjs"
+    "verify": "npm run test:docs && npm run test:architecture && npm run typecheck && npm test && npm run build && npm run test:api && npm run test:bundle && npm run test:package && npm run test:compatibility"
   },
   "devDependencies": {
+    "@microsoft/api-extractor": "7.58.12",
     "@types/node": "^26.1.2",
+    "esbuild": "0.27.7",
     "tsup": "^8.0.0",
     "typescript": "^5.5.0",
     "vitest": "^2.0.0"
