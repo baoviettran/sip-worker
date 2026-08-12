@@ -196,11 +196,11 @@ describe('NodeUdpTransport', () => {
     const cause = new Error('bind failed');
     transport.subscribe((event) => events.push(event));
     transport.subscribe(() => {
-      throw new Error('subscriber failed');
+      throw new Error('observer failed');
     });
 
     const pending = transport.connect();
-    expect(() => socket.emit('error', cause)).toThrow('subscriber failed');
+    expect(() => socket.emit('error', cause)).not.toThrow();
     await expect(pending).rejects.toMatchObject({ name: 'TransportError', cause });
     socket.completeBind();
 
@@ -263,7 +263,7 @@ describe('NodeUdpTransport', () => {
       () => { outcome = 'rejected'; },
     );
 
-    expect(() => socket.emit('close')).toThrow('subscriber failed');
+    expect(() => socket.emit('close')).not.toThrow();
     await Promise.resolve();
 
     expect(outcome).toBe('resolved');

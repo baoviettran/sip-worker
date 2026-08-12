@@ -198,23 +198,29 @@ describe('BrowserWebSocketTransport', () => {
     });
   });
 
-  it('rejects a pre-open browser error when a subscriber throws', async () => {
+  it('rejects a pre-open browser error without letting a throwing observer block it', async () => {
     const { socket, transport } = createTransport();
+    const events: TransportEvent[] = [];
     const cause = new Error('handshake failed');
     transport.subscribe(() => {
-      throw new Error('subscriber failed');
+      throw new Error('observer failed');
     });
+    transport.subscribe((event) => events.push(event));
 
     let rejection: unknown;
     const connected = transport.connect().catch((error: unknown) => {
       rejection = error;
     });
 
-    expect(() => socket.emitError(cause)).toThrow('subscriber failed');
+    expect(() => socket.emitError(cause)).not.toThrow();
     await Promise.resolve();
 
     expect(rejection).toMatchObject({ name: 'TransportError', cause });
     await connected;
+    expect(events).toContainEqual({
+      type: 'error',
+      error: expect.objectContaining({ name: 'TransportError', cause }),
+    });
   });
 
   it('rejects a connection that negotiates another subprotocol', async () => {
@@ -342,7 +348,7 @@ describe('BrowserWebSocketTransport', () => {
       () => { outcome = 'rejected'; },
     );
 
-    expect(() => socket.emitClose(1005)).toThrow('subscriber failed');
+    expect(() => socket.emitClose(1005)).not.toThrow();
     await Promise.resolve();
 
     expect(outcome).toBe('resolved');

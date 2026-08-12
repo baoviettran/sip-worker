@@ -1066,6 +1066,27 @@ describe('UserAgent truthful event surface', () => {
     await ua.disconnect();
   });
 
+  it('isolates throwing registrationStateChanged observers and still resolves register()', async () => {
+    const { ua, transport } = setup();
+    const observed: Array<{ type: string; state: string }> = [];
+    ua.on('registrationStateChanged', () => {
+      throw new Error('observer failed');
+    });
+    ua.on('registrationStateChanged', (event) => observed.push(event));
+    await ua.connect();
+
+    const registration = ua.register();
+    await flush();
+    const reg = lastRequest(transport, 'REGISTER');
+    respondTo(transport, reg, 200, { expires: '120' });
+    await registration;
+    await flush();
+
+    expect(observed.some((event) => event.state === 'registered')).toBe(true);
+
+    await ua.disconnect();
+  });
+
   it('emits callStateChanged (not stateChanged) across an outgoing call', async () => {
     const { ua, transport } = setup();
     const callEvents: Array<{ type: string; state: string }> = [];

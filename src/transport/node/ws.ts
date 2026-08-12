@@ -316,7 +316,13 @@ export class NodeWebSocketTransport implements Transport {
   }
 
   private emit(event: TransportEvent): void {
-    for (const listener of this.listeners) listener(event);
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(event);
+      } catch {
+        // An application observer cannot block transport lifecycle delivery.
+      }
+    }
   }
 }
 
