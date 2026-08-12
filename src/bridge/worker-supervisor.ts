@@ -163,10 +163,11 @@ export class WorkerSupervisor {
   }
 
   /**
-   * Stop heartbeating, clear timers, and drop the live-worker reference (does
-   * NOT terminate the worker or reject waiters). A subsequent `start()` spawns a
-   * fresh generation and resets the bounded-restart window so a manual restart
-   * cycle clears any prior crash-loop bound. Use `close()` for terminal teardown.
+   * Stop heartbeating, tear down the live generation, and reject its waiters.
+   * Detaches and terminates the current generation exactly once, clears timers,
+   * and drops the live-worker reference so a subsequent `start()` spawns a fresh
+   * generation and resets the bounded-restart window — so a manual restart cycle
+   * clears any prior crash-loop bound. Use `close()` for terminal teardown.
    */
   stop(): void {
     if (!this.started) return;
@@ -174,15 +175,17 @@ export class WorkerSupervisor {
     this.clearPing();
     this.clearDeadline();
     this.outstandingNonce = undefined;
-    // Detach from the current worker so its messages stop arriving, but do not
-    // terminate it — stop() is non-terminal. Clearing `current` makes
-    // generation report 0 and forces register() to reject with generation 0.
-    if (this.current !== undefined) {
-      this.current.detach();
-      this.current = undefined;
+
+    const current = this.current;
+    this.current = undefined;
+    if (current !== undefined) {
+      current.detach();
+      current.worker.terminate();
+      this.rejectGenerationWaiters(
+        current.gen,
+        new WorkerRestartError(current.gen, 'worker supervisor stopped'),
+      );
     }
-    // Reset the restart-bounding window so a stop/start cycle (operator
-    // intervention) clears any prior crash-loop limit.
     this.restartTimestamps.length = 0;
   }
 
@@ -333,16 +336,8 @@ export class WorkerSupervisor {
   private death(current: Current, cause: unknown): void {
     const error: WorkerRestartErrorType = new WorkerRestartError(current.gen, `worker ${current.gen} died`, cause);
 
-    // Reject every deferred belonging to the dead generation (collect first to
-    // avoid mutating the Set during iteration).
-    const toReject: Waiter[] = [];
-    for (const waiter of this.waiters) {
-      if (waiter.gen === current.gen) toReject.push(waiter);
-    }
-    for (const waiter of toReject) {
-      this.waiters.delete(waiter);
-      waiter.reject(error);
-    }
+    // Reject every deferred belonging to the dead generation.
+    this.rejectGenerationWaiters(current.gen, error);
 
     // Terminate/detach the dead worker so its messages stop arriving.
     current.detach();
@@ -398,6 +393,15 @@ export class WorkerSupervisor {
     for (const waiter of toResolve) {
       this.waiters.delete(waiter);
       waiter.resolve();
+    }
+  }
+
+  /** Reject every waiter parked on `gen` with the given error. */
+  private rejectGenerationWaiters(gen: number, error: WorkerRestartErrorType): void {
+    const toReject = [...this.waiters].filter((waiter) => waiter.gen === gen);
+    for (const waiter of toReject) {
+      this.waiters.delete(waiter);
+      waiter.reject(error);
     }
   }
 

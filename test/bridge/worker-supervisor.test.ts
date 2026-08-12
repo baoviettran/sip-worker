@@ -334,6 +334,44 @@ describe('WorkerSupervisor stop', () => {
     expect(pings).toBe(0);
     expect(h.events).toEqual([]);
   });
+
+  it('rejects pending register waiters and terminates the generation on stop', async () => {
+    const h = setup();
+    h.supervisor.start();
+    const generation = h.supervisor.generation;
+    const worker = h.factory.current;
+    const pending = h.supervisor.register();
+
+    h.supervisor.stop();
+
+    await expect(pending).rejects.toMatchObject({
+      name: 'WorkerRestartError',
+      generation,
+      message: 'worker supervisor stopped',
+    });
+    expect(worker.terminated).toBe(true);
+    expect(worker.port.listenerCount).toBe(0);
+    expect(h.factory.terminated).toBe(1);
+    expect(h.clock.pending()).toBe(0);
+  });
+
+  it('starts a fresh generation after stop without retaining old waiters', async () => {
+    const h = setup();
+    h.supervisor.start();
+    const oldWaiter = h.supervisor.register();
+    h.supervisor.stop();
+    await expect(oldWaiter).rejects.toBeInstanceOf(WorkerRestartError);
+
+    h.supervisor.start();
+    const generation = h.supervisor.generation;
+    const next = h.supervisor.register();
+    h.factory.current.port.deliver({ type: 'registered', generation });
+    await expect(next).resolves.toBeUndefined();
+    expect(h.factory.count).toBe(2);
+
+    h.supervisor.close();
+    expect(h.factory.terminated).toBe(2);
+  });
 });
 
 /** Drive a full death+restart cycle on the current generation. */
