@@ -59,7 +59,7 @@ export type RegistrationEvent = RegistrationStateChangedEvent | UserAgentFailedE
 /** @deprecated Use UserAgentEventEmitter. */
 export type RegistrationEventEmitter = UserAgentEventEmitter;
 
-type Listener<T> = (event: T) => void;
+export type Listener<T> = (event: T) => void;
 
 export class TypedEventEmitter<Events extends object = UserAgentEventMap> {
   private readonly listeners = new Map<keyof Events, Set<Listener<Events[keyof Events]>>>();

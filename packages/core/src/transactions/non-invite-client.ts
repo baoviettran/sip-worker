@@ -11,7 +11,7 @@ import type {
   TransactionLayerEvent,
 } from './types.js';
 
-type NonInviteState = 'Trying' | 'Proceeding' | 'Completed' | 'Terminated';
+export type NonInviteState = 'Trying' | 'Proceeding' | 'Completed' | 'Terminated';
 
 export interface NonInviteClientOptions {
   readonly request: SipRequestMessage;

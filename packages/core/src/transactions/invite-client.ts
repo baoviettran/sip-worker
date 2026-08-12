@@ -11,7 +11,7 @@ import type {
   TransactionLayerEvent,
 } from './types.js';
 
-type InviteState = 'Calling' | 'Proceeding' | 'Accepted' | 'Completed' | 'Terminated';
+export type InviteState = 'Calling' | 'Proceeding' | 'Accepted' | 'Completed' | 'Terminated';
 
 export interface InviteClientOptions {
   readonly request: SipRequestMessage;

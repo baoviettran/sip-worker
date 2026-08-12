@@ -9,3 +9,4 @@ export {
   parseRecordRoutes,
   reverseRouteSet,
 } from './header-values.js';
+export type { ViaConfig } from './header-values.js';

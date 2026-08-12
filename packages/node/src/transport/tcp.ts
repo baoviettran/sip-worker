@@ -5,8 +5,8 @@ import type {
   TransportEvent,
 } from '@sip-worker/core/transport';
 
-type StreamEvent = 'data' | 'error' | 'close';
-type SocketListener = (...args: unknown[]) => void;
+export type StreamEvent = 'data' | 'error' | 'close';
+export type SocketListener = (...args: unknown[]) => void;
 
 export interface StreamSocketLike {
   connect(port: number, host: string, callback: () => void): void;

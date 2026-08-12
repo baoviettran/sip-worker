@@ -6,8 +6,8 @@ import type {
   TransportEvent,
 } from '@sip-worker/core/transport';
 
-type NodeWebSocketEvent = 'open' | 'message' | 'error' | 'close';
-type SocketListener = (...args: unknown[]) => void;
+export type NodeWebSocketEvent = 'open' | 'message' | 'error' | 'close';
+export type SocketListener = (...args: unknown[]) => void;
 
 const OPEN = 1;
 const CLOSED = 3;

@@ -4,6 +4,31 @@
 
 ```ts
 
+// Warning: (ae-missing-release-tag) "AuthContext" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface AuthContext {
+    // (undocumented)
+    readonly credentials: {
+        username: string;
+        password: string;
+    };
+    // (undocumented)
+    readonly request: SipRequestMessage;
+    // (undocumented)
+    readonly requestId: string;
+    // (undocumented)
+    readonly response: SipResponseMessage;
+}
+
+// Warning: (ae-missing-release-tag) "AuthFailure" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type AuthFailure = {
+    readonly type: 'unsupported' | 'exhausted' | 'malformed';
+    readonly error: SipError;
+};
+
 // Warning: (ae-missing-release-tag) "AuthManager" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public
@@ -21,10 +46,34 @@ export class AuthManager {
         };
     }): Record<string, unknown>;
     get retriesByRequestSize(): number;
-    // Warning: (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point index.d.ts
-    // Warning: (ae-forgotten-export) The symbol "AuthFailure" needs to be exported by the entry point index.d.ts
     retry(context: AuthContext): SipRequestMessage | AuthFailure;
     settle(requestId: string): void;
+}
+
+// Warning: (ae-missing-release-tag) "AuthorizationParams" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface AuthorizationParams {
+    // (undocumented)
+    readonly algorithm?: 'MD5' | 'SHA-256';
+    // (undocumented)
+    readonly cnonce?: string;
+    // (undocumented)
+    readonly nc?: string;
+    // (undocumented)
+    readonly nonce: string;
+    // (undocumented)
+    readonly opaque?: string;
+    // (undocumented)
+    readonly qop?: 'auth' | 'auth-int';
+    // (undocumented)
+    readonly realm: string;
+    // (undocumented)
+    readonly response: string;
+    // (undocumented)
+    readonly uri: string;
+    // (undocumented)
+    readonly username: string;
 }
 
 // Warning: (ae-missing-release-tag) "bodyText" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
@@ -49,6 +98,11 @@ export interface CallStateChangedEvent {
     readonly type: 'callStateChanged';
 }
 
+// Warning: (ae-missing-release-tag) "ClientHandle" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type ClientHandle = InviteClientTransaction | NonInviteClientTransaction;
+
 // Warning: (ae-missing-release-tag) "ClientTransaction" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public (undocumented)
@@ -72,12 +126,6 @@ export interface Clock {
     // (undocumented)
     setTimeout(callback: () => void, delayMs: number): number;
 }
-
-// Warning: (ae-forgotten-export) The symbol "DigestParams" needs to be exported by the entry point index.d.ts
-// Warning: (ae-missing-release-tag) "computeDigest" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
-//
-// @public
-export function computeDigest(params: DigestParams): string;
 
 // Warning: (ae-missing-release-tag) "DerivedTimers" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
@@ -111,7 +159,6 @@ export class Dialog {
     get callId(): string;
     createAck(response: SipResponseMessage): SipRequestMessage;
     createRequest(method: string): SipRequestMessage;
-    // Warning: (ae-forgotten-export) The symbol "ViaConfig" needs to be exported by the entry point index.d.ts
     static fromUac(request: SipRequestMessage, response: SipResponseMessage, idGenerator: IdGenerator, viaConfig: ViaConfig): Dialog;
     static fromUas(request: SipRequestMessage, response: SipResponseMessage, idGenerator: IdGenerator, viaConfig: ViaConfig): Dialog;
     // (undocumented)
@@ -129,6 +176,57 @@ export class Dialog {
     get remoteTarget(): string;
     // (undocumented)
     get routeSet(): readonly string[];
+}
+
+// Warning: (ae-missing-release-tag) "DigestAlgorithm" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export type DigestAlgorithm = 'MD5' | 'SHA-256';
+
+// Warning: (ae-missing-release-tag) "DigestChallenge" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface DigestChallenge {
+    // (undocumented)
+    readonly algorithm?: 'MD5' | 'SHA-256';
+    // (undocumented)
+    readonly domain?: string;
+    // (undocumented)
+    readonly nonce: string;
+    // (undocumented)
+    readonly opaque?: string;
+    readonly qop?: ReadonlyArray<string>;
+    readonly rawAlgorithm?: string;
+    // (undocumented)
+    readonly realm: string;
+    // (undocumented)
+    readonly stale?: boolean;
+}
+
+// Warning: (ae-missing-release-tag) "DigestParams" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export interface DigestParams {
+    // (undocumented)
+    readonly algorithm: DigestAlgorithm;
+    readonly body?: Uint8Array;
+    // (undocumented)
+    readonly cnonce?: string;
+    // (undocumented)
+    readonly method: string;
+    // (undocumented)
+    readonly nc?: string;
+    // (undocumented)
+    readonly nonce: string;
+    // (undocumented)
+    readonly password: string;
+    readonly qop?: 'auth' | 'auth-int';
+    // (undocumented)
+    readonly realm: string;
+    // (undocumented)
+    readonly uri: string;
+    // (undocumented)
+    readonly username: string;
 }
 
 // Warning: (ae-missing-release-tag) "Headers" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
@@ -176,7 +274,6 @@ export interface IncomingCallEvent {
 //
 // @public (undocumented)
 export class Invitation {
-    // Warning: (ae-forgotten-export) The symbol "InvitationOptions" needs to be exported by the entry point index.d.ts
     constructor(options: InvitationOptions);
     answer(localSdp: string): Promise<void>;
     // (undocumented)
@@ -189,13 +286,84 @@ export class Invitation {
     matchesInvite(request: SipRequestMessage): boolean;
     get mediaSessionId(): string;
     reject(statusCode: number, reason?: string): void;
-    // Warning: (ae-forgotten-export) The symbol "Session" needs to be exported by the entry point index.d.ts
-    //
     // (undocumented)
     readonly session: Session;
     // (undocumented)
     readonly toTag: string;
 }
+
+// Warning: (ae-missing-release-tag) "InvitationOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface InvitationOptions {
+    // (undocumented)
+    readonly clock: Clock;
+    // (undocumented)
+    readonly contact: string;
+    // (undocumented)
+    readonly controller: WorkerMediaController;
+    // (undocumented)
+    readonly idGenerator: IdGenerator;
+    // (undocumented)
+    readonly layer: TransactionLayer;
+    // (undocumented)
+    readonly onDialogCreated?: (dialog: Dialog) => void;
+    // (undocumented)
+    readonly request: SipRequestMessage;
+    // (undocumented)
+    readonly T1: number;
+    // (undocumented)
+    readonly T2: number;
+    // (undocumented)
+    readonly transaction: ServerTransaction;
+    readonly viaAddress: string;
+    readonly viaToken: TransportToken;
+}
+
+// Warning: (ae-missing-release-tag) "InviteClientOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export interface InviteClientOptions {
+    // (undocumented)
+    readonly buildNon2xxAck: (request: SipRequestMessage, response: SipResponseMessage) => SipRequestMessage;
+    // (undocumented)
+    readonly clock: Clock;
+    // (undocumented)
+    readonly emit: (event: TransactionLayerEvent) => void;
+    // (undocumented)
+    readonly key: TransactionKey;
+    // (undocumented)
+    readonly reliable: boolean;
+    // (undocumented)
+    readonly request: SipRequestMessage;
+    // (undocumented)
+    readonly timers: DerivedTimers;
+    // (undocumented)
+    readonly transport: Transport;
+}
+
+// Warning: (ae-missing-release-tag) "InviteClientTransaction" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export class InviteClientTransaction {
+    constructor(options: InviteClientOptions);
+    // (undocumented)
+    readonly key: TransactionKey;
+    // (undocumented)
+    receive(response: SipResponseMessage): void;
+    // (undocumented)
+    readonly request: SipRequestMessage;
+    start(): void;
+    // (undocumented)
+    get state(): InviteState;
+    // (undocumented)
+    terminate(error?: TransportError): void;
+}
+
+// Warning: (ae-missing-release-tag) "InviteState" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export type InviteState = 'Calling' | 'Proceeding' | 'Accepted' | 'Completed' | 'Terminated';
 
 // Warning: (ae-missing-release-tag) "isRequest" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
@@ -206,6 +374,11 @@ export function isRequest(m: SipMessage): m is SipRequestMessage;
 //
 // @public (undocumented)
 export function isResponse(m: SipMessage): m is SipResponseMessage;
+
+// Warning: (ae-missing-release-tag) "Listener" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export type Listener<T> = (event: T) => void;
 
 // Warning: (ae-missing-release-tag) "LivenessStrategy" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
@@ -308,6 +481,51 @@ export interface MessageSink {
     receive(message: SipMessage): void;
 }
 
+// Warning: (ae-missing-release-tag) "NonInviteClientOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export interface NonInviteClientOptions {
+    // (undocumented)
+    readonly buildNon2xxAck: (request: SipRequestMessage, response: SipResponseMessage) => SipRequestMessage;
+    // (undocumented)
+    readonly clock: Clock;
+    // (undocumented)
+    readonly emit: (event: TransactionLayerEvent) => void;
+    // (undocumented)
+    readonly key: TransactionKey;
+    // (undocumented)
+    readonly reliable: boolean;
+    // (undocumented)
+    readonly request: SipRequestMessage;
+    // (undocumented)
+    readonly timers: DerivedTimers;
+    // (undocumented)
+    readonly transport: Transport;
+}
+
+// Warning: (ae-missing-release-tag) "NonInviteClientTransaction" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export class NonInviteClientTransaction {
+    constructor(options: NonInviteClientOptions);
+    // (undocumented)
+    readonly key: TransactionKey;
+    // (undocumented)
+    receive(response: SipResponseMessage): void;
+    // (undocumented)
+    readonly request: SipRequestMessage;
+    start(): void;
+    // (undocumented)
+    get state(): NonInviteState;
+    // (undocumented)
+    terminate(error?: TransportError): void;
+}
+
+// Warning: (ae-missing-release-tag) "NonInviteState" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export type NonInviteState = 'Trying' | 'Proceeding' | 'Completed' | 'Terminated';
+
 // Warning: (ae-missing-release-tag) "OptionsLiveness" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public
@@ -336,7 +554,6 @@ export interface OptionsLivenessOptions {
     readonly requestFactory: RequestFactory;
 }
 
-// Warning: (ae-forgotten-export) The symbol "DigestChallenge" needs to be exported by the entry point index.d.ts
 // Warning: (ae-missing-release-tag) "parseDigestChallenges" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public
@@ -378,16 +595,55 @@ export type RegisterState = 'unregistered' | 'registering' | 'registered' | 'unr
 //
 // @public
 export class Registrar {
-    // Warning: (ae-forgotten-export) The symbol "RegistrarOptions" needs to be exported by the entry point index.d.ts
     constructor(options: RegistrarOptions);
     dispose(error: unknown): void;
     onTransportConnected(): void;
     onTransportDisconnected(): void;
     register(): Promise<void>;
     get state(): RegisterState;
-    // Warning: (ae-forgotten-export) The symbol "RegistrarStatus" needs to be exported by the entry point index.d.ts
     status(): RegistrarStatus;
     unregister(): Promise<void>;
+}
+
+// Warning: (ae-missing-release-tag) "RegistrarOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface RegistrarOptions {
+    // (undocumented)
+    readonly aor: string;
+    // (undocumented)
+    readonly authManager?: AuthManager;
+    // (undocumented)
+    readonly clock: Clock;
+    readonly contact: string;
+    // (undocumented)
+    readonly credentials?: {
+        readonly username: string;
+        readonly password: string;
+    };
+    // (undocumented)
+    readonly idGenerator: IdGenerator;
+    readonly initialIdentity?: RegistrationIdentity;
+    // (undocumented)
+    readonly layer: TransactionLayer;
+    readonly onBackgroundFailure?: (error: Error) => void;
+    readonly refreshFraction?: number;
+    // (undocumented)
+    readonly registrarUri: string;
+    readonly viaAddress: string;
+    readonly viaToken: TransportToken;
+}
+
+// Warning: (ae-missing-release-tag) "RegistrarStatus" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface RegistrarStatus {
+    // (undocumented)
+    readonly callId: string;
+    // (undocumented)
+    readonly nextCSeq: number;
+    // (undocumented)
+    readonly state: RegisterState;
 }
 
 // Warning: (ae-missing-release-tag) "RegistrationEvent" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
@@ -452,7 +708,6 @@ export interface RegistrationStateChangedEvent {
     readonly type: 'registrationStateChanged';
 }
 
-// Warning: (ae-forgotten-export) The symbol "AuthorizationParams" needs to be exported by the entry point index.d.ts
 // Warning: (ae-missing-release-tag) "renderAuthorization" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public (undocumented)
@@ -497,6 +752,20 @@ export interface ServerTransaction {
     readonly request: SipRequestMessage;
     // (undocumented)
     readonly state: string;
+}
+
+// Warning: (ae-missing-release-tag) "Session" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export class Session {
+    // (undocumented)
+    off(listener: (event: SessionEvent) => void): void;
+    // (undocumented)
+    on(listener: (event: SessionEvent) => void): void;
+    // (undocumented)
+    get state(): SessionState;
+    // (undocumented)
+    transition(to: SessionState, error?: Error): void;
 }
 
 // Warning: (ae-missing-release-tag) "SessionEvent" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
@@ -670,12 +939,10 @@ export type TransactionKey = `${string}|${string}|${string}`;
 //
 // @public
 export class TransactionLayer implements MessageSink {
-    // Warning: (ae-forgotten-export) The symbol "TransactionLayerOptions" needs to be exported by the entry point index.d.ts
     constructor(options: TransactionLayerOptions);
     dispose(): void;
     getTransport(): Transport;
     receive(message: SipMessage): void;
-    // Warning: (ae-forgotten-export) The symbol "ClientHandle" needs to be exported by the entry point index.d.ts
     sendRequest(request: SipRequestMessage): ClientHandle;
     sendResponse(key: TransactionKey, response: SipResponseMessage): void;
     subscribe(listener: (event: TransactionLayerEvent) => void): () => void;
@@ -714,6 +981,22 @@ export type TransactionLayerEvent = {
     key: TransactionKey;
 };
 
+// Warning: (ae-missing-release-tag) "TransactionLayerOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export interface TransactionLayerOptions {
+    // (undocumented)
+    readonly clock: Clock;
+    // (undocumented)
+    readonly emit: (event: TransactionLayerEvent) => void;
+    // (undocumented)
+    readonly reliable: boolean;
+    // (undocumented)
+    readonly timers: DerivedTimers;
+    // (undocumented)
+    readonly transport: Transport;
+}
+
 // Warning: (ae-missing-release-tag) "Transport" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public
@@ -740,8 +1023,6 @@ export interface TransportCapabilities {
     readonly framing: 'datagram' | 'stream' | 'message';
     // (undocumented)
     readonly reliable: boolean;
-    // Warning: (ae-forgotten-export) The symbol "TransportToken" needs to be exported by the entry point index.d.ts
-    //
     // (undocumented)
     readonly token: TransportToken;
 }
@@ -773,6 +1054,11 @@ export type TransportEvent = {
     readonly error: TransportError;
 };
 
+// Warning: (ae-missing-release-tag) "TransportToken" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type TransportToken = 'UDP' | 'TCP' | 'WS' | 'WSS';
+
 // Warning: (ae-missing-release-tag) "TypedEventEmitter" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public (undocumented)
@@ -781,8 +1067,6 @@ export class TypedEventEmitter<Events extends object = UserAgentEventMap> {
     protected emit<K extends keyof Events>(event: K, value: Events[K]): void;
     // (undocumented)
     off<K extends keyof Events>(event: K, listener: Listener<Events[K]>): void;
-    // Warning: (ae-forgotten-export) The symbol "Listener" needs to be exported by the entry point index.d.ts
-    //
     // (undocumented)
     on<K extends keyof Events>(event: K, listener: Listener<Events[K]>): void;
     // (undocumented)
@@ -875,6 +1159,14 @@ export interface UserAgentOptions {
     readonly viaAddress?: string;
 }
 
+// Warning: (ae-missing-release-tag) "ViaConfig" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface ViaConfig {
+    readonly sentBy: string;
+    readonly token: TransportToken;
+}
+
 // Warning: (ae-missing-release-tag) "withTextBody" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public (undocumented)
@@ -965,8 +1257,17 @@ export class WorkerRuntime {
 // @public
 export interface WorkerRuntimeOptions {
     readonly buildUserAgent: (snapshot: RegistrationSnapshot) => UserAgent;
-    // Warning: (ae-forgotten-export) The symbol "WorkerRuntimePort" needs to be exported by the entry point index.d.ts
     readonly port: WorkerRuntimePort;
+}
+
+// Warning: (ae-missing-release-tag) "WorkerRuntimePort" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface WorkerRuntimePort {
+    // (undocumented)
+    postMessage(message: WorkerToSupervisor): void;
+    // (undocumented)
+    subscribe(listener: (message: SupervisorToWorker) => void): () => void;
 }
 
 // Warning: (ae-missing-release-tag) "WorkerSupervisor" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)

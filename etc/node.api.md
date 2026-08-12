@@ -11,6 +11,11 @@ import { TransportCapabilities } from '@sip-worker/core/transport';
 import { TransportError } from '@sip-worker/core';
 import { TransportEvent } from '@sip-worker/core/transport';
 
+// Warning: (ae-missing-release-tag) "DatagramEvent" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export type DatagramEvent = 'message' | 'error' | 'close';
+
 // Warning: (ae-missing-release-tag) "DatagramSocketLike" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public (undocumented)
@@ -20,14 +25,11 @@ export interface DatagramSocketLike {
     // (undocumented)
     close(callback: () => void): void;
     // (undocumented)
-    off(event: DatagramEvent, listener: SocketListener$1): void;
-    // Warning: (ae-forgotten-export) The symbol "DatagramEvent" needs to be exported by the entry point index.d.ts
-    // Warning: (ae-forgotten-export) The symbol "SocketListener$1" needs to be exported by the entry point index.d.ts
-    //
+    off(event: DatagramEvent, listener: UdpSocketListener): void;
     // (undocumented)
-    on(event: DatagramEvent, listener: SocketListener$1): void;
+    on(event: DatagramEvent, listener: UdpSocketListener): void;
     // (undocumented)
-    removeListener?(event: DatagramEvent, listener: SocketListener$1): void;
+    removeListener?(event: DatagramEvent, listener: UdpSocketListener): void;
     // (undocumented)
     send(data: Uint8Array, port: number, host: string, callback: (error?: Error) => void): void;
 }
@@ -115,6 +117,11 @@ export interface NodeUdpTransportOptions {
     readonly remotePort: number;
 }
 
+// Warning: (ae-missing-release-tag) "NodeWebSocketEvent" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export type NodeWebSocketEvent = 'open' | 'message' | 'error' | 'close';
+
 // Warning: (ae-missing-release-tag) "NodeWebSocketLike" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public (undocumented)
@@ -122,18 +129,15 @@ export interface NodeWebSocketLike {
     // (undocumented)
     close(code?: number, reason?: string): void;
     // (undocumented)
-    off(event: NodeWebSocketEvent, listener: SocketListener): void;
-    // Warning: (ae-forgotten-export) The symbol "NodeWebSocketEvent" needs to be exported by the entry point index.d.ts
-    // Warning: (ae-forgotten-export) The symbol "SocketListener" needs to be exported by the entry point index.d.ts
-    //
+    off(event: NodeWebSocketEvent, listener: WsSocketListener): void;
     // (undocumented)
-    on(event: NodeWebSocketEvent, listener: SocketListener): void;
+    on(event: NodeWebSocketEvent, listener: WsSocketListener): void;
     // (undocumented)
     readonly protocol: string;
     // (undocumented)
     readonly readyState: number;
     // (undocumented)
-    removeListener?(event: NodeWebSocketEvent, listener: SocketListener): void;
+    removeListener?(event: NodeWebSocketEvent, listener: WsSocketListener): void;
     // (undocumented)
     send(data: Uint8Array, callback: (error?: Error) => void): void;
 }
@@ -171,7 +175,6 @@ export interface NodeWebSocketLivenessOptions {
 //
 // @public (undocumented)
 export class NodeWebSocketTransport implements Transport {
-    // Warning: (ae-forgotten-export) The symbol "NodeWebSocketTransportOptions" needs to be exported by the entry point index.d.ts
     constructor(socket: NodeWebSocketLike, options?: NodeWebSocketTransportOptions);
     // (undocumented)
     readonly capabilities: TransportCapabilities;
@@ -187,6 +190,18 @@ export class NodeWebSocketTransport implements Transport {
     subscribe(listener: (event: TransportEvent) => void): () => void;
 }
 
+// Warning: (ae-missing-release-tag) "NodeWebSocketTransportOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export interface NodeWebSocketTransportOptions {
+    readonly token?: 'WS' | 'WSS';
+}
+
+// Warning: (ae-missing-release-tag) "StreamEvent" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export type StreamEvent = 'data' | 'error' | 'close';
+
 // Warning: (ae-missing-release-tag) "StreamSocketLike" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public (undocumented)
@@ -196,22 +211,34 @@ export interface StreamSocketLike {
     // (undocumented)
     end(callback: () => void): void;
     // (undocumented)
-    off(event: StreamEvent, listener: SocketListener$2): void;
-    // Warning: (ae-forgotten-export) The symbol "StreamEvent" needs to be exported by the entry point index.d.ts
-    // Warning: (ae-forgotten-export) The symbol "SocketListener$2" needs to be exported by the entry point index.d.ts
-    //
+    off(event: StreamEvent, listener: TcpSocketListener): void;
     // (undocumented)
-    on(event: StreamEvent, listener: SocketListener$2): void;
+    on(event: StreamEvent, listener: TcpSocketListener): void;
     // (undocumented)
-    removeListener?(event: StreamEvent, listener: SocketListener$2): void;
+    removeListener?(event: StreamEvent, listener: TcpSocketListener): void;
     // (undocumented)
     write(data: Uint8Array, callback: (error?: Error) => void): void;
 }
+
+// Warning: (ae-missing-release-tag) "SocketListener$2" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export type TcpSocketListener = (...args: unknown[]) => void;
 
 // Warning: (ae-missing-release-tag) "toNativePingSocket" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public
 export function toNativePingSocket(ws?: NativeNodeWebSocket): NativePingSocket | undefined;
+
+// Warning: (ae-missing-release-tag) "SocketListener$1" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export type UdpSocketListener = (...args: unknown[]) => void;
+
+// Warning: (ae-missing-release-tag) "SocketListener" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export type WsSocketListener = (...args: unknown[]) => void;
 
 // (No @packageDocumentation comment for this package)
 

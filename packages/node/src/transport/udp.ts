@@ -6,8 +6,8 @@ import type {
   TransportEvent,
 } from '@sip-worker/core/transport';
 
-type DatagramEvent = 'message' | 'error' | 'close';
-type SocketListener = (...args: unknown[]) => void;
+export type DatagramEvent = 'message' | 'error' | 'close';
+export type SocketListener = (...args: unknown[]) => void;
 
 export interface DatagramSocketLike {
   bind(port: number, callback: () => void): void;

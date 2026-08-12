@@ -12,13 +12,14 @@ export { SipStreamDecoder } from './stream/index.js';
 export { SipIngress } from './transport/index.js';
 export { TransactionLayer, buildNon2xxAck } from './transactions/index.js';
 export { Dialog } from './dialogs/index.js';
-export type { IdGenerator } from './dialogs/index.js';
+export type { IdGenerator, ViaConfig } from './dialogs/index.js';
 export type {
   Clock,
   MessageSink,
   Transport,
   TransportCapabilities,
   TransportEvent,
+  TransportToken,
 } from './transport/index.js';
 export type {
   ClientTransaction,
@@ -27,10 +28,32 @@ export type {
   TimerConfig,
   TransactionKey,
   TransactionLayerEvent,
+  TransactionLayerOptions,
+  ClientHandle,
+} from './transactions/index.js';
+export {
+  InviteClientTransaction,
+  NonInviteClientTransaction,
+} from './transactions/index.js';
+export type {
+  InviteClientOptions,
+  InviteState,
+  NonInviteClientOptions,
+  NonInviteState,
 } from './transactions/index.js';
 export { UserAgent, Registrar, Invitation } from './ua/index.js';
-export type { RegistrationIdentity, RegisterState } from './ua/index.js';
-export type { SessionState, SessionEvent } from './ua/index.js';
+export type {
+  RegistrationIdentity,
+  RegisterState,
+  InvitationOptions,
+  RegistrarOptions,
+  RegistrarStatus,
+} from './ua/index.js';
+export type {
+  SessionState,
+  SessionEvent,
+  Session,
+} from './ua/index.js';
 export {
   TypedEventEmitter,
 } from './ua/index.js';
@@ -44,9 +67,19 @@ export type {
   UserAgentEventEmitter,
   UserAgentEventMap,
   UserAgentFailedEvent,
+  Listener,
 } from './ua/index.js';
-export { AuthManager } from './auth/manager.js';
-export { computeDigest } from './auth/digest.js';
+export {
+  AuthManager,
+} from './auth/index.js';
+export type {
+  AuthContext,
+  AuthFailure,
+  DigestChallenge,
+  DigestAlgorithm,
+  DigestParams,
+  AuthorizationParams,
+} from './auth/index.js';
 export { parseDigestChallenges, selectChallenge } from './auth/challenge.js';
 export { renderAuthorization } from './auth/authorization.js';
 export {
@@ -87,6 +120,7 @@ export type {
   WorkerFactory,
   WorkerPort,
   WorkerRuntimeOptions,
+  WorkerRuntimePort,
   WorkerSupervisorOptions,
   WorkerSupervisorPort,
   WorkerToSupervisor,
