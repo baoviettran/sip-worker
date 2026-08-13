@@ -4,6 +4,7 @@ export default defineConfig({
   entry: {
     index: 'src/index.ts',
     'transport/index': 'src/transport/index.ts',
+    'media/index': 'src/media/index.ts',
   },
   tsconfig: './tsconfig.json',
   external: ['@sip-worker/core', /^@sip-worker\/core\//],

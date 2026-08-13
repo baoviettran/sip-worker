@@ -1,6 +1,6 @@
 {
   "name": "@sip-worker/node",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "description": "Signaling-only SIP stack (RFC 3261) node transport and reliability entry as a TypeScript library.",
   "license": "MIT",
   "type": "module",
@@ -43,7 +43,7 @@
     }
   },
   "dependencies": {
-    "@sip-worker/core": "0.3.0"
+    "@sip-worker/core": "0.5.0"
   },
   "scripts": {
     "build": "tsup",
