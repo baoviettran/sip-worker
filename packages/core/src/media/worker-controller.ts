@@ -1,6 +1,8 @@
 import type { Clock } from '../transport/index.js';
 import { SipError } from '../errors.js';
 import type { MediaMessage, MediaPort, MediaReply, MediaRequestMessage } from './protocol.js';
+import { MediaError, MEDIA_ERROR_CODES } from './errors.js';
+import type { MediaErrorCode } from './errors.js';
 
 /** Default deadline (ms) for pending media requests when a clock is present. */
 const DEFAULT_MEDIA_DEADLINE_MS = 1000;
@@ -89,9 +91,16 @@ export class WorkerMediaController {
     });
   }
 
-  /** Request a local SDP offer for the given session. */
-  createOffer(sessionId: string): Promise<string> {
-    return this.sendAndAwait<string>({ type: 'createOffer', requestId: requestId(), sessionId });
+  /**
+   * Request a local SDP offer for the given session. When `options.iceRestart`
+   * is true the offer asks for a forced ICE restart; omitted (or false) leaves
+   * the existing transport in place.
+   */
+  createOffer(sessionId: string, options?: { iceRestart?: boolean }): Promise<string> {
+    const command: MediaRequestMessage = options?.iceRestart
+      ? { type: 'createOffer', requestId: requestId(), sessionId, iceRestart: true }
+      : { type: 'createOffer', requestId: requestId(), sessionId };
+    return this.sendAndAwait<string>(command);
   }
 
   /** Request an SDP answer from the given remote offer. */
@@ -196,7 +205,7 @@ export class WorkerMediaController {
     if (reply.type === 'mediaResult') {
       pending.resolve(reply.sdp);
     } else {
-      pending.reject(new SipError(0, reply.message, 'MEDIA_UNAVAILABLE'));
+      pending.reject(resolveMediaError(reply.code, reply.message, reply.sessionId, pending.commandType));
     }
   }
 
@@ -233,4 +242,22 @@ export class WorkerMediaController {
       }
     }
   }
+}
+
+/**
+ * Reconstruct a `MediaError` from a coded `mediaError` reply. Codes outside the
+ * known set (malformed/out-of-band) collapse to `INTERNAL_ERROR` so the worker
+ * side never surfaces an untyped code. No stack, SDP, device, or ICE data is
+ * carried across the boundary — only the safe message and normalized code.
+ */
+function resolveMediaError(
+  code: MediaErrorCode,
+  message: string,
+  sessionId: string,
+  operation: string,
+): MediaError {
+  const normalized: MediaErrorCode = (MEDIA_ERROR_CODES as readonly string[]).includes(code)
+    ? code
+    : 'INTERNAL_ERROR';
+  return new MediaError(normalized, message, sessionId, operation);
 }

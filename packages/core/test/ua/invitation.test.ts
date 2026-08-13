@@ -66,7 +66,7 @@ class FakeMediaPort {
     const command = [...this.commands].reverse().find((candidate) => candidate.type === 'setRemote');
     if (command?.type !== 'setRemote') throw new Error('no pending setRemote command');
     this.deliver({
-      type: 'mediaError', requestId: command.requestId, sessionId: command.sessionId, message,
+      type: 'mediaError', requestId: command.requestId, sessionId: command.sessionId, message, code: 'NEGOTIATION_FAILED',
     });
   }
 

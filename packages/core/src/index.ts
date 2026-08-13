@@ -88,6 +88,8 @@ export {
   MediaTimeoutError,
   StubMainMediaHandler,
   STUB_SDP,
+  MediaError,
+  MEDIA_ERROR_CODES,
 } from './media/index.js';
 export type {
   MediaCommand,
@@ -95,6 +97,7 @@ export type {
   MediaPort,
   MediaReply,
   WorkerMediaControllerOptions,
+  MediaErrorCode,
 } from './media/index.js';
 export {
   OptionsLiveness,

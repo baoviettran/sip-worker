@@ -7,6 +7,8 @@
  * transport/SIP-agnostic.
  */
 
+import type { MediaErrorCode } from './errors.js';
+
 /**
  * A fixed valid audio SDP carried by the stub. Opaque UTF-8 text to the
  * protocol; the stub replies with it for every offer/answer.
@@ -25,7 +27,12 @@ export const STUB_SDP = [
 ].join('\r\n');
 
 export type MediaCommand =
-  | { type: 'createOffer'; requestId: string; sessionId: string }
+  /**
+   * Request a local SDP offer. `iceRestart`, when true, asks the media layer to
+   * force an ICE restart on the next negotiation; omitted/false keeps the
+   * current transport. Plain-data and structured-clone safe.
+   */
+  | { type: 'createOffer'; requestId: string; sessionId: string; iceRestart?: boolean }
   | { type: 'createAnswer'; requestId: string; sessionId: string; remoteSdp: string }
   | { type: 'setRemote'; requestId: string; sessionId: string; remoteSdp: string }
   /**
@@ -37,7 +44,12 @@ export type MediaCommand =
 
 export type MediaReply =
   | { type: 'mediaResult'; requestId: string; sessionId: string; sdp?: string }
-  | { type: 'mediaError'; requestId: string; sessionId: string; message: string };
+  /**
+   * A typed failure reply. `code` is required and must be one of
+   * `MEDIA_ERROR_CODES`; `message` is the only free-form text. No SDP, device,
+   * ICE, or stack data crosses the boundary.
+   */
+  | { type: 'mediaError'; requestId: string; sessionId: string; message: string; code: MediaErrorCode };
 
 export type MediaMessage = MediaCommand | MediaReply;
 
