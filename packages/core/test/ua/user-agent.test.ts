@@ -1269,4 +1269,100 @@ describe('UserAgent truthful event surface', () => {
     expect(incoming).toHaveLength(0);
     await ua.disconnect();
   });
+
+  it('restartIce rejects INVALID_STATE when no call is confirmed', async () => {
+    const { ua } = setup();
+    await ua.connect();
+    await expect(ua.restartIce()).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    await ua.disconnect();
+  });
+
+  it('restartIce on a confirmed outgoing call sends an in-dialog re-INVITE with incremented CSeq', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    // Confirm the initial call inline (before awaiting invite), matching the
+    // negotiator test harness: 2xx → setRemote auto-answers → confirmed.
+    const pending = ua.invite('sip:bob@example.com');
+    await flush();
+    const initialInvite = lastRequest(transport, 'INVITE');
+    const initialHeaders = new Headers();
+    initialHeaders.set('Via', initialInvite.headers.get('Via') ?? '');
+    initialHeaders.set('From', initialInvite.headers.get('From') ?? '');
+    initialHeaders.set('To', `${initialInvite.headers.get('To') ?? '<sip:bob@example.com>'};tag=bob-1`);
+    initialHeaders.set('Call-ID', initialInvite.headers.get('Call-ID') ?? '');
+    initialHeaders.set('CSeq', initialInvite.headers.get('CSeq') ?? '');
+    initialHeaders.set('Contact', '<sip:bob@192.0.2.2:5060>');
+    const initial200 = withTextBody(makeResponse(200, 'OK', initialHeaders), STUB_SDP, 'application/sdp') as SipResponseMessage;
+    transport.emitData(serializeMessage(initial200));
+    await pending;
+    await flush();
+
+    const restart = ua.restartIce();
+    await flush();
+
+    const invite = lastRequest(transport, 'INVITE');
+    // The re-INVITE is the last INVITE after the initial one; it must reuse the
+    // dialog identity with a higher CSeq.
+    const cseqNumber = Number(invite.headers.get('CSeq')?.trim().split(/\s+/)[0]);
+    expect(cseqNumber).toBeGreaterThan(1);
+    expect(invite.headers.get('Call-ID')).toBe(initialInvite.headers.get('Call-ID'));
+    expect(invite.headers.get('To')).toContain('tag=bob-1');
+
+    // Reply 200 with an answer echoing the re-INVITE To tag; FakeMediaPort
+    // auto-answers setRemote.
+    const answerHeaders = new Headers();
+    answerHeaders.set('Via', invite.headers.get('Via') ?? '');
+    answerHeaders.set('From', invite.headers.get('From') ?? '');
+    answerHeaders.set('To', invite.headers.get('To') ?? '');
+    answerHeaders.set('Call-ID', invite.headers.get('Call-ID') ?? '');
+    answerHeaders.set('CSeq', invite.headers.get('CSeq') ?? '');
+    answerHeaders.set('Contact', '<sip:bob@192.0.2.2:5060>');
+    const answer = withTextBody(makeResponse(200, 'OK', answerHeaders), STUB_SDP, 'application/sdp') as SipResponseMessage;
+    transport.emitData(serializeMessage(answer));
+    await restart;
+  });
+
+  it('routes an incoming in-dialog re-INVITE to the negotiator and answers 200', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    // Establish a confirmed outgoing call first (inline confirm).
+    const pending = ua.invite('sip:bob@example.com');
+    await flush();
+    const initialInvite = lastRequest(transport, 'INVITE');
+    const initialHeaders = new Headers();
+    initialHeaders.set('Via', initialInvite.headers.get('Via') ?? '');
+    initialHeaders.set('From', initialInvite.headers.get('From') ?? '');
+    initialHeaders.set('To', `${initialInvite.headers.get('To') ?? '<sip:bob@example.com>'};tag=bob-1`);
+    initialHeaders.set('Call-ID', initialInvite.headers.get('Call-ID') ?? '');
+    initialHeaders.set('CSeq', initialInvite.headers.get('CSeq') ?? '');
+    initialHeaders.set('Contact', '<sip:bob@192.0.2.2:5060>');
+    const initial200 = withTextBody(makeResponse(200, 'OK', initialHeaders), STUB_SDP, 'application/sdp') as SipResponseMessage;
+    transport.emitData(serializeMessage(initial200));
+    await pending;
+    await flush();
+
+    // Build an in-dialog re-INVITE from the remote (To carries our tag).
+    const headers = new Headers();
+    headers.set('Via', 'SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-ua-reinvite');
+    headers.set('Max-Forwards', '70');
+    headers.set('From', `${initialHeaders.get('To') ?? '<sip:bob@example.com>'};tag=bob-1`);
+    headers.set('To', initialInvite.headers.get('From') ?? '');
+    headers.set('Call-ID', initialInvite.headers.get('Call-ID') ?? '');
+    headers.set('CSeq', '2 INVITE');
+    headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
+    headers.set('Content-Type', 'application/sdp');
+    const reinvite = makeRequest(
+      'INVITE',
+      'sip:alice@example.com',
+      headers,
+      new TextEncoder().encode(STUB_SDP),
+    );
+
+    transport.emitData(serializeMessage(reinvite));
+    await flush();
+
+    const response = lastResponse(transport);
+    expect(response.statusCode).toBe(200);
+    expect(response.headers.get('CSeq')).toBe('2 INVITE');
+  });
 });

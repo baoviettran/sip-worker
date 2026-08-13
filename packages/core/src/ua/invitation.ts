@@ -19,6 +19,7 @@ import type { Clock, TransportToken } from '../transport/transport.js';
 import type { WorkerMediaController } from '../media/worker-controller.js';
 import { Session } from './session.js';
 import { InviteResponseRetransmitter } from './invite-response-retransmitter.js';
+import { DialogNegotiator } from './dialog-negotiator.js';
 
 export interface InvitationOptions {
   readonly request: SipRequestMessage;
@@ -71,6 +72,48 @@ export class Invitation {
   get mediaSessionId(): string {
     return this.sessionId;
   }
+
+  private activeNegotiator: DialogNegotiator | undefined;
+
+  /**
+   * Request an ICE restart on the confirmed dialog. Only valid after the call
+   * is confirmed (ACK received and a dialog exists); otherwise INVALID_STATE.
+   */
+  restartIce(): Promise<void> {
+    if (this.disposed) {
+      return Promise.reject(new SipError(0, 'Invitation has been disposed', 'LIFECYCLE_ABORTED'));
+    }
+    const negotiator = this.ensureNegotiator();
+    if (negotiator === undefined) {
+      return Promise.reject(new SipError(0, 'call not confirmed', 'INVALID_STATE'));
+    }
+    return negotiator.restartIce();
+  }
+
+  /** Build the negotiator once (and only once) the confirmed dialog exists. */
+  private ensureNegotiator(): DialogNegotiator | undefined {
+    if (this.activeNegotiator !== undefined) return this.activeNegotiator;
+    const dialog = this.dialogValue;
+    if (dialog === undefined) return undefined;
+    this.activeNegotiator = new DialogNegotiator({
+      owner: { dialog, mediaSessionId: this.sessionId },
+      layer: this.layer,
+      controller: this.controller,
+      clock: this.clock,
+      idGenerator: this.idGenerator,
+      via: this.viaConfig,
+      contact: this.contact,
+    });
+    return this.activeNegotiator;
+  }
+
+  /** Dispose the negotiator before media closes so late re-INVITEs can't fire. */
+  private disposeNegotiator(reason: unknown): void {
+    const negotiator = this.activeNegotiator;
+    this.activeNegotiator = undefined;
+    negotiator?.dispose(reason);
+  }
+
   constructor(options: InvitationOptions) {
     this.session = new Session();
     this.request = options.request;
@@ -279,6 +322,16 @@ export class Invitation {
       return;
     }
     if (this.dialogValue === undefined) return;
+    // An in-dialog re-INVITE is answered through the serialized negotiator.
+    if (request.method === 'INVITE') {
+      const negotiator = this.ensureNegotiator();
+      if (negotiator === undefined) {
+        this.layer.sendResponse(transaction.key, this.buildRequestResponse(request, 481, 'Call/Transaction Does Not Exist'));
+        return;
+      }
+      negotiator.handleIncoming(transaction, request);
+      return;
+    }
     if (request.method !== 'BYE') {
       this.layer.sendResponse(transaction.key, this.buildRequestResponse(request, 405, 'Method Not Allowed'));
       return;
@@ -306,6 +359,7 @@ export class Invitation {
     if (this.disposed) return;
     this.disposed = true;
     this.state = 'terminated';
+    this.disposeNegotiator(error);
     this.teardown();
     const deferred = this.takeAnswerDeferred();
     deferred?.reject(error);
@@ -378,6 +432,7 @@ export class Invitation {
 
   private fail(reason: unknown): void {
     this.state = 'terminated';
+    this.disposeNegotiator(reason);
     this.teardown();
     const deferred = this.takeAnswerDeferred();
     deferred?.reject(reason);
@@ -386,6 +441,7 @@ export class Invitation {
 
   private settleHangup(): void {
     this.state = 'terminated';
+    this.disposeNegotiator(new SipError(0, 'call terminated', 'LIFECYCLE_ABORTED'));
     this.teardown();
     const deferred = this.takeAnswerDeferred();
     if (deferred !== undefined) {

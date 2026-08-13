@@ -373,6 +373,33 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
     await inviter.invite();
   }
 
+  /**
+ * Request an ICE restart on the sole confirmed active call. Valid only when
+ * exactly one confirmed owner exists (the active inviter or a single active
+ * invitation that is confirmed); otherwise rejects INVALID_STATE.
+ */
+  restartIce(): Promise<void> {
+    const owner = this.singleConfirmedOwner();
+    if (owner === undefined) {
+      return Promise.reject(new SipError(0, 'no confirmed active call for ICE restart', 'INVALID_STATE'));
+    }
+    return owner.restartIce();
+  }
+
+  /**
+   * The single confirmed call owner, or undefined when there is not exactly one
+   * confirmed active call. An unconfirmed activeInviter or more than one active
+   * invitation disqualify.
+   */
+  private singleConfirmedOwner(): DialogOwner | undefined {
+    let candidates: DialogOwner[] = [];
+    if (this.activeInviter !== undefined) candidates.push(this.activeInviter);
+    for (const invitation of this.activeInvitations.values()) candidates.push(invitation);
+    candidates = candidates.filter((owner) => owner.session.state === 'confirmed');
+    if (candidates.length !== 1) return undefined;
+    return candidates[0];
+  }
+
   /** Terminate the active call with BYE. */
   async bye(): Promise<void> {
     this.assertOperational();
@@ -497,6 +524,21 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
       const invitation = inviteId === undefined ? undefined : this.activeInvitations.get(inviteId);
       if (invitation !== undefined) {
         invitation.handleIncomingRequest(event.transaction, event.request);
+        return;
+      }
+      this.layer?.sendResponse(
+        event.transaction.key,
+        this.requestResponse(event.request, 481, 'Call/Transaction Does Not Exist'),
+      );
+      return;
+    }
+
+    // An in-dialog (To-tag present) INVITE routes to the owner's negotiator.
+    if (event.request.method === 'INVITE' && extractTag(event.request.headers.get('To')) !== undefined) {
+      const ownerId = requestDialogId(event.request);
+      const owner = ownerId === undefined ? undefined : this.dialogOwners.get(ownerId);
+      if (owner !== undefined) {
+        owner.handleIncomingRequest(event.transaction, event.request);
         return;
       }
       this.layer?.sendResponse(
