@@ -1055,6 +1055,12 @@ describe('Inviter (outgoing SIP call session)', () => {
     expect(h.inviter.session.state).toBe('failed');
     // No setRemote is posted when the selected SDP is empty.
     expect(h.media.setRemoteSdps).toHaveLength(0);
+    // The dialog was created and ACKed before the SDP check, so it is closed
+    // with a BYE rather than left dangling on the remote.
+    const byes = h.sent.filter((request) => request.method === 'BYE');
+    expect(byes.length).toBeGreaterThan(0);
+    const bye = byes.at(-1)!;
+    expect(bye.headers.get('To')).toContain('tag=bob-1');
   });
 
   it('rejects invite, sends a BYE, and leaves media close-once when setRemote fails on a created dialog', async () => {

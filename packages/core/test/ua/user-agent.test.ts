@@ -1076,7 +1076,7 @@ describe('UserAgent shutdown settlement', () => {
     expect(responseMatchesRequestIdentity(cancel, parsed.value)).toBe(true);
   });
 
-  it('keeps invite pending while setRemote is held, then closes media once on success', async () => {
+  it('keeps invite pending while setRemote is held, and does not close media early on confirmation', async () => {
     const transport = new FakeTransport({ reliable: true, framing: 'stream' });
     const media = new UaControllableMediaPort();
     media.holdSetRemote = true;
@@ -1133,6 +1133,8 @@ describe('UserAgent shutdown settlement', () => {
     await expect(invitation).rejects.toMatchObject({ code: 'REMOTE_DESCRIPTION_REJECTED' });
     // UA terminal ownership releases the outgoing owner on failure.
     expect(ua.callState).toBe('idle');
+    // UA terminal ownership closes media exactly once on the terminal transition.
+    expect(media.closeSessionCount).toBe(1);
   });
 });
 

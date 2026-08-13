@@ -553,7 +553,10 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
     const close = (controller as { closeSession?: (sessionId: string) => void }).closeSession;
     if (typeof close !== 'function') return;
     try {
-      close(owner.mediaSessionId);
+      // Bind to the controller: the method's `this` reads the controller's
+      // `closed`/`port` state, so an unbound bare reference would throw under
+      // strict mode and silently skip the media teardown notification.
+      close.call(controller, owner.mediaSessionId);
     } catch {
       // A teardown notification must never throw into the session state machine.
     }

@@ -373,13 +373,19 @@ export class Inviter {
    */
   private ensureSelectedNegotiation(response: SipResponseMessage): void {
     const sdp = DialogSet.sdpFromBody(response);
+    const dialog = this.dialogSet?.selectedDialog;
     if (sdp.length === 0) {
       const error = new MediaError('NEGOTIATION_FAILED', '2xx response carried no SDP', this.sessionId, 'setRemote');
       this.selectedNegotiation = undefined;
+      // The dialog has already been created and ACKed by handleSuccess. Close it
+      // with a BYE when possible (unless the hangup path owns it) so the remote
+      // does not hold a dangling established dialog after we fail and close media.
+      if (dialog !== undefined && !this.hangingUp) {
+        void this.sendByeForDialog(dialog).catch(() => {});
+      }
       if (this.inviteDeferred !== undefined) this.fail(error);
       return;
     }
-    const dialog = this.dialogSet?.selectedDialog;
     const negotiation = this.controller
       .setRemote(this.sessionId, sdp)
       .then(
