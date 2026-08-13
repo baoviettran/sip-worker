@@ -35,6 +35,14 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+/** A manually-settled promise, for controlling a pending getUserMedia. */
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void } {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 /** Recording emitter capturing every typed media event. */
 // (type-param emitted above is not read here; kept for clarity)
 class Recorder {
@@ -344,6 +352,27 @@ describe('WebRtcMediaSession.replaceMicrophone', () => {
     expect(newTrack.stopped).toBe(true); // rejected new track stopped
     expect(oldTrack.stopped).toBe(false); // old track preserved
   });
+
+  it('rollback keeps the session non-terminal (connected) with the old track live', async () => {
+    const { pc, session } = setup();
+    await fullOffer(session, pc);
+    pc._setIceConnection('connected');
+    const oldTrack = makeAudioTrack();
+    const newTrack = makeAudioTrack();
+    pc.transceivers[0]!.sender.replaceTrack(oldTrack);
+    (session as unknown as { localTrack: MediaStreamTrack }).localTrack = oldTrack;
+    pc.transceivers[0]!.sender.failNextReplaceTrack = true;
+    await expect(session.replaceMicrophone(newTrack)).rejects.toBeInstanceOf(Error);
+    expect(session.currentState).not.toBe('failed'); // non-terminal after rollback
+    expect(session.currentState).not.toBe('closed');
+    expect(session.currentState).toBe('connected'); // still connected
+    expect(oldTrack.stopped).toBe(false); // old track NOT stopped
+    // PC still open and listening: a LATER ICE failure must tear down, not leak.
+    pc._setIceConnection('failed');
+    expect(session.currentState).toBe('failed');
+    expect(pc.closed).toBe(true); // PC reclaimed by the later teardown
+    expect(oldTrack.stopped).toBe(true); // track reclaimed by the later teardown
+  });
 });
 
 describe('WebRtcMediaSession close', () => {
@@ -382,5 +411,21 @@ describe('WebRtcMediaSession close', () => {
     pc._setIceConnection('failed'); // terminal
     session.close();
     expect(stateTransitions(recorder).at(-1)).toBe('failed');
+  });
+
+  it('close during microphone acquisition stops the late track, leaks no PC, and emits no post-terminal transition', async () => {
+    const { env, session, recorder } = setup(); // setup() pre-queues a default mic stream, so clear it
+    env.queuedUserMedia.length = 0;
+    const { promise, resolve } = deferred<MediaStream>();
+    env.queuedUserMedia.push(promise);
+    const op = session.createOffer();
+    await flush(); // acquisition now pending on `promise`
+    session.close();
+    const { stream, track } = makeAudioStream();
+    resolve(stream); // late delivery after close
+    await expect(op).rejects.toMatchObject({ code: 'ABORTED' });
+    expect(track.stopped).toBe(true); // late track reclaimed
+    expect(env.peerConnectionCalls).toHaveLength(0); // NO peer connection created (late PC would leak)
+    expect(stateTransitions(recorder).at(-1)).toBe('closed'); // no closed->negotiating repost
   });
 });

@@ -94,6 +94,13 @@ export class WebRtcMediaSession {
    * bumps it so pending waiters are invalidated. Both reset on the same teardown.
    */
   private waitSeq = 0;
+  /**
+   * The `opSeq` value stamped when the current negotiation acquired the lock.
+   * The acquisition continuation compares against it so a `close()` that ran
+   * while `getUserMedia` was pending can invalidate the late track; `close()`
+   * bumps `opSeq`, so a mismatch here means the negotiation was superseded.
+   */
+  private acquisitionSeq = 0;
   /** True while a negotiation operation (offer/answer/setRemote/restart) holds the lock. */
   private negotiating = false;
   /** Cancellation hooks for in-flight ICE/deadline waiters; drained on teardown. */
@@ -262,11 +269,12 @@ export class WebRtcMediaSession {
       await sender.replaceTrack(newTrack);
     } catch (error) {
       // Rollback: the old track stays attached and plays on; stop the rejected
-      // new track. Failures are observable (tyed) but do not tear down the
-      // still-usable existing media.
+      // new track. A replacement failure is NON-terminal — the existing media is
+      // still usable — so the session stays in its current (connected) state, the
+      // old track stays live, and no teardown runs. It is still observable via
+      // mediaFailed, and a later ICE failure tears down normally.
       newTrack.stop();
       const err = this.toMediaError(error, 'INTERNAL_ERROR');
-      this.transition('failed', err.code);
       this.emitter.emit('mediaFailed', {
         type: 'mediaFailed',
         sessionId: this.sessionId,
@@ -335,6 +343,13 @@ export class WebRtcMediaSession {
   private async aquireTrackAndWire(target: MediaSessionState): Promise<void> {
     this.transition('acquiring');
     const stream = await this.acquireTrack();
+    // `close()` may have run while acquisition was pending: it bumped `opSeq`,
+    // set `closed`, and tore down. A late-delivered track must be stopped
+    // immediately and no new peer connection created, or it would be leaked.
+    if (this.closed || this.opSeq !== this.acquisitionSeq) {
+      stopStream(stream);
+      throw this.aborted('negotiation');
+    }
     this.transition(target);
     this.ensurePeerConnection();
     const pc = this.pc!;
@@ -537,6 +552,7 @@ export class WebRtcMediaSession {
     if (this.negotiating) throw this.invalidState('negotiation already in progress');
     this.negotiating = true;
     const token = ++this.opSeq;
+    this.acquisitionSeq = token;
     try {
       return await op();
     } finally {
@@ -592,4 +608,11 @@ export class WebRtcMediaSession {
 /** The first audio track of a directly-owned media stream, if any. */
 function firstAudioTrack(stream: MediaStream): MediaStreamTrack | undefined {
   return stream.getAudioTracks()[0];
+}
+
+/** Stop every track of a stream that was delivered but then invalidated. */
+function stopStream(stream: MediaStream): void {
+  for (const track of stream.getTracks()) {
+    track.stop();
+  }
 }
