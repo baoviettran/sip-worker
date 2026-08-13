@@ -342,6 +342,67 @@ describe('DialogNegotiator', () => {
       expect(h.negotiator.busy).toBe(false);
     });
 
+    it('ACKs the 2xx to the re-INVITE (RFC 3261 13.2.2.4)', async () => {
+      const h = setup();
+      const restart = h.negotiator.restartIce();
+      await flush();
+      const reinvite = lastOutboundInvite(h);
+      await expectPending(restart);
+
+      respond2xxTo(h, reinvite, STUB_SDP);
+      await flush();
+      h.media.releaseSetRemote();
+      await restart;
+
+      // The re-INVITE transaction must be ACKed (same dialog, CSeq number with
+      // ACK method) so the peer does not linger in Accepted retransmitting 2xx.
+      const acks = h.sentRequests.filter((r) => r.method === 'ACK');
+      expect(acks).toHaveLength(1);
+      const ack = acks[0]!;
+      const reinviteCSeq = Number(reinvite.headers.get('CSeq')?.trim().split(/\s+/)[0]);
+      expect(ack.headers.get('CSeq')?.toUpperCase()).toBe(`${reinviteCSeq} ACK`);
+      expect(ack.headers.get('Call-ID')).toBe(reinvite.headers.get('Call-ID'));
+      expect(ack.headers.get('To')).toBe(reinvite.headers.get('To'));
+      expect(ack.headers.get('Route')).toBe(reinvite.headers.get('Route'));
+    });
+
+    it('rejects with a typed error when the 2xx answer SDP is oversized', async () => {
+      const h = setup();
+      const restart = h.negotiator.restartIce();
+      await flush();
+      const reinvite = lastOutboundInvite(h);
+      await expectPending(restart);
+
+      // A 2xx answer body larger than the bounded SDP limit (64 KiB).
+      const oversized = `v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\n${'x'.repeat(70 * 1024)}`;
+      respond2xxTo(h, reinvite, oversized);
+      await expect(restart).rejects.toMatchObject({ name: 'SipError' });
+      expect(h.media.setRemoteSdps).toHaveLength(0);
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it('rejects with a typed error when the 2xx answer carries a non-SDP body', async () => {
+      const h = setup();
+      const restart = h.negotiator.restartIce();
+      await flush();
+      const reinvite = lastOutboundInvite(h);
+      await expectPending(restart);
+
+      const headers = new Headers();
+      headers.set('Via', reinvite.headers.get('Via') ?? '');
+      headers.set('From', reinvite.headers.get('From') ?? '');
+      headers.set('To', reinvite.headers.get('To') ?? '');
+      headers.set('Call-ID', reinvite.headers.get('Call-ID') ?? '');
+      headers.set('CSeq', reinvite.headers.get('CSeq') ?? '');
+      headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
+      headers.set('Content-Type', 'text/plain');
+      const response = withTextBody(makeResponse(200, 'OK', headers), 'not sdp', 'text/plain') as SipResponseMessage;
+      h.layer.receive(response);
+      await expect(restart).rejects.toMatchObject({ name: 'SipError' });
+      expect(h.media.setRemoteSdps).toHaveLength(0);
+      expect(h.negotiator.busy).toBe(false);
+    });
+
     it('rejects on a 491 (Request Pending) response', async () => {
       const h = setup();
       const restart = h.negotiator.restartIce();
@@ -530,6 +591,26 @@ describe('DialogNegotiator', () => {
       h.negotiator.dispose(shutdown);
       await expect(restart).rejects.toThrow('shutdown');
       expect(h.negotiator.busy).toBe(false);
+    });
+
+    it('terminates the owned re-INVITE transaction on dispose', async () => {
+      const h = setup();
+      const restart = h.negotiator.restartIce();
+      await flush();
+      await expectPending(restart);
+
+      const shutdown = new SipError(0, 'shutdown', 'LIFECYCLE_ABORTED');
+      h.negotiator.dispose(shutdown);
+      await expect(restart).rejects.toThrow('shutdown');
+      expect(h.negotiator.busy).toBe(false);
+
+      // A late 2xx to the owned re-INVITE must be ignored, not fire a settlement
+      // or retransmit: the transaction was terminated at dispose.
+      const reinvite = lastOutboundInvite(h);
+      respond2xxTo(h, reinvite, STUB_SDP);
+      await flush();
+      await expect(restart).rejects.toThrow('shutdown');
+      expect(h.media.setRemoteSdps).toHaveLength(0);
     });
 
     it('is idempotent', async () => {

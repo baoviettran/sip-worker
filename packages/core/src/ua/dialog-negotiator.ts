@@ -1,4 +1,5 @@
 import { Headers, makeResponse, bodyText, withTextBody } from '../messages/index.js';
+import { serializeMessage } from '../messages/serializer.js';
 import type { SipRequestMessage, SipResponseMessage } from '../messages/message.js';
 import { SipError } from '../errors.js';
 import type { Dialog, IdGenerator } from '../dialogs/dialog.js';
@@ -23,6 +24,8 @@ const SUPPORTED_MEDIA = 'audio';
 interface PendingOperation {
   /** Reject/settle the owning operation's promise. */
   reject?: (reason: unknown) => void;
+  /** Terminate the owned client transaction for the in-flight re-INVITE. */
+  terminate?: () => void;
 }
 
 /**
@@ -46,6 +49,8 @@ export class DialogNegotiator {
   private disposed = false;
   private busyValue = false;
   private active: PendingOperation | undefined;
+  /** Terminates the owned re-INVITE client transaction (set while a restart is in flight). */
+  private transactionDisposer: (() => void) | undefined;
 
   constructor(private readonly options: {
     /** The confirmed dialog media negotiator sits on; undefined pre-dialog. */
@@ -97,13 +102,22 @@ export class DialogNegotiator {
       };
       this.active = {
         reject: (reason): void => settle(false, reason ?? new SipError(0, 'ICE restart aborted', 'LIFECYCLE_ABORTED')),
+        terminate: (): void => this.terminateOwned(),
       };
       void this.runRestart(dialog, settle).catch((reason) => settle(false, reason));
     });
   }
 
+  /** Terminate the owned client transaction for the in-flight re-INVITE. */
+  private terminateOwned(): void {
+    const disposer = this.transactionDisposer;
+    this.transactionDisposer = undefined;
+    disposer?.();
+  }
+
   private release(): void {
     this.active = undefined;
+    this.transactionDisposer = undefined;
     this.busyValue = false;
   }
 
@@ -122,17 +136,32 @@ export class DialogNegotiator {
     sendOwnedRequest(
       this.layer,
       request,
-      () => {}, // disposal terminates the owned transaction
+      (disposeOwned) => {
+        this.transactionDisposer = disposeOwned;
+        if (this.disposed) disposeOwned();
+      },
       (event: TransactionLayerEvent): void => {
         if (this.disposed) return;
         if (event.type === 'response') {
           const code = event.response.statusCode;
           if (code >= 200 && code < 300) {
-            // Extract the remote answer SDP and apply it to media; only then is
-            // the restart considered successful (Task 4 pattern).
+            // The 2xx to a re-INVITE must be ACKed (RFC 3261 13.2.2.4) so the
+            // peer leaves the Accepted state instead of retransmitting 2xx.
+            this.terminateOwned();
+            const reinviteCSeq = Number(request.headers.get('CSeq')?.trim().split(/\s+/)[0] ?? NaN);
+            void this.layer.getTransport().send(serializeMessage(dialog.createAck(event.response, reinviteCSeq)));
+
+            // Bound and content-check the remote answer before applying it to
+            // media (design: "Remote SDP is size-bounded before being passed to
+            // the browser"). Only after setRemote succeeds is the restart
+            // considered successful (Task 4 pattern).
             const answer = bodyText(event.response);
             if (this.disposed) {
               settle(false, new SipError(0, 'negotiation aborted', 'LIFECYCLE_ABORTED'));
+              return;
+            }
+            if (event.response.headers.get('Content-Type')?.trim().toLowerCase() !== 'application/sdp' || !isValidAnswerSdp(answer)) {
+              settle(false, new SipError(0, 're-INVITE answer SDP invalid or too large', 'CALL_FAILED'));
               return;
             }
             this.controller
@@ -218,6 +247,7 @@ export class DialogNegotiator {
     const active = this.active;
     this.active = undefined;
     this.busyValue = false;
+    this.terminateOwned();
     active?.reject?.(reason);
   }
 
@@ -258,5 +288,19 @@ function isSupportedAudioOffer(request: SipRequestMessage): boolean {
   if (request.body.length === 0 || request.body.length > MAX_REMOTE_SDP_BYTES) return false;
   const text = new TextDecoder('utf-8').decode(request.body);
   const mediaLines = text.split(/\r?\n/).filter((line) => /^m=/.test(line.trim()));
+  return mediaLines.length === 1 && mediaLines[0]!.trim().startsWith(`m=${SUPPORTED_MEDIA} `);
+}
+
+/**
+ * Validate a 2xx answer body for a local re-INVITE before it is applied to
+ * media: bounded, non-empty, `application/sdp`, with exactly one supported
+ * audio section (mirrors the incoming-offer policy). Rejects video/data or
+ * malformed/oversized answers with a typed failure rather than forwarding them
+ * to the browser.
+ */
+function isValidAnswerSdp(answer: string): boolean {
+  const bytes = new TextEncoder().encode(answer);
+  if (answer.length === 0 || bytes.length > MAX_REMOTE_SDP_BYTES) return false;
+  const mediaLines = answer.split(/\r?\n/).filter((line) => /^m=/.test(line.trim()));
   return mediaLines.length === 1 && mediaLines[0]!.trim().startsWith(`m=${SUPPORTED_MEDIA} `);
 }
