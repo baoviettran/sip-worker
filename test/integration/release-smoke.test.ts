@@ -301,7 +301,7 @@ describe('release smoke: Scenario B (incoming call, TU 2xx retransmission)', () 
     expect(invitation).toBeDefined();
 
     // Answer: one 200 OK is sent, then the TU retransmitter schedules at T1 (500ms on the clock).
-    const answerPromise = invitation.answer(STUB_SDP);
+    const answerPromise = invitation.answer();
     await ticks();
     expect(countStatusCode(sent(transport), 200)).toBe(1);
 

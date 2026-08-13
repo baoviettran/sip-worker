@@ -194,7 +194,7 @@ describe('Full Call Integration', () => {
     expect(incomingCalls.length).toBe(1);
 
     const invitation = incomingCalls[0].invitation ?? incomingCalls[0];
-    const answerPromise = invitation.answer('v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n');
+    const answerPromise = invitation.answer();
 
     // Wait for 200 OK to be sent (answer() is async)
     await waitForSentResponse(transport, 200);
@@ -243,7 +243,7 @@ describe('Full Call Integration', () => {
     expect(incomingCalls).toHaveLength(1);
 
     const invitation = incomingCalls[0]!.invitation ?? incomingCalls[0]!;
-    const answer = invitation.answer('v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n');
+    const answer = invitation.answer();
     await flush();
     transport.emitData(serializeMessage(createAckRequest(invitation.dialog.localTag)));
     await answer;
@@ -327,7 +327,7 @@ describe('Full Call Integration', () => {
     transport.emitData(serializeMessage(createInviteRequest()));
     await flush();
     const invitation = incomingCalls[0]!.invitation ?? incomingCalls[0]!;
-    const answer = invitation.answer('v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n');
+    const answer = invitation.answer();
     await flush();
 
     transport.emitData(serializeMessage(createInviteRequest('incoming-duplicate')));
@@ -474,8 +474,8 @@ describe('Full Call Integration', () => {
     let mediaSession: string | undefined;
     const mediaController = {
       createOffer: async () => 'v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n',
-      createAnswer: async () => 'v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n',
-      setRemote: async (sessionId: string) => { mediaSession = sessionId; },
+      createAnswer: async (sessionId: string) => { mediaSession = sessionId; return 'v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n'; },
+      setRemote: async () => {},
       closeSession: (sessionId: string) => { closedSessions.push(sessionId); },
     } as any;
     const authManager = new AuthManager(idGenerator);
@@ -502,7 +502,7 @@ describe('Full Call Integration', () => {
     expect(incomingCalls).toHaveLength(1);
 
     const invitation = incomingCalls[0]!.invitation ?? incomingCalls[0]!;
-    const answerPromise = invitation.answer('v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n');
+    const answerPromise = invitation.answer();
     await waitForSentResponse(transport, 200);
     transport.emitData(serializeMessage(createAckRequest(invitation.dialog.localTag)));
     await answerPromise;

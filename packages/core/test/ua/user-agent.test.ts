@@ -547,7 +547,7 @@ describe('UserAgent shutdown settlement', () => {
     await ua.connect();
     const invitation = receiveIncomingCall(ua, transport);
     let rejections = 0;
-    const answerOutcome = invitation.answer(STUB_SDP).then(
+    const answerOutcome = invitation.answer().then(
       () => undefined,
       (error: unknown) => {
         rejections += 1;
@@ -685,7 +685,7 @@ describe('UserAgent shutdown settlement', () => {
     const { ua, transport } = setup();
     await ua.connect();
     const incoming = receiveIncomingCall(ua, transport);
-    const answer = incoming.answer(STUB_SDP);
+    const answer = incoming.answer();
     const answerRejection = expect(answer).rejects.toThrow('UserAgent disconnected');
     await flush();
 
@@ -812,7 +812,7 @@ describe('UserAgent shutdown settlement', () => {
     const { ua, transport } = setup();
     await ua.connect();
     const invitation = receiveIncomingCall(ua, transport);
-    const answer = invitation.answer(STUB_SDP);
+    const answer = invitation.answer();
     const rejection = expect(answer).rejects.toThrow('UserAgent disconnected');
     await flush();
 
