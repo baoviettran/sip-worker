@@ -110,6 +110,10 @@ export class WebRtcMediaManager {
    * session from resurrecting an ended call.
    */
   private readonly consumedSessionIds = new Set<string>();
+  /** Retained view of the active session's surfaced remote stream (set on `remoteAudio`). */
+  private retainedRemoteStream: MediaStream | null = null;
+  /** Session-lifecycle observers for the facade's remote-audio cleanup. */
+  private readonly sessionEndListeners = new Set<(sessionId: string) => void>();
   /** Serialized negotiation queue; exactly one command dispatched at a time. */
   private readonly queue: PendingRequest[] = [];
   private processing = false;
@@ -193,6 +197,7 @@ export class WebRtcMediaManager {
       this.owned = null;
     }
     this.reservedId = undefined;
+    this.reclaimSession('');
     this.consumedSessionIds.clear();
     this.devices.dispose();
     this.queue.length = 0;
@@ -273,7 +278,10 @@ export class WebRtcMediaManager {
             this.consumedSessionIds.add(sessionId);
             // Reclaim the session this request operated on (idempotent after a
             // self-fail) so no PC/mic track leaks.
-            partial?.close();
+            if (partial !== null) {
+              partial.close();
+              this.reclaimSession(sessionId);
+            }
             this.emitError(this.codeOf(error), requestId, sessionId);
           }
         }
@@ -316,7 +324,10 @@ export class WebRtcMediaManager {
             this.owned = null;
             this.reservedId = undefined;
             this.consumedSessionIds.add(sessionId);
-            partial?.close();
+            if (partial !== null) {
+              partial.close();
+              this.reclaimSession(sessionId);
+            }
             this.emitError(this.codeOf(error), requestId, sessionId);
           }
         }
@@ -345,12 +356,95 @@ export class WebRtcMediaManager {
       },
       clock: this.clock,
       emitter: {
-        emit: <K extends keyof BrowserMediaEventMap>(type: K, value: BrowserMediaEventMap[K]): void =>
-          this.emitter.emit(type, value),
+        emit: <K extends keyof BrowserMediaEventMap>(type: K, value: BrowserMediaEventMap[K]): void => {
+          // Retain the active session's remote stream so the facade can assign
+          // it synchronously without racing the event stream.
+          if (
+            type === 'remoteAudio'
+            && (value as { stream?: MediaStream }).stream !== undefined
+          ) {
+            this.retainedRemoteStream = (value as { stream: MediaStream }).stream;
+          }
+          this.emitter.emit(type, value);
+        },
       },
       sessionId,
     };
     return new WebRtcMediaSession(deps);
+  }
+
+  // ------------------------------------------------------------------
+  // Facade support: device passthrough, remote-stream view, session-end
+  // observer, and active-call microphone replacement. The device-change
+  // notification stays the manager's single `devices.onDeviceChange` listener;
+  // these add no second `devicechange` listener.
+  // ------------------------------------------------------------------
+
+  /** List audio devices through the internal device manager. */
+  listDevices(): Promise<readonly import('./types.js').BrowserAudioDevice[]> {
+    return this.devices.listDevices();
+  }
+
+  /** Probe/validate the selected microphone through the internal device manager. */
+  prepare(options?: import('./types.js').PrepareMediaOptions): Promise<void> {
+    return this.devices.prepare(options);
+  }
+
+  /** Commit an in-memory idle microphone preference (validated on next use). */
+  selectMicrophone(deviceId: string | undefined): void {
+    this.devices.selectMicrophone(deviceId);
+  }
+
+  /**
+   * Transactionally replace the microphone during an ACTIVE call. Resolves the
+   * current active session and delegates the acquire→replaceTrack→commit→stop
+   * order (with rollback) to {@link WebRtcMediaSession.replaceMicrophone}, then
+   * commits the in-memory preference after the swap succeeds. Any earlier
+   * failure stops the new track, preserves the old track AND the old preference,
+   * and rejects.
+   */
+  async replaceActiveMicrophone(deviceId: string | undefined): Promise<void> {
+    if (this.disposed) {
+      throw new MediaError('ABORTED', 'The media operation was aborted.');
+    }
+    const session = this.owned;
+    if (session === null || this.reservedId === undefined) {
+      throw new MediaError('INTERNAL_ERROR', 'No active media session is available.');
+    }
+    const stream = await this.devices.acquireMicrophone(deviceId === undefined ? undefined : { microphoneDeviceId: deviceId });
+    const track = firstAudioTrackOf(stream);
+    if (track === undefined) {
+      for (const t of stream.getTracks()) t.stop();
+      throw new MediaError('DEVICE_UNAVAILABLE', 'No usable microphone track was available.');
+    }
+    try {
+      await session.replaceMicrophone(track);
+      this.devices.selectMicrophone(deviceId);
+    } catch (error) {
+      // replaceMicrophone already stopped the new track on failure; propagate.
+      if (error instanceof MediaError) throw error;
+      throw new MediaError('INTERNAL_ERROR', 'The microphone replacement failed.');
+    }
+  }
+
+  /**
+   * The active session's retained remote stream, if surfaced. Used by the facade
+   * to assign `attachRemoteAudio` without racing the `remoteAudio` event stream.
+   */
+  get activeRemoteStream(): MediaStream | null {
+    return this.retainedRemoteStream;
+  }
+
+  /**
+   * Observe session-end (stream reclamation), for remote-audio cleanup. Returns
+   * an idempotent unsubscribe. This is a lifecycle observer, unrelated to the
+   * browser `devicechange` listener.
+   */
+  onSessionEnd(listener: (sessionId: string) => void): () => void {
+    this.sessionEndListeners.add(listener);
+    return (): void => {
+      this.sessionEndListeners.delete(listener);
+    };
   }
 
   // ------------------------------------------------------------------
@@ -370,6 +464,7 @@ export class WebRtcMediaManager {
     // The session's resources are reclaimed; its id is consumed so a late
     // command cannot resurrect it.
     this.consumedSessionIds.add(sessionId);
+    this.reclaimSession(sessionId);
     // Drop queued requests for the closed session without a reply.
     const kept: PendingRequest[] = [];
     for (const pending of this.queue) {
@@ -381,6 +476,16 @@ export class WebRtcMediaManager {
     // and no late reply is emitted after reclamation.
     this.generation += 1;
     void this.drain();
+  }
+
+  /** Drop the retained remote stream and notify facade session-end observers. */
+  private reclaimSession(clearedSessionId: string): void {
+    this.retainedRemoteStream = null;
+    if (clearedSessionId !== '') {
+      for (const listener of [...this.sessionEndListeners]) {
+        listener(clearedSessionId);
+      }
+    }
   }
 
   // ------------------------------------------------------------------
@@ -432,4 +537,9 @@ export class WebRtcMediaManager {
     }
     return 'INTERNAL_ERROR';
   }
+}
+
+/** The first audio track of a directly-owned microphone stream, if any. */
+function firstAudioTrackOf(stream: MediaStream): MediaStreamTrack | undefined {
+  return stream.getAudioTracks()[0];
 }
