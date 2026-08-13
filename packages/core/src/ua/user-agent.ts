@@ -584,6 +584,28 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
   }
 
   /**
+   * An invitation is in a "nonterminal" conversation when its session is not
+   * terminated or failed — the same predicate core uses to decide session
+   * cleanup. Such an invitation still owns a live/or negotiating call and so
+   * counts toward the one-call busy limit. Test observability only.
+   */
+  private hasNonterminalInvitation(): boolean {
+    for (const invitation of this.activeInvitations.values()) {
+      const state = invitation.session.state;
+      if (state !== 'terminated' && state !== 'failed') return true;
+    }
+    return false;
+  }
+
+  /**
+   * Test observability: the active incoming invitations by invite identity.
+   * Purely read-only diagnostics; never part of the public API.
+   */
+  get activeInvitationsFor(): ReadonlyMap<string, Invitation> {
+    return this.activeInvitations;
+  }
+
+  /**
    * Tell the media controller the session is done. Guarded for an absent
    * `mediaController` (UA may run without one) and for an absent
    * `closeSession` method (callers may inject a minimal controller that only
@@ -617,6 +639,21 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
     const existing = this.activeInvitations.get(inviteId);
     if (existing !== undefined) {
       existing.handleDuplicateInvite(transaction, request);
+      return;
+    }
+    // One-call limit (v0.5): a busy UA rejects a NEW incoming INVITE at the SIP
+    // level with 486 Busy Here BEFORE any media acquisition or Invitation
+    // construction, so a second call can never contend for the single media
+    // session. Busy means an outgoing inviter exists OR any existing invitation
+    // is still in a nonterminal conversation state. A duplicate retransmission
+    // of the SAME inviteId is exempted above (it takes the duplicate path).
+    const busy = this.activeInviter !== undefined
+      || this.hasNonterminalInvitation();
+    if (busy) {
+      this.layer?.sendResponse(
+        transaction.key,
+        this.requestResponse(request, 486, 'Busy Here'),
+      );
       return;
     }
     const mediaController = this.options.mediaController;

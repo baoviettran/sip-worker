@@ -241,13 +241,16 @@ function flush(): Promise<void> {
 }
 
 /** Build an initial INVITE from a remote peer (the UAC of an incoming call). */
-function makeIncomingInvite(): SipRequestMessage {
+function makeIncomingInvite(
+  callId = 'incoming-call@example.com',
+  viaBranch = 'z9hG4bK-incoming',
+): SipRequestMessage {
   const headers = new Headers();
-  headers.set('Via', 'SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-incoming');
+  headers.set('Via', `SIP/2.0/UDP 192.0.2.2:5060;branch=${viaBranch}`);
   headers.set('Max-Forwards', '70');
   headers.set('From', '<sip:bob@example.com>;tag=bob-incoming');
   headers.set('To', '<sip:alice@example.com>');
-  headers.set('Call-ID', 'incoming-call@example.com');
+  headers.set('Call-ID', callId);
   headers.set('CSeq', '1 INVITE');
   headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
   headers.set('Content-Type', 'application/sdp');
@@ -1320,6 +1323,79 @@ describe('UserAgent truthful event surface', () => {
     const answer = withTextBody(makeResponse(200, 'OK', answerHeaders), STUB_SDP, 'application/sdp') as SipResponseMessage;
     transport.emitData(serializeMessage(answer));
     await restart;
+  });
+
+  it('answers a second incoming initial INVITE while the first call is busy with 486, no new Invitation', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    const first = receiveIncomingCall(ua, transport);
+
+    const incoming: unknown[] = [];
+    ua.on('incomingCall', (event) => incoming.push(event));
+    transport.emitData(serializeMessage(makeIncomingInvite('second-call@example.com', 'z9hG4bK-second')));
+    await flush();
+
+    expect(sentResponses(transport, 486)).toBe(1);
+    const rejection = lastResponse(transport);
+    expect(rejection.statusCode).toBe(486);
+    expect(rejection.headers.get('CSeq')?.trim()).toBe('1 INVITE');
+    expect(incoming).toHaveLength(0);
+    expect(ua.activeInvitationsFor).toHaveLength(1);
+    expect([...ua.activeInvitationsFor.values()][0]).toBe(first);
+
+    await ua.disconnect();
+  });
+
+  it('answers a second incoming initial INVITE with 486 while an outgoing inviter is active', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    ua.invite('sip:bob@example.com');
+    await flush();
+
+    const incoming: unknown[] = [];
+    ua.on('incomingCall', (event) => incoming.push(event));
+    transport.emitData(serializeMessage(makeIncomingInvite('outgoing-busy@example.com', 'z9hG4bK-outgoing-busy')));
+    await flush();
+
+    expect(sentResponses(transport, 486)).toBe(1);
+    expect(incoming).toHaveLength(0);
+    expect(ua.callState).toMatch(/inviting|proceeding|early/);
+
+    await ua.disconnect();
+  });
+
+  it('still routes a duplicate INVITE for the same inviteId to the duplicate path, not 486', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    receiveIncomingCall(ua, transport);
+
+    // The first call is busy, but a retransmission with the SAME inviteId must
+    // take the duplicate path (no 486 and no new Invitation), not the 486 rule.
+    transport.emitData(serializeMessage(makeIncomingInvite('incoming-call@example.com')));
+    await flush();
+
+    expect(sentResponses(transport, 486)).toBe(0);
+    expect(ua.activeInvitationsFor.size).toBe(1);
+
+    await ua.disconnect();
+  });
+
+  it('accepts a second incoming initial INVITE after the first call is fully terminated', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    const first = receiveIncomingCall(ua, transport);
+    first.reject(486, 'Busy Here');
+    await flush();
+
+    const incoming: unknown[] = [];
+    ua.on('incomingCall', (event) => incoming.push(event));
+    transport.emitData(serializeMessage(makeIncomingInvite('after-terminated@example.com', 'z9hG4bK-after')));
+    await flush();
+
+    expect(incoming).toHaveLength(1);
+    expect(sentResponses(transport, 486)).toBe(1); // only the first call's own rejection
+
+    await ua.disconnect();
   });
 
   it('routes an incoming in-dialog re-INVITE to the negotiator and answers 200', async () => {
