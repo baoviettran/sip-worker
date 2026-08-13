@@ -421,7 +421,15 @@ export class WebRtcMediaManager {
       await session.replaceMicrophone(track);
       this.devices.selectMicrophone(deviceId);
     } catch (error) {
-      // replaceMicrophone already stopped the new track on failure; propagate.
+      // The caller owns the freshly acquired track until replacement commits.
+      // replaceMicrophone stops it on its replaceTrack-failure path, but on its
+      // pre-call guards (closed/null transceiver/missing replaceTrack) it throws
+      // without stopping it. Stop it here on ANY rejection so a guard-path
+      // throw cannot leak a device-holding track. track.stop() is idempotent,
+      // so a double-stop alongside the session's rollback is safe. Precisely
+      // because the caller may have failed BEFORE the session ever attached the
+      // track, the caller must own stopping it; session teardown never sees it.
+      track.stop();
       if (error instanceof MediaError) throw error;
       throw new MediaError('INTERNAL_ERROR', 'The microphone replacement failed.');
     }

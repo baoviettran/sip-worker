@@ -9,6 +9,15 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+function deferred<T>(): {
+  promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void;
+} {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 /** Recording emitter capturing every typed media event. */
 class Recorder {
   readonly events: Array<BrowserMediaEventMap[keyof BrowserMediaEventMap]> = [];
@@ -182,6 +191,33 @@ describe('BrowserMedia — active-call selectMicrophone', () => {
     expect(oldTrack.stopped).toBe(false); // old track still attached and live
     expect(newTrack.stopped).toBe(true);  // failed-new track reclaimed
     expect(sender.track as unknown as RecTrack).toBe(oldTrack);
+  });
+
+  it('stops the newly-acquired track when replaceMicrophone throws from a pre-call guard', async () => {
+    const h = buildFacade();
+    await driveActiveCall(h);
+    const sender = h.pc.transceivers[0]!.sender;
+    const oldTrack = sender.track as unknown as RecTrack;
+
+    // Gate the replacement acquisition. While it is pending, close the session
+    // so that when the track lands, replaceMicrophone hits its `closed` guard
+    // (a pre-call guard that throws WITHOUT stopping the freshly acquired track).
+    const gated = deferred<MediaStream>();
+    const newTrack = makeTrack('guard-new');
+    h.env.queuedUserMedia.push(gated.promise);
+    const replacement = h.ua.selectMicrophone('mic-1');
+    await flush(); // acquisition (getUserMedia) is now pending
+    h.manager.postMessage({ type: 'closeSession', sessionId: 's1' });
+    await flush();
+    // The old stream is reclaimed by close; the acquired track was never
+    // attached to the session, so this caller must own stopping it. Attach the
+    // rejection handler immediately after resolving so the ABORTED rejection is
+    // never reported as an unhandled error.
+    gated.resolve(streamFrom(newTrack));
+    await expect(replacement).rejects.toBeInstanceOf(MediaError);
+    await expect(replacement).rejects.toMatchObject({ code: 'ABORTED' });
+    expect(newTrack.stopped).toBe(true);  // the device-holding track is reclaimed
+    expect(oldTrack.stopped).toBe(true);  // old session teardown stopped old track
   });
 });
 
