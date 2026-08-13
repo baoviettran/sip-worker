@@ -259,18 +259,22 @@ export class WebRtcMediaManager {
             this.emitResult(requestId, sessionId, sdp);
           }
         } catch (error) {
-          const partial = this.owned;
-          this.owned = null;
-          this.reservedId = undefined;
-          this.consumedSessionIds.add(sessionId);
+          // Generation-guarded exactly like the success path. If a closeSession
+          // (or dispose) invalidated this request while it was in flight, we must
+          // NOT touch `this.owned`/`this.reservedId`: the close already reclaimed
+          // the session, and a newer session may now be active. Acting on the
+          // stale failure could tear down the wrong (live) session and its
+          // PC/tracks, or leave a phantom no-session state. Reclaim + emit only
+          // while this generation is still current.
           if (generation === this.generation) {
-            // Close a partial session before sending the error reply so its
-            // PC/track/listeners are reclaimed and no late state leaks.
-            if (created) partial?.close();
-            this.emitError(this.codeOf(error), requestId, sessionId);
-          } else {
-            // Reclaimed by a concurrent close: no late reply, no leak.
+            const partial = this.owned;
+            this.owned = null;
+            this.reservedId = undefined;
+            this.consumedSessionIds.add(sessionId);
+            // Reclaim the session this request operated on (idempotent after a
+            // self-fail) so no PC/mic track leaks.
             partial?.close();
+            this.emitError(this.codeOf(error), requestId, sessionId);
           }
         }
         return;
@@ -303,12 +307,18 @@ export class WebRtcMediaManager {
             }
           }
         } catch (error) {
-          this.owned = null;
-          this.reservedId = undefined;
+          // Generation-guarded like the success path: never mutate owned state
+          // from a stale failure. A concurrent close already reclaimed the
+          // session; a newer session may now be active, and nulling `this.owned`
+          // here would orphan/leak its PC/mic track or tear it down.
           if (generation === this.generation) {
+            const partial = this.owned;
+            this.owned = null;
+            this.reservedId = undefined;
+            this.consumedSessionIds.add(sessionId);
+            partial?.close();
             this.emitError(this.codeOf(error), requestId, sessionId);
           }
-          this.consumedSessionIds.add(sessionId);
         }
         return;
       }

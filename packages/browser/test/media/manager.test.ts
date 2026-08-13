@@ -329,6 +329,52 @@ describe('WebRtcMediaManager close + race handling', () => {
     await flush();
     expect(replies.length).toBe(before);
   });
+
+  it('a rejecting STALE continuation after close does not tear down a second active session', async () => {
+    const { manager, env, replies } = setup();
+    // s1's offer blocks on a gated getUserMedia.
+    const gate = deferred<MediaStream>();
+    env.queuedUserMedia.length = 0;
+    env.queuedUserMedia.push(gate.promise as unknown as MediaStream);
+    // s1 aborts during acquisition (before ensurePeerConnection), so only s2
+    // ever shifts a peer connection: queue exactly one, for s2.
+    const pc = new FakePeerConnection();
+    env.queuedPeerConnections.length = 0;
+    env.queuedPeerConnections.push(pc as unknown as RTCPeerConnection);
+
+    manager.postMessage({ type: 'createOffer', requestId: 's1-offer', sessionId: 's1' });
+    await flush();
+    // closeSession reclaims s1 mid-offer (bumps generation, consumes the id).
+    manager.postMessage({ type: 'closeSession', sessionId: 's1' });
+    await flush();
+    // A brand-new session s2 is requested while s1's offer is still in flight.
+    env.queuedUserMedia.push(makeAudioStream());
+    manager.postMessage({ type: 'createOffer', requestId: 's2-offer', sessionId: 's2' });
+    // Resolve s1's gate: the now-closed s1 session rejects ABORTED (a stale
+    // continuation). The generation guard must make this a no-op so it cannot
+    // clobber the live s2 state (s2's pc must NOT be torn down). Then drain s2
+    // to ICE completion.
+    gate.resolve(makeAudioStream());
+    await flush();
+    if (pc.iceGatheringState !== 'complete') {
+      pc._completeGathering();
+    }
+    await flush();
+    await flush();
+    await flush();
+
+    // s1 produced no reply (its resources were reclaimed).
+    expect(replyFor(replies, 's1-offer')).toBeUndefined();
+    // s2 dispatched afterwards, negotiated, and its caller got a coherent reply.
+    const s2 = replyFor(replies, 's2-offer');
+    expect(s2).toBeDefined();
+    expect(s2!.type).toBe('mediaResult');
+    expect(manager.activeSessionId).toBe('s2');
+    // The second session's peer connection was NOT torn down by the stale s1
+    // failure (the generation guard prevents clobbering the live session).
+    expect(pc.closed).toBe(false);
+    expect(pc.setLocalCalls.length).toBeGreaterThan(0);
+  });
 });
 
 describe('WebRtcMediaManager stale/unknown messages', () => {

@@ -47,10 +47,14 @@ class PortEnd {
     if (this.closed()) return;
     // Snapshot: listeners added/removed after this point are not notified for
     // this message. Clone per listener so mutation in one cannot leak to another
-    // listener or back to the sender.
+    // listener or back to the sender. A throwing listener is fault-isolated so it
+    // cannot abort delivery to the remaining snapshot listeners.
     for (const entry of [...this.oppositeHalf()]) {
-      if (entry.active) {
+      if (!entry.active) continue;
+      try {
         entry.notify(structuredClone(message));
+      } catch {
+        // A listener error must not corrupt the fan-out or the sender's copy.
       }
     }
   }

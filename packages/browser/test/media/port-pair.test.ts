@@ -98,6 +98,17 @@ describe('createMediaPortPair', () => {
     expect(seen).toHaveLength(0);
   });
 
+  it('fault-isolates a throwing listener: later snapshot listeners still receive delivery', () => {
+    const pair = createMediaPortPair();
+    const seen: MediaMessage[] = [];
+    pair.browser.subscribe(() => { throw new Error('listener boom'); });
+    pair.browser.subscribe((m) => seen.push(m));
+    // A listener exception must not abort the fan-out or throw to the sender.
+    expect(() => pair.core.postMessage({ type: 'closeSession', sessionId: 's1' })).not.toThrow();
+    pair.core.postMessage({ type: 'closeSession', sessionId: 's1' });
+    expect(seen).toHaveLength(2);
+  });
+
   it('close is idempotent and stops delivery in both directions', () => {
     const pair = createMediaPortPair();
     const seen: MediaMessage[] = [];
