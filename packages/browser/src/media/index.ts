@@ -1,5 +1,6 @@
 /** Browser WebRTC media API. */
 export { mapBrowserMediaError, createBrowserMediaEnvironment } from './error-mapper.js';
+export { MediaDeviceManager } from './device-manager.js';
 export {
   MAX_MEDIA_TIMEOUT_MS,
   MEDIA_CODECS,

@@ -26,13 +26,23 @@ export class FakeMediaEnvironment implements BrowserMediaEnvironment {
   /** Value returned by {@link FakeMediaEnvironment.getAudioCapabilities}, or null to force failure. */
   audioCapabilities: RTCRtpCapabilities | null = makeDefaultCapabilities();
 
+  /**
+   * Queue of results delivered to the next {@link FakeMediaEnvironment.getUserMedia},
+   * in order. Each entry is either a stream, a promise (for controlled/abort
+   * tests), or a rejection thunk. Entries may be ignored by the device pre-check
+   * when the configured device list has no matching input.
+   */
+  queuedUserMedia: Array<MediaStream | Promise<MediaStream> | (() => Promise<MediaStream>)> = [];
+  /** Constraints passed to each {@link FakeMediaEnvironment.getUserMedia} call. */
+  readonly getUserMediaConstraints: MediaStreamConstraints[] = [];
+
   private readonly listeners = new Map<string, Set<DeviceListener>>();
 
   constructor(devices: BrowserAudioDevice[] = []) {
     const ref = this;
     this.mediaDevices = {
-      async getUserMedia(): Promise<MediaStream> {
-        return ref.fakeGetUserMedia();
+      async getUserMedia(constraints?: MediaStreamConstraints): Promise<MediaStream> {
+        return ref.fakeGetUserMedia(constraints);
       },
       async enumerateDevices(): Promise<MediaDeviceInfo[]> {
         return ref.fakeEnumerateDevices(devices);
@@ -60,13 +70,22 @@ export class FakeMediaEnvironment implements BrowserMediaEnvironment {
     (this.listeners.get(type) ?? new Set()).delete(listener);
   }
 
-  /** Default `getUserMedia`: deliver the next queued stream or reject. */
-  private async fakeGetUserMedia(): Promise<MediaStream> {
-    const next = this.queuedMediaStreams.shift();
+  /** Default `getUserMedia`: deliver the next queued result or reject. */
+  private async fakeGetUserMedia(
+    constraints?: MediaStreamConstraints,
+  ): Promise<MediaStream> {
+    this.getUserMediaConstraints.push(constraints ?? {});
+    const next = this.queuedUserMedia.shift();
+    if (next instanceof Promise) {
+      return next;
+    }
+    if (typeof next === 'function') {
+      return next();
+    }
     if (next !== undefined) {
       return next;
     }
-    throw new Error('getUserMedia called with empty queuedMediaStreams');
+    throw new Error('getUserMedia called with empty queuedUserMedia');
   }
 
   /** Default `enumerateDevices`: map the configured devices to MediaDeviceInfo shapes. */
