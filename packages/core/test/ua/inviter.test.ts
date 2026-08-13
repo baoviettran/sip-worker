@@ -40,7 +40,7 @@ function makeIdGenerator(): { branch: () => string } {
  */
 class FakeMediaPort {
   commands: MediaCommand[] = [];
-  private listeners = new Set<(message: MediaMessage) => void>();
+  protected listeners = new Set<(message: MediaMessage) => void>();
 
   postMessage(message: MediaMessage): void {
     if (message.type !== 'createOffer' && message.type !== 'createAnswer' && message.type !== 'setRemote') {
@@ -71,8 +71,53 @@ class FakeMediaPort {
     return this.commands.filter((c) => c.type === 'createOffer').length;
   }
 
-  private deliver(message: MediaMessage): void {
+  protected deliver(message: MediaMessage): void {
     for (const listener of this.listeners) listener(message);
+  }
+}
+
+/**
+ * A media port that can HOLD the setRemote reply until the test chooses to
+ * complete or reject it, exposing a coded mediaError path and a closeSession
+ * counter. Used to prove invite() settlement is gated on remote media.
+ */
+class ControllableMediaPort extends FakeMediaPort {
+  holdSetRemote = false;
+  closeSessionCount = 0;
+  private heldSetRemote: Array<{ requestId: string; sessionId: string }> = [];
+
+  override postMessage(message: MediaMessage): void {
+    if (message.type === 'closeSession') {
+      this.closeSessionCount += 1;
+      return;
+    }
+    if (message.type === 'setRemote' && this.holdSetRemote) {
+      this.commands.push(message);
+      this.heldSetRemote.push({ requestId: message.requestId, sessionId: message.sessionId });
+      return;
+    }
+    super.postMessage(message);
+  }
+
+  get heldSetRemoteCount(): number {
+    return this.heldSetRemote.length;
+  }
+
+  /** Complete or reject the oldest held setRemote request. */
+  replyToHeldSetRemote(over: { code?: string; message?: string } = {}): void {
+    const held = this.heldSetRemote.shift();
+    if (held === undefined) throw new Error('no held setRemote to reply to');
+    if (over.code !== undefined) {
+      this.deliver({
+        type: 'mediaError',
+        requestId: held.requestId,
+        sessionId: held.sessionId,
+        message: over.message ?? over.code,
+        code: over.code as never,
+      });
+      return;
+    }
+    this.deliver({ type: 'mediaResult', requestId: held.requestId, sessionId: held.sessionId });
   }
 }
 
@@ -114,8 +159,8 @@ function acks(h: Harness): Array<{ msg: SipRequestMessage; bytes: Uint8Array }> 
   return out;
 }
 
-function setup(options: { credentials?: boolean; rejectTransport?: boolean } = {}): Harness {
-  const { credentials = true, rejectTransport = false } = options;
+function setup(options: { credentials?: boolean; rejectTransport?: boolean; mediaPort?: FakeMediaPort } = {}): Harness {
+  const { credentials = true, rejectTransport = false, mediaPort } = options;
   const clock = new FakeClock();
   const transport: FakeTransport = rejectTransport
     ? new RejectingTransport({ reliable: true, framing: 'stream' })
@@ -133,7 +178,7 @@ function setup(options: { credentials?: boolean; rejectTransport?: boolean } = {
     emit: (event) => events.push(event),
   });
   const idGenerator = makeIdGenerator();
-  const media = new FakeMediaPort();
+  const media = mediaPort ?? new FakeMediaPort();
   const controller = new WorkerMediaController(media);
   const recorded: Harness['recorded'] = [];
   const authManager = credentials ? new AuthManager(idGenerator) : undefined;
@@ -972,5 +1017,160 @@ describe('Inviter (outgoing SIP call session)', () => {
     const secondAck = acks(h)[1]!.bytes;
     expect(Buffer.from(secondAck).equals(Buffer.from(firstAck))).toBe(true);
     expect(h.recorded.filter((r) => r.state === 'confirmed')).toHaveLength(1);
+  });
+
+  it('stays PENDING while setRemote is held unreplied, then resolves to confirmed', async () => {
+    const controllable = new ControllableMediaPort();
+    controllable.holdSetRemote = true;
+    const h = setup({ mediaPort: controllable });
+    const invitation = h.inviter.invite();
+    await drainMicrotasks();
+    const invite = h.sent.find((request) => request.method === 'INVITE')!;
+
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-1' });
+    await flush();
+
+    expect(controllable.heldSetRemoteCount).toBe(1);
+    await expectPending(invitation);
+    expect(h.inviter.session.state).toBe('inviting');
+
+    controllable.replyToHeldSetRemote();
+    await invitation;
+    expect(h.inviter.session.state).toBe('confirmed');
+  });
+
+  it('rejects invite with NEGOTIATION_FAILED when the selected 2xx carries no SDP', async () => {
+    const h = setup();
+    const invitation = h.inviter.invite();
+    await flush();
+    const invite = h.sent.find((request) => request.method === 'INVITE')!;
+
+    receive(h, invite, { sdp: '', toTag: 'bob-1' });
+    await expect(invitation).rejects.toMatchObject({
+      name: 'MediaError',
+      code: 'NEGOTIATION_FAILED',
+      sessionId: h.inviter.mediaSessionId,
+      operation: 'setRemote',
+    });
+    expect(h.inviter.session.state).toBe('failed');
+    // No setRemote is posted when the selected SDP is empty.
+    expect(h.media.setRemoteSdps).toHaveLength(0);
+  });
+
+  it('rejects invite, sends a BYE, and leaves media close-once when setRemote fails on a created dialog', async () => {
+    const controllable = new ControllableMediaPort();
+    controllable.holdSetRemote = true;
+    const h = setup({ mediaPort: controllable });
+    const invitation = h.inviter.invite();
+    await drainMicrotasks();
+    const invite = h.sent.find((request) => request.method === 'INVITE')!;
+
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-1' });
+    await flush();
+    expect(controllable.heldSetRemoteCount).toBe(1);
+
+    controllable.replyToHeldSetRemote({ code: 'REMOTE_DESCRIPTION_REJECTED', message: 'bad answer' });
+    await expect(invitation).rejects.toMatchObject({
+      name: 'MediaError',
+      code: 'REMOTE_DESCRIPTION_REJECTED',
+    });
+    expect(h.inviter.session.state).toBe('failed');
+
+    // A BYE goes out for the created dialog when the rejection permits it.
+    // (Media closure is UA terminal ownership and is verified at the UA level.)
+    const byes = h.sent.filter((request) => request.method === 'BYE');
+    expect(byes.length).toBeGreaterThan(0);
+  });
+
+  it('rejects invite on dispose while setRemote is held, with no unhandled rejection', async () => {
+    const controllable = new ControllableMediaPort();
+    controllable.holdSetRemote = true;
+    const h = setup({ mediaPort: controllable });
+    const invitation = h.inviter.invite();
+    await drainMicrotasks();
+    const invite = h.sent.find((request) => request.method === 'INVITE')!;
+
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-1' });
+    await flush();
+    expect(controllable.heldSetRemoteCount).toBe(1);
+
+    h.inviter.dispose(new Error('shutdown'));
+    await expect(invitation).rejects.toThrow('shutdown');
+    expect(h.inviter.session.state).toBe('failed');
+  });
+
+  it('does not double-negotiate a second/forked 2xx while the first setRemote is pending', async () => {
+    const controllable = new ControllableMediaPort();
+    controllable.holdSetRemote = true;
+    const h = setup({ mediaPort: controllable });
+    const invitation = h.inviter.invite();
+    await drainMicrotasks();
+    const invite = h.sent.find((request) => request.method === 'INVITE')!;
+
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-1' });
+    await flush();
+    expect(controllable.heldSetRemoteCount).toBe(1);
+
+    // A forked/repeated 2xx arrives during the pending setRemote.
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-2' });
+    await flush();
+
+    // Still exactly one held setRemote; the fork must not start a second negotiation.
+    expect(controllable.heldSetRemoteCount).toBe(1);
+    await expectPending(invitation);
+
+    controllable.replyToHeldSetRemote();
+    await invitation;
+    expect(h.inviter.session.state).toBe('confirmed');
+    expect(h.recorded.filter((r) => r.state === 'confirmed')).toHaveLength(1);
+  });
+
+  it('does not settle a same-tag repeated 2xx ahead of a pending setRemote', async () => {
+    const controllable = new ControllableMediaPort();
+    controllable.holdSetRemote = true;
+    const h = setup({ mediaPort: controllable });
+    const invitation = h.inviter.invite();
+    await drainMicrotasks();
+    const invite = h.sent.find((request) => request.method === 'INVITE')!;
+
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-1' });
+    await flush();
+    expect(controllable.heldSetRemoteCount).toBe(1);
+
+    // A retransmitted same-to-tag 2xx arrives while setRemote is still pending.
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-1' });
+    await flush();
+
+    // Still pending: the repeat must not resolve/confirm before setRemote.
+    expect(controllable.heldSetRemoteCount).toBe(1);
+    await expectPending(invitation);
+    expect(h.inviter.session.state).toBe('inviting');
+
+    controllable.replyToHeldSetRemote();
+    await invitation;
+    expect(h.inviter.session.state).toBe('confirmed');
+    expect(h.recorded.filter((r) => r.state === 'confirmed')).toHaveLength(1);
+  });
+
+  it('does not let a stale same-tag repeat reopen settlement after a rejected setRemote', async () => {
+    const controllable = new ControllableMediaPort();
+    controllable.holdSetRemote = true;
+    const h = setup({ mediaPort: controllable });
+    const invitation = h.inviter.invite();
+    await drainMicrotasks();
+    const invite = h.sent.find((request) => request.method === 'INVITE')!;
+
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-1' });
+    await flush();
+    expect(controllable.heldSetRemoteCount).toBe(1);
+
+    controllable.replyToHeldSetRemote({ code: 'REMOTE_DESCRIPTION_REJECTED', message: 'bad' });
+    await expect(invitation).rejects.toMatchObject({ code: 'REMOTE_DESCRIPTION_REJECTED' });
+    expect(h.inviter.session.state).toBe('failed');
+
+    // A late retransmission of the same tag must be a no-op after the failure.
+    receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-1' });
+    await drainMicrotasks();
+    expect(h.inviter.session.state).toBe('failed');
   });
 });

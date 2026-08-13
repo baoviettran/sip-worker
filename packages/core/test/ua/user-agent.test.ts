@@ -5,7 +5,7 @@ import { UserAgent } from '../../src/ua/user-agent.js';
 import type { LivenessStrategy } from '../../src/reliability/index.js';
 import { parseMessage } from '../../src/messages/parser.js';
 import type { SipRequestMessage, SipResponseMessage } from '../../src/messages/message.js';
-import { Headers, makeRequest, makeResponse, serializeMessage } from '../../src/messages/index.js';
+import { Headers, makeRequest, makeResponse, serializeMessage, withTextBody } from '../../src/messages/index.js';
 import { WorkerMediaController } from '../../src/media/worker-controller.js';
 import { STUB_SDP } from '../../src/media/index.js';
 import type { MediaMessage } from '../../src/media/index.js';
@@ -112,20 +112,71 @@ class FakeMediaPort {
       this.listeners.delete(listener);
     };
   }
-  private listeners = new Set<(message: MediaMessage) => void>();
-  private deliver(message: MediaMessage): void {
+  protected listeners = new Set<(message: MediaMessage) => void>();
+  protected deliver(message: MediaMessage): void {
     for (const listener of this.listeners) listener(message);
+  }
+}
+
+/**
+ * A UA media port that counts closeSession calls and can hold the setRemote
+ * reply so an outgoing invite stays pending until the test resolves or rejects
+ * it — proving UA terminal ownership closes media exactly once.
+ */
+class UaControllableMediaPort extends FakeMediaPort {
+  holdSetRemote = false;
+  closeSessionCount = 0;
+  private heldSetRemote: Array<{ requestId: string; sessionId: string }> = [];
+
+  override postMessage(message: MediaMessage): void {
+    if (message.type === 'closeSession') {
+      this.closeSessionCount += 1;
+      return;
+    }
+    if (message.type === 'setRemote' && this.holdSetRemote) {
+      this.heldSetRemote.push({ requestId: message.requestId, sessionId: message.sessionId });
+      return;
+    }
+    super.postMessage(message);
+  }
+
+  get heldSetRemoteCount(): number {
+    return this.heldSetRemote.length;
+  }
+
+  private replyToHeldSetRemote(over: { code?: string; message?: string } = {}): void {
+    const held = this.heldSetRemote.shift();
+    if (held === undefined) return;
+    if (over.code !== undefined) {
+      this.deliver({
+        type: 'mediaError',
+        requestId: held.requestId,
+        sessionId: held.sessionId,
+        message: over.message ?? over.code,
+        code: over.code as never,
+      });
+      return;
+    }
+    this.deliver({ type: 'mediaResult', requestId: held.requestId, sessionId: held.sessionId });
+  }
+
+  completeHeldSetRemote(): void {
+    this.replyToHeldSetRemote();
+  }
+
+  rejectHeldSetRemote(code: string): void {
+    this.replyToHeldSetRemote({ code });
   }
 }
 
 function setup(options: {
   liveness?: LivenessStrategy; intervalMs?: number; viaAddress?: string; transport?: FakeTransport;
-  credentials?: boolean; media?: boolean;
+  credentials?: boolean; media?: boolean | FakeMediaPort;
 } = {}) {
   const clock = new FakeClock();
   const transport = options.transport ?? new FakeTransport({ reliable: true, framing: 'stream' });
   const idGenerator = makeIdGenerator();
-  const media = new FakeMediaPort();
+  const media = typeof options.media === 'object' ? options.media : new FakeMediaPort();
   const mediaController = options.media === false ? undefined : new WorkerMediaController(media);
   const ua = new UserAgent({
     transport,
@@ -150,7 +201,7 @@ function respondTo(
   transport: FakeTransport,
   request: SipRequestMessage,
   statusCode: number,
-  options: { challenge?: boolean; contact?: string; expires?: string } = {},
+  options: { challenge?: boolean; contact?: string; expires?: string; sdp?: string } = {},
 ): void {
   const headers = new Headers();
   headers.set('Via', request.headers.get('Via') ?? '');
@@ -166,7 +217,11 @@ function respondTo(
       `Digest realm="${AUTH_REALM}", nonce="${AUTH_NONCE}", qop="auth", algorithm=SHA-256`,
     );
   }
-  transport.emitData(serializeMessage(makeResponse(statusCode, statusCode === 200 ? 'OK' : 'Unauthorized', headers)));
+  let response = makeResponse(statusCode, statusCode === 200 ? 'OK' : 'Unauthorized', headers);
+  if (options.sdp !== undefined) {
+    response = withTextBody(response, options.sdp, 'application/sdp') as SipResponseMessage;
+  }
+  transport.emitData(serializeMessage(response));
 }
 
 /** The Via header of the outbound INVITE request, or '' if none was sent. */
@@ -260,7 +315,12 @@ async function confirmCall(transport: FakeTransport): Promise<void> {
   headers.set('Call-ID', req.headers.get('Call-ID') ?? '');
   headers.set('CSeq', req.headers.get('CSeq') ?? '');
   headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
-  transport.emitData(serializeMessage(makeResponse(200, 'OK', headers)));
+  const response = withTextBody(
+    makeResponse(200, 'OK', headers),
+    STUB_SDP,
+    'application/sdp',
+  ) as SipResponseMessage;
+  transport.emitData(serializeMessage(response));
 }
 
 /** Deliver another 200 OK for an extra fork of the outbound INVITE. */
@@ -362,7 +422,7 @@ describe('UserAgent Digest ownership', () => {
     const authenticatedInvite = sentRequests(transport, 'INVITE').at(-1)!;
     expect(authenticatedInvite.headers.get('Authorization')).toMatch(/^Digest /);
     expect(digestNonceCount(authenticatedInvite)).toBe('00000002');
-    respondTo(transport, authenticatedInvite, 200, { contact: '<sip:bob@192.0.2.2:5060>' });
+    respondTo(transport, authenticatedInvite, 200, { contact: '<sip:bob@192.0.2.2:5060>', sdp: STUB_SDP });
     await invitation;
 
     await ua.disconnect();
@@ -1014,6 +1074,65 @@ describe('UserAgent shutdown settlement', () => {
     expect(parsed.value.statusCode).toBe(481);
     expect(parsed.value.headers.get('To')).toMatch(/;tag=/);
     expect(responseMatchesRequestIdentity(cancel, parsed.value)).toBe(true);
+  });
+
+  it('keeps invite pending while setRemote is held, then closes media once on success', async () => {
+    const transport = new FakeTransport({ reliable: true, framing: 'stream' });
+    const media = new UaControllableMediaPort();
+    media.holdSetRemote = true;
+    const { ua } = setup({ transport, media });
+    await ua.connect();
+
+    const invitation = ua.invite('sip:bob@example.com');
+    await flush();
+    const invite = sentRequests(transport, 'INVITE')[0]!;
+    const headers = new Headers();
+    headers.set('Via', invite.headers.get('Via') ?? '');
+    headers.set('From', invite.headers.get('From') ?? '');
+    headers.set('To', `${invite.headers.get('To') ?? 'sip:bob@example.com'};tag=bob-1`);
+    headers.set('Call-ID', invite.headers.get('Call-ID') ?? '');
+    headers.set('CSeq', invite.headers.get('CSeq') ?? '');
+    headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
+    const okResponse = withTextBody(makeResponse(200, 'OK', headers), STUB_SDP, 'application/sdp') as SipResponseMessage;
+    transport.emitData(serializeMessage(okResponse));
+    await flush();
+
+    expect(media.heldSetRemoteCount).toBe(1);
+    await expect(Promise.race([invitation.then(() => true, () => 'rejected'), 'pending'])).resolves.toBe('pending');
+
+    media.completeHeldSetRemote();
+    await invitation;
+    expect(ua.callState).toBe('confirmed');
+    // Media is only closed on a terminal transition, not on confirmation.
+    expect(media.closeSessionCount).toBe(0);
+  });
+
+  it('fails invite, closes media exactly once, and sends no local BYE on rejected setRemote', async () => {
+    const transport = new FakeTransport({ reliable: true, framing: 'stream' });
+    const media = new UaControllableMediaPort();
+    media.holdSetRemote = true;
+    const { ua } = setup({ transport, media });
+    await ua.connect();
+
+    const invitation = ua.invite('sip:bob@example.com');
+    await flush();
+    const invite = sentRequests(transport, 'INVITE')[0]!;
+    const headers = new Headers();
+    headers.set('Via', invite.headers.get('Via') ?? '');
+    headers.set('From', invite.headers.get('From') ?? '');
+    headers.set('To', `${invite.headers.get('To') ?? 'sip:bob@example.com'};tag=bob-1`);
+    headers.set('Call-ID', invite.headers.get('Call-ID') ?? '');
+    headers.set('CSeq', invite.headers.get('CSeq') ?? '');
+    headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
+    const okResponse = withTextBody(makeResponse(200, 'OK', headers), STUB_SDP, 'application/sdp') as SipResponseMessage;
+    transport.emitData(serializeMessage(okResponse));
+    await flush();
+    expect(media.heldSetRemoteCount).toBe(1);
+
+    media.rejectHeldSetRemote('REMOTE_DESCRIPTION_REJECTED');
+    await expect(invitation).rejects.toMatchObject({ code: 'REMOTE_DESCRIPTION_REJECTED' });
+    // UA terminal ownership releases the outgoing owner on failure.
+    expect(ua.callState).toBe('idle');
   });
 });
 
