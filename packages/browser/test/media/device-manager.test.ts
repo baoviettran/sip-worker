@@ -47,6 +47,27 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+class TrackingAbortSignal {
+  aborted = false;
+  private readonly listeners = new Set<EventListenerOrEventListenerObject>();
+  get activeListenerCount(): number { return this.listeners.size; }
+  addEventListener(_type: string, listener: EventListenerOrEventListenerObject | null): void {
+    if (listener !== null) this.listeners.add(listener);
+  }
+  removeEventListener(_type: string, listener: EventListenerOrEventListenerObject | null): void {
+    if (listener !== null) this.listeners.delete(listener);
+  }
+  abort(): void {
+    this.aborted = true;
+    const event = new Event('abort');
+    for (const listener of [...this.listeners]) {
+      if (typeof listener === 'function') listener(event);
+      else listener.handleEvent(event);
+    }
+    this.listeners.clear();
+  }
+}
+
 describe('MediaDeviceManager.listDevices', () => {
   it('returns only audio devices, filtering out videoinput/videooutput', async () => {
     const manager = new MediaDeviceManager(
@@ -70,6 +91,16 @@ describe('MediaDeviceManager.listDevices', () => {
 });
 
 describe('MediaDeviceManager.prepare', () => {
+  it('removes the caller abort listener after successful capture', async () => {
+    const env = new FakeMediaEnvironment(ONLY_AUDIO_INPUT);
+    const manager = new MediaDeviceManager(env, {});
+    const signal = new TrackingAbortSignal();
+    env.queuedUserMedia.push(makeAudioStream().stream);
+    await manager.prepare({ signal: signal as unknown as AbortSignal });
+    expect(signal.activeListenerCount).toBe(0);
+    manager.dispose();
+  });
+
   it('requests audio and NO video as { audio: true, video: false }', async () => {
     const env = new FakeMediaEnvironment(ONLY_AUDIO_INPUT);
     const manager = new MediaDeviceManager(env, {});
@@ -98,7 +129,7 @@ describe('MediaDeviceManager.prepare', () => {
     manager.selectMicrophone('mic-1');
     env.queuedUserMedia.push(makeAudioStream().stream);
     await manager.prepare();
-    expect(env.getUserMediaConstraints[0]!.audio).toEqual({ deviceId: { ideal: 'mic-1' } });
+    expect(env.getUserMediaConstraints[0]!.audio).toEqual({ deviceId: { exact: 'mic-1' } });
     expect(env.getUserMediaConstraints[0]!.video).toBe(false);
   });
 
@@ -115,8 +146,11 @@ describe('MediaDeviceManager.prepare', () => {
   it('maps a rejected probe stream on failure without leaking state', async () => {
     const env = new FakeMediaEnvironment(ONLY_AUDIO_INPUT);
     const manager = new MediaDeviceManager(env, {});
+    const signal = new TrackingAbortSignal();
     env.queuedUserMedia.push(() => Promise.reject({ name: 'NotFoundError', message: 'nope' }));
-    await expect(manager.prepare()).rejects.toMatchObject({ code: 'DEVICE_NOT_FOUND' });
+    await expect(manager.prepare({ signal: signal as unknown as AbortSignal }))
+      .rejects.toMatchObject({ code: 'DEVICE_NOT_FOUND' });
+    expect(signal.activeListenerCount).toBe(0);
   });
 
   it('rejects with DEVICE_UNAVAILABLE when no audio device exists at all', async () => {
@@ -136,11 +170,12 @@ describe('MediaDeviceManager.prepare', () => {
     const gum = deferred<MediaStream>();
     const { stream, isStopped } = makeAudioStream();
     env.queuedUserMedia.push(gum.promise);
-    const controller = new AbortController();
-    const operation = manager.prepare({ signal: controller.signal });
+    const signal = new TrackingAbortSignal();
+    const operation = manager.prepare({ signal: signal as unknown as AbortSignal });
     await flush(); // let the pre-check resolve so getUserMedia is pending
-    controller.abort();
+    signal.abort();
     await expect(operation).rejects.toMatchObject({ code: 'ABORTED' });
+    expect(signal.activeListenerCount).toBe(0);
     gum.resolve(stream);
     await flush();
     expect(isStopped()).toBe(true);
@@ -177,7 +212,7 @@ describe('MediaDeviceManager.acquireMicrophone', () => {
     env.queuedUserMedia.push(stream);
     const acquired = await manager.acquireMicrophone();
     expect(acquired).toBe(stream);
-    expect(env.getUserMediaConstraints[0]!.audio).toEqual({ deviceId: { ideal: 'mic-1' } });
+    expect(env.getUserMediaConstraints[0]!.audio).toEqual({ deviceId: { exact: 'mic-1' } });
     expect(isStopped()).toBe(false);
   });
 
@@ -197,7 +232,7 @@ describe('MediaDeviceManager.selectMicrophone and device changes', () => {
       .toBe('mic-1');
     env.queuedUserMedia.push(makeAudioStream().stream);
     await manager.prepare();
-    expect(env.getUserMediaConstraints[0]!.audio).toEqual({ deviceId: { ideal: 'mic-1' } });
+    expect(env.getUserMediaConstraints[0]!.audio).toEqual({ deviceId: { exact: 'mic-1' } });
   });
 
   it('fires the deviceChanged notification and unsubscribe removes the listener', () => {

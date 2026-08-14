@@ -220,7 +220,7 @@ export class MediaDeviceManager {
       const audio = (request.audio === undefined || typeof request.audio === 'boolean')
         ? {} as MediaTrackConstraints
         : { ...request.audio as MediaTrackConstraints };
-      audio.deviceId = { ideal: microphoneDeviceId };
+      audio.deviceId = { exact: microphoneDeviceId };
       request.audio = audio;
     }
     return { request, microphoneDeviceId };
@@ -348,29 +348,43 @@ function raceWithAbort(
     stream.getTracks().forEach((track) => track.stop());
   };
   return new Promise<MediaStream>((resolve, reject) => {
-    const signalAbort = (): void => reject(aborted());
+    let settled = false;
+    const cleanup = (): void => {
+      local.removeEventListener('abort', signalAbort);
+      external?.removeEventListener('abort', signalAbort);
+    };
+    const settle = (action: () => void): boolean => {
+      if (settled) return false;
+      settled = true;
+      cleanup();
+      action();
+      return true;
+    };
+    const signalAbort = (): void => {
+      settle(() => reject(aborted()));
+    };
     if (local.aborted || external?.aborted) {
       signalAbort();
       return;
     }
+    local.addEventListener('abort', signalAbort, { once: true });
+    external?.addEventListener('abort', signalAbort, { once: true });
     acquire.then(
       (stream) => {
         if (local.aborted || external?.aborted) {
           stop(stream);
-          reject(aborted());
+          settle(() => reject(aborted()));
         } else {
-          resolve(stream);
+          settle(() => resolve(stream));
         }
       },
       (cause) => {
         if (local.aborted || external?.aborted) {
-          reject(aborted());
+          settle(() => reject(aborted()));
         } else {
-          reject(mapError(cause));
+          settle(() => reject(mapError(cause)));
         }
       },
     );
-    local.addEventListener('abort', signalAbort, { once: true });
-    external?.addEventListener('abort', signalAbort, { once: true });
   });
 }
