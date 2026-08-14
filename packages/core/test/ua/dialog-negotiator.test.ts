@@ -96,6 +96,8 @@ class HarnessMediaPort {
   commands: Array<{ type: string; [k: string]: unknown }> = [];
   heldSetRemote: Array<{ requestId: string; sessionId: string }> = [];
   answerErrors: Array<{ code: string; message: string }> = [];
+  holdAnswers = false;
+  heldAnswers: Array<{ requestId: string; sessionId: string }> = [];
   private listeners = new Set<(message: MediaMessage) => void>();
 
   postMessage(message: MediaMessage): void {
@@ -104,6 +106,10 @@ class HarnessMediaPort {
     if (message.type === 'createOffer') {
       queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId, sdp: STUB_SDP }));
     } else if (message.type === 'createAnswer') {
+      if (this.holdAnswers) {
+        this.heldAnswers.push({ requestId: message.requestId, sessionId: message.sessionId });
+        return;
+      }
       const error = this.answerErrors.shift();
       if (error !== undefined) {
         queueMicrotask(() => this.deliver({ type: 'mediaError', requestId: message.requestId, sessionId: message.sessionId, message: error.message, code: error.code as never }));
@@ -135,6 +141,17 @@ class HarnessMediaPort {
     return this.commands
       .filter((c) => c.type === 'setRemote')
       .map((c) => typeof c.remoteSdp === 'string' ? c.remoteSdp : '');
+  }
+
+  /** Resolve or reject the oldest held createAnswer operation. */
+  releaseAnswer(error?: { code: string; message: string }): void {
+    const held = this.heldAnswers.shift();
+    if (held === undefined) throw new Error('no held createAnswer to release');
+    if (error === undefined) {
+      this.deliver({ type: 'mediaResult', requestId: held.requestId, sessionId: held.sessionId, sdp: STUB_SDP });
+    } else {
+      this.deliver({ type: 'mediaError', requestId: held.requestId, sessionId: held.sessionId, code: error.code as never, message: error.message });
+    }
   }
 
   /** Release the newest held setRemote (no more than the supplied count). */
@@ -366,17 +383,37 @@ describe('DialogNegotiator', () => {
       expect(ack.headers.get('Route')).toBe(reinvite.headers.get('Route'));
     });
 
-    it('does not surface an unhandled rejection when the ACK send fails on a closing socket', async () => {
+    it('waits for ACK delivery before applying the remote SDP', async () => {
       const h = setup();
       const restart = h.negotiator.restartIce();
       await flush();
       const reinvite = lastOutboundInvite(h);
-      await expectPending(restart);
+      const originalSend = h.transport.send.bind(h.transport);
+      let releaseAck!: () => void;
+      const ackGate = new Promise<void>((resolve) => { releaseAck = resolve; });
+      h.transport.send = async (bytes): Promise<void> => {
+        const parsed = parseMessage(bytes);
+        if (parsed.ok && parsed.value.kind === 'request' && parsed.value.method === 'ACK') {
+          await ackGate;
+        }
+        await originalSend(bytes);
+      };
 
-      // The re-INVITE 2xx resolves while the WS socket is already closing, so
-      // the transport's send() rejects (ws.ts:184) instead of emitting bytes.
-      // The ACK send must be handled (swallowed) - an unhandled rejection would
-      // crash the Node process / log in browsers.
+      respond2xxTo(h, reinvite, STUB_SDP);
+      await flush();
+      expect(h.media.setRemoteSdps).not.toContain(STUB_SDP);
+      releaseAck();
+      await flush();
+      expect(h.media.setRemoteSdps).toContain(STUB_SDP);
+      h.media.releaseSetRemote();
+      await restart;
+    });
+
+    it('rejects TRANSPORT_FAILED without applying SDP or leaking ACK rejection', async () => {
+      const h = setup();
+      const restart = h.negotiator.restartIce();
+      await flush();
+      const reinvite = lastOutboundInvite(h);
       h.transport.sendError = new TransportError('FakeTransport is not connected');
       let unhandled: unknown;
       const onUnhandled = (error: unknown): void => { unhandled = error; };
@@ -384,15 +421,13 @@ describe('DialogNegotiator', () => {
 
       try {
         respond2xxTo(h, reinvite, STUB_SDP);
+        await expect(restart).rejects.toMatchObject({ code: 'TRANSPORT_FAILED' });
         await flush();
-        h.media.releaseSetRemote();
-        await restart;
       } finally {
         process.removeListener('unhandledRejection', onUnhandled);
       }
 
-      // Whether or not the ACK was emitted is transport-dependent; the invariant
-      // is that the rejected send never escapes as an unhandled rejection.
+      expect(h.media.setRemoteSdps).not.toContain(STUB_SDP);
       expect(unhandled).toBeUndefined();
       expect(h.negotiator.busy).toBe(false);
     });
@@ -408,6 +443,7 @@ describe('DialogNegotiator', () => {
       const oversized = `v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\n${'x'.repeat(70 * 1024)}`;
       respond2xxTo(h, reinvite, oversized);
       await expect(restart).rejects.toMatchObject({ name: 'SipError' });
+      expect(h.sentRequests.filter((request) => request.method === 'ACK')).toHaveLength(1);
       expect(h.media.setRemoteSdps).toHaveLength(0);
       expect(h.negotiator.busy).toBe(false);
     });
@@ -506,6 +542,30 @@ describe('DialogNegotiator', () => {
       expect(response.statusCode).toBe(200);
       expect(bodyText(response)).toBe(STUB_SDP);
       expect(response.headers.get('Content-Type')).toBe('application/sdp');
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it.each([
+      ['successful answer', undefined],
+      ['failed answer', { code: 'NEGOTIATION_FAILED', message: 'unsupported codec' }],
+    ])('releases busy and contains send errors after transaction disposal: %s', async (_label, error) => {
+      const h = setup();
+      h.media.holdAnswers = true;
+      deliverIncoming(h, makeReinvite(h.dialog, 2));
+      await flush();
+      expect(h.negotiator.busy).toBe(true);
+      h.layer.dispose();
+      let unhandled: unknown;
+      const onUnhandled = (reason: unknown): void => { unhandled = reason; };
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        h.media.releaseAnswer(error);
+        await flush();
+        await flush();
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandled);
+      }
+      expect(unhandled).toBeUndefined();
       expect(h.negotiator.busy).toBe(false);
     });
 

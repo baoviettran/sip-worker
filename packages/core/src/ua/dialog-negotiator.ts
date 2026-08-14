@@ -145,31 +145,11 @@ export class DialogNegotiator {
         if (event.type === 'response') {
           const code = event.response.statusCode;
           if (code >= 200 && code < 300) {
-            // The 2xx to a re-INVITE must be ACKed (RFC 3261 13.2.2.4) so the
-            // peer leaves the Accepted state instead of retransmitting 2xx.
             this.terminateOwned();
-            const reinviteCSeq = Number(request.headers.get('CSeq')?.trim().split(/\s+/)[0] ?? NaN);
-            void this.layer.getTransport().send(serializeMessage(dialog.createAck(event.response, reinviteCSeq))).catch(() => {});
-
-            // Bound and content-check the remote answer before applying it to
-            // media (design: "Remote SDP is size-bounded before being passed to
-            // the browser"). Only after setRemote succeeds is the restart
-            // considered successful (Task 4 pattern).
-            const answer = bodyText(event.response);
-            if (this.disposed) {
-              settle(false, new SipError(0, 'negotiation aborted', 'LIFECYCLE_ABORTED'));
-              return;
-            }
-            if (event.response.headers.get('Content-Type')?.trim().toLowerCase() !== 'application/sdp' || !isValidAnswerSdp(answer)) {
-              settle(false, new SipError(0, 're-INVITE answer SDP invalid or too large', 'CALL_FAILED'));
-              return;
-            }
-            this.controller
-              .setRemote(this.options.owner.mediaSessionId, answer)
-              .then(
-                () => settle(true),
-                (reason: unknown) => settle(false, reason),
-              );
+            void this.completeRestart(dialog, request, event.response).then(
+              () => settle(true),
+              (reason: unknown) => settle(false, reason),
+            );
           } else {
             settle(false, new SipError(code, `re-INVITE rejected with ${code}`, 'CALL_FAILED'));
           }
@@ -180,6 +160,36 @@ export class DialogNegotiator {
         }
       },
     );
+  }
+
+  /** Complete a successful re-INVITE only after its ACK is delivered and SDP applied. */
+  private async completeRestart(
+    dialog: Dialog,
+    request: SipRequestMessage,
+    response: SipResponseMessage,
+  ): Promise<void> {
+    const answer = bodyText(response);
+    const validAnswer = response.headers.get('Content-Type')?.trim().toLowerCase() === 'application/sdp'
+      && isValidAnswerSdp(answer);
+    if (this.disposed) {
+      throw new SipError(0, 'negotiation aborted', 'LIFECYCLE_ABORTED');
+    }
+    const cseq = Number(request.headers.get('CSeq')?.trim().split(/\s+/)[0] ?? NaN);
+    try {
+      await this.layer.getTransport().send(serializeMessage(dialog.createAck(response, cseq)));
+    } catch {
+      throw new SipError(0, 're-INVITE ACK transport error', 'TRANSPORT_FAILED');
+    }
+    if (this.disposed) {
+      throw new SipError(0, 'negotiation aborted', 'LIFECYCLE_ABORTED');
+    }
+    if (!validAnswer) {
+      throw new SipError(0, 're-INVITE answer SDP invalid or too large', 'CALL_FAILED');
+    }
+    await this.controller.setRemote(this.options.owner.mediaSessionId, answer);
+    if (this.disposed) {
+      throw new SipError(0, 'negotiation aborted', 'LIFECYCLE_ABORTED');
+    }
   }
 
   /**
@@ -221,20 +231,14 @@ export class DialogNegotiator {
       this.busyValue = false;
     };
 
-    this.controller
+    void this.controller
       .createAnswer(this.options.owner.mediaSessionId, remoteSdp)
       .then(
-        (answer) => {
-          if (this.disposed) return;
-          this.layer.sendResponse(transaction.key, this.buildAnswerResponse(request, 200, 'OK', answer));
-        },
-        () => {
-          // Unsupported-media failure → 488 (design); never retry glare.
-          if (this.disposed) return;
-          this.layer.sendResponse(transaction.key, this.buildAnswerResponse(request, 488, 'Not Acceptable Here', undefined));
-        },
+        (answer) => this.sendAnswerResponse(transaction, request, answer),
+        () => this.sendResponse(transaction, request, 488, 'Not Acceptable Here'),
       )
-      .finally(() => finish());
+      .catch(() => undefined)
+      .finally(finish);
   }
 
   /**
@@ -249,6 +253,19 @@ export class DialogNegotiator {
     this.busyValue = false;
     this.terminateOwned();
     active?.reject?.(reason);
+  }
+
+  private sendAnswerResponse(
+    transaction: ServerTransaction,
+    request: SipRequestMessage,
+    answer: string,
+  ): void {
+    if (this.disposed) return;
+    try {
+      this.layer.sendResponse(transaction.key, this.buildAnswerResponse(request, 200, 'OK', answer));
+    } catch {
+      // The server transaction may terminate while media creates the answer.
+    }
   }
 
   private sendResponse(transaction: ServerTransaction, request: SipRequestMessage, statusCode: number, reason: string): void {
