@@ -156,8 +156,10 @@ describe('validateBrowserMediaOptions', () => {
   });
 
   it('defensively copies iceServers, audioConstraints, and codecPreference', () => {
-    const iceServers: RTCIceServer[] = [{ urls: 'stun:example.test' }];
-    const audioConstraints: MediaTrackConstraints = { echoCancellation: true };
+    const urls = ['stun:example.test'];
+    const advanced: MediaTrackConstraintSet[] = [{ echoCancellation: true }];
+    const iceServers: RTCIceServer[] = [{ urls }];
+    const audioConstraints: MediaTrackConstraints = { echoCancellation: true, advanced };
     const codecPreference: MediaCodec[] = ['opus'];
     const options: BrowserMediaOptions = {
       iceServers,
@@ -168,11 +170,16 @@ describe('validateBrowserMediaOptions', () => {
     const out = validateBrowserMediaOptions(options);
 
     (iceServers[0] as { urls: string }).urls = 'mutated';
+    urls[0] = 'stun:attacker.invalid';
+    advanced[0]!.echoCancellation = false;
     audioConstraints.echoCancellation = false;
     (codecPreference as MediaCodec[])[0] = 'PCMU';
 
-    expect(out.iceServers).toEqual([{ urls: 'stun:example.test' }]);
-    expect(out.audioConstraints).toEqual({ echoCancellation: true });
+    expect(out.iceServers).toEqual([{ urls: ['stun:example.test'] }]);
+    expect(out.audioConstraints).toEqual({
+      echoCancellation: true,
+      advanced: [{ echoCancellation: true }],
+    });
     expect(out.codecPreference).toEqual(['opus']);
     expect(out.iceServers).not.toBe(iceServers);
     expect(out.audioConstraints).not.toBe(audioConstraints);

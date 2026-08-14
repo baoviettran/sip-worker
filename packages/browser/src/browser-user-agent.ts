@@ -40,6 +40,7 @@ import { WebRtcMediaManager } from './media/media-manager.js';
 import type { MediaManagerClock } from './media/media-manager.js';
 import { createMediaPortPair } from './media/port-pair.js';
 import { createBrowserMediaEnvironment } from './media/error-mapper.js';
+import { validateBrowserMediaOptions } from './media/types.js';
 import type {
   BrowserMediaEnvironment,
   BrowserMediaEventMap,
@@ -95,10 +96,12 @@ export class BrowserUserAgent extends TypedEventEmitter<BrowserUserAgentEventMap
   constructor(options: BrowserUserAgentOptions) {
     super();
     const { mediaEnvironment, media: mediaOptions, ...coreOptions } = options;
+    const normalizedMedia = validateBrowserMediaOptions(mediaOptions ?? {});
+    const clock = coreOptions.clock;
 
     // Resolve the browser media environment in the CONSTRUCTOR (never at
     // import). An injected environment (tests/advanced) replaces the default.
-    const env = mediaEnvironment ?? createBrowserMediaEnvironment(mediaOptions);
+    const env = mediaEnvironment ?? createBrowserMediaEnvironment(normalizedMedia);
 
     // In-memory media port pair. The core end is driven by the controller; the
     // browser end feeds commands into the manager. Core sees only serializable
@@ -106,15 +109,12 @@ export class BrowserUserAgent extends TypedEventEmitter<BrowserUserAgentEventMap
     const ports = createMediaPortPair();
     this.ports = ports;
 
-    // A construction-time window-backed clock for ICE/media deadlines. Only
-    // read here (constructor scope), never at module import.
-    const clock = buildWindowClock();
 
     // The manager owns the device manager internally. Its narrowed emitter
     // forwards the four media events onto this UA's single event surface.
     const manager = new WebRtcMediaManager({
       env,
-      options: mediaOptions ?? {},
+      options: normalizedMedia,
       clock,
       emitter: {
         emit: <K extends Extract<keyof BrowserMediaEventMap, keyof BrowserUserAgentEventMap>>(
@@ -141,7 +141,11 @@ export class BrowserUserAgent extends TypedEventEmitter<BrowserUserAgentEventMap
       }),
     );
 
-    const controller = new WorkerMediaController(ports.core);
+    const controller = new WorkerMediaController(ports.core, {
+      clock,
+      // The bridge fallback must fire after the browser manager's precise error.
+      deadlineMs: normalizedMedia.mediaOperationTimeoutMs + 1_000,
+    });
     this.controller = controller;
 
     // Compose the core UA. mediaController is omitted from
@@ -261,24 +265,6 @@ export class BrowserUserAgent extends TypedEventEmitter<BrowserUserAgentEventMap
   }
 }
 
-/**
- * Build a window-backed {@link MediaManagerClock} at construction time. Reads
- * the page timer functions and `Date` lazily here (constructor scope), never at
- * module import, so importing this module touches no environment global.
- */
-function buildWindowClock(): MediaManagerClock {
-  return {
-    now(): number {
-      return Date.now();
-    },
-    setTimeout(callback: () => void, delayMs: number): number {
-      return setTimeout(callback, delayMs) as unknown as number;
-    },
-    clearTimeout(id: number): void {
-      clearTimeout(id);
-    },
-  };
-}
 
 export type { BrowserMedia, BrowserMediaEventMap, MediaManagerClock };
 export type { Listener };

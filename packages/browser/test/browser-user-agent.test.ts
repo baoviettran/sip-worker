@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   Headers,
+  MediaTimeoutError,
+  WorkerMediaController,
   STUB_SDP,
   makeRequest,
   makeResponse,
@@ -14,6 +16,7 @@ import {
 } from '@sip-worker/core';
 import { BrowserUserAgent } from '../src/browser-user-agent.js';
 import { FakeMediaEnvironment, FakePeerConnection } from './support/fake-media-environment.js';
+import type { BrowserMediaOptions } from '../src/media/types.js';
 
 /** Minimal fake transport mirroring the core suite's FakeTransport. */
 class FakeTransport implements Transport {
@@ -83,7 +86,36 @@ const makeClock = () => ({
   clearTimeout: (): void => {},
 });
 
-function build(options: { mediaEnvironment?: FakeMediaEnvironment } = {}): Harness {
+class ControlledClock {
+  private current = 0;
+  private nextId = 1;
+  private readonly timers = new Map<number, { due: number; callback: () => void }>();
+  now(): number { return this.current; }
+  setTimeout(callback: () => void, delayMs: number): number {
+    const id = this.nextId++;
+    this.timers.set(id, { due: this.current + delayMs, callback });
+    return id;
+  }
+  clearTimeout(id: number): void { this.timers.delete(id); }
+  advance(ms: number): void {
+    this.current += ms;
+    for (const [id, timer] of [...this.timers]) {
+      if (timer.due > this.current) continue;
+      this.timers.delete(id);
+      timer.callback();
+    }
+  }
+}
+
+function build(options: {
+  mediaEnvironment?: FakeMediaEnvironment;
+  media?: BrowserMediaOptions;
+  clock?: {
+    now(): number;
+    setTimeout(callback: () => void, delayMs: number): number;
+    clearTimeout(id: number): void;
+  };
+} = {}): Harness {
   const transport = new FakeTransport('stream', 'TCP');
   const env = options.mediaEnvironment ?? new FakeMediaEnvironment([
     { deviceId: 'mic-1', label: 'Mic', groupId: 'g-1', kind: 'audioinput' },
@@ -94,12 +126,13 @@ function build(options: { mediaEnvironment?: FakeMediaEnvironment } = {}): Harne
   env.queuedPeerConnections.push(pc as unknown as RTCPeerConnection);
   const ua = new BrowserUserAgent({
     transport,
-    clock: makeClock(),
+    clock: options.clock ?? makeClock(),
     registrarUri: 'sip:registrar.example.com',
     aor: 'sip:alice@example.com',
     contact: '<sip:alice@192.0.2.1:5060>',
     idGenerator: idGenerator(),
     mediaEnvironment: env,
+    media: options.media,
   });
   return { transport, env, ua, pc };
 }
@@ -217,6 +250,34 @@ function parseFromText(text: string): MessageHead | undefined {
   return { method: m[1]!, callId: header('Call-ID'), cseqLine: header('CSeq'), via: header('Via'), from: header('From'), to: header('To') };
 }
 
+  it('validates media options during BrowserUserAgent construction', () => {
+    expect(() => build({ media: { mediaOperationTimeoutMs: 0 } })).toThrow(RangeError);
+  });
+
+  it('arms a controller fallback deadline above the browser operation deadline', async () => {
+    const clock = new ControlledClock();
+    const { ua } = build({
+      clock,
+      media: { mediaOperationTimeoutMs: 1_000 },
+    });
+    const internals = ua as unknown as {
+      manager: { dispose(): void };
+      controller: WorkerMediaController;
+    };
+    // Remove the browser reply path so this exercises only the controller's
+    // last-resort deadline. The manager's own deadline is added in Task 4.
+    internals.manager.dispose();
+    const pending = internals.controller.createOffer('no-browser-reply');
+    let rejection: unknown;
+    void pending.catch((error: unknown) => { rejection = error; });
+    clock.advance(1_999);
+    await flush();
+    expect(rejection).toBeUndefined();
+    clock.advance(1);
+    await flush();
+    expect(rejection).toBeInstanceOf(MediaTimeoutError);
+    await ua.dispose();
+  });
 describe('BrowserUserAgent — composition and media lifecycle', () => {
   it('construction, connect(), and register() never capture the microphone', async () => {
     const { transport, env, ua } = build();

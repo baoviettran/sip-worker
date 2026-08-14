@@ -102,30 +102,31 @@ export type NormalizedMediaOptions = {
   readonly codecPreference?: readonly MediaCodec[];
 };
 
-/** Freeze a shallow copy of an optional readonly array, keeping a stable identity. */
-function copyOptionalArray<T>(value: readonly T[] | undefined): readonly T[] | undefined {
-  if (value === undefined) {
-    return undefined;
+/** Recursively copy and freeze plain configuration arrays/records. */
+function copyAndFreeze<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((entry) => copyAndFreeze(entry))) as T;
   }
-  return Object.freeze([...value]);
+  if (value !== null && typeof value === 'object') {
+    const copied: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      copied[key] = copyAndFreeze(entry);
+    }
+    return Object.freeze(copied) as T;
+  }
+  return value;
 }
 
-/** Deep defensive copy of an ICE server list so later mutation cannot leak in. */
+/** Freeze a defensive copy of an optional readonly array. */
+function copyOptionalArray<T>(value: readonly T[] | undefined): readonly T[] | undefined {
+  return value === undefined ? undefined : copyAndFreeze(value);
+}
+
+/** Deep defensive copy of ICE servers, including URL arrays and OAuth credentials. */
 function copyIceServers(
   value: readonly RTCIceServer[] | undefined,
 ): readonly RTCIceServer[] | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  return Object.freeze(
-    value.map((server) =>
-      Object.freeze({
-        urls: server.urls,
-        username: server.username,
-        credential: server.credential,
-      }) as RTCIceServer,
-    ),
-  );
+  return value === undefined ? undefined : copyAndFreeze(value);
 }
 
 /**
@@ -169,10 +170,8 @@ export function validateBrowserMediaOptions(
     iceGatheringTimeoutMs: Math.min(iceGatheringTimeoutMs, MAX_MEDIA_TIMEOUT_MS),
     mediaOperationTimeoutMs: Math.min(mediaOperationTimeoutMs, MAX_MEDIA_TIMEOUT_MS),
     iceServers: copyIceServers(options.iceServers),
-    audioConstraints:
-      options.audioConstraints === undefined
-        ? undefined
-        : Object.freeze({ ...options.audioConstraints }),
+    audioConstraints: options.audioConstraints === undefined
+      ? undefined : copyAndFreeze(options.audioConstraints),
     codecPreference: copyOptionalArray(options.codecPreference),
   });
 }
