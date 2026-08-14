@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MediaError, type MediaErrorCode } from '@sip-worker/core';
-import { mapBrowserMediaError } from '../../src/media/error-mapper.js';
+import { mapBrowserMediaError, createBrowserMediaEnvironment } from '../../src/media/error-mapper.js';
 import {
   MAX_MEDIA_TIMEOUT_MS,
   MEDIA_CODECS,
@@ -64,6 +64,41 @@ describe('mapBrowserMediaError', () => {
   it('keeps the cause out of a known-name message too', () => {
     const error = mapBrowserMediaError(cause('NotFoundError', 'device-fingerprint-999'));
     expect(error.message).not.toContain('device-fingerprint-999');
+  });
+
+  describe('lazy browser-media environment seam', () => {
+    it('exposes the env factory and resolves globals lazily on invocation', async () => {
+      // The env seam is exempted from the import-boundaries AST scan only
+      // because it resolves globals lazily (never at import). This regression
+      // proves the factory reads browser globals only when it is called.
+      expect(createBrowserMediaEnvironment).toBeTypeOf('function');
+
+      // Install throwing accessors for the browser globals the seam reads.
+      const touching = new Set<string>();
+      const envNames = ['navigator', 'RTCPeerConnection', 'MediaStream', 'MediaStreamTrack', 'RTCRtpSender'];
+      const install = (name: string): void => {
+        Object.defineProperty(globalThis, name, {
+          configurable: true,
+          get() {
+            touching.add(name);
+            return undefined;
+          },
+        });
+      };
+      for (const n of envNames) install(n);
+
+      try {
+        // Invoking the factory resolves the globals lazily (a real fault-trip if
+        // they were read at import, which is separately asserted by import-safety).
+        const env = createBrowserMediaEnvironment();
+        expect(env).toBeDefined();
+        expect(touching.size).toBeGreaterThan(0);
+      } finally {
+        for (const n of envNames) {
+          Object.defineProperty(globalThis, n, { configurable: true, value: undefined });
+        }
+      }
+    });
   });
 
   it('retains the local cause only in a non-enumerable, non-serialized field', () => {

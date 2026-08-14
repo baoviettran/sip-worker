@@ -294,8 +294,10 @@ describe('BrowserUserAgent — composition and media lifecycle', () => {
 
     await expect(ua.invite('sip:carol@example.com')).rejects.toMatchObject({ code: 'INVALID_STATE' });
 
+    // Consume the first (in-flight) invite so dispose() does not orphan a
+    // rejected LIFECYCLE_ABORTED promise into an unhandled vitest error.
     await ua.dispose().catch(() => {});
-    void first;
+    await first.catch(() => {});
     void transport;
   });
 

@@ -1349,7 +1349,7 @@ describe('UserAgent truthful event surface', () => {
   it('answers a second incoming initial INVITE with 486 while an outgoing inviter is active', async () => {
     const { ua, transport } = setup();
     await ua.connect();
-    ua.invite('sip:bob@example.com');
+    const outgoing = ua.invite('sip:bob@example.com');
     await flush();
 
     const incoming: unknown[] = [];
@@ -1361,7 +1361,10 @@ describe('UserAgent truthful event surface', () => {
     expect(incoming).toHaveLength(0);
     expect(ua.callState).toMatch(/inviting|proceeding|early/);
 
-    await ua.disconnect();
+    // Consume the in-flight invite so disconnect() does not orphan a rejected
+    // LIFECYCLE_ABORTED promise (which vitest surfaces as an unhandled error).
+    await ua.disconnect().then(() => {}, () => {});
+    await outgoing.catch(() => {});
   });
 
   it('still routes a duplicate INVITE for the same inviteId to the duplicate path, not 486', async () => {

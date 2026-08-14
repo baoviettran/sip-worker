@@ -31,6 +31,28 @@ const FORBIDDEN_IDENTIFIERS = new Set([
 ]);
 
 /**
+ * The one, narrowly-scoped exception to the executable-global scan.
+ *
+ * `packages/browser/src/media/error-mapper.ts` owns the v0.5 browser media
+ * environment seam: its `readMediaGlobals()` is the ONLY place the browser
+ * package resolves real environment globals, and it does so LAZILY inside
+ * `createBrowserMediaEnvironment()` / per-call accessors — never at module
+ * import. Importing `sip-worker` must stay side-effect free; that guarantee is
+ * enforced at runtime by `test/architecture/import-safety.test.mjs`, which
+ * replaces the same globals with throwing sentinels and asserts every public
+ * browser entry point imports cleanly (see the seam's README/design: "must not
+ * touch navigator/RTCPeerConnection/document merely by importing").
+ *
+ * The other browser/node modules (including `browser-user-agent.ts`, which
+ * builds its window-backed clock through injected `Date`/timer globals) must
+ * NOT read forbidden globals at all — this exemption is scoped to the single
+ * dedicated seam file, not to the whole browser package.
+ */
+const LAZY_GLOBAL_SEAM_FILES = new Set([
+  join(repoRoot, 'packages', 'browser', 'src', 'media', 'error-mapper.ts'),
+]);
+
+/**
  * Type-only AST nodes. Descending into these would surface type references such
  * as `typeof window` or `WebSocket` inside a type literal, which are not
  * executable environment access and must be ignored.
@@ -272,6 +294,10 @@ test('relative imports never leave their package src directory', () => {
 test('no executable reference to environment globals in production source', () => {
   const diagnostics = [];
   for (const file of files) {
+    // The single lazy browser-media environment seam is exempt (see the
+    // LAZY_GLOBAL_SEAM_FILES note); its lazy resolution is verified at runtime
+    // by import-safety. Every other production file must stay global-free.
+    if (LAZY_GLOBAL_SEAM_FILES.has(file)) continue;
     const { globalRefs } = analyzeFile(file);
     for (const ref of globalRefs) {
       diagnostics.push(`${short(file)}:${ref.line} references executable ${ref.name}`);
