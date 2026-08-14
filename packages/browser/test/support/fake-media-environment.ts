@@ -246,6 +246,9 @@ export class FakePeerConnection {
 
   async createOffer(options?: RTCOfferOptions): Promise<RTCSessionDescriptionInit> {
     this.createOfferCalls.push(options);
+    if (options?.iceRestart === true) {
+      this.iceGatheringState = 'new';
+    }
     const sdp = `v=0\no=sip-worker ${++this.offerCounter} 0 IN IP4 0.0.0.0\n` +
       `s=-\nm=audio 49170 RTP/AVP\n`;
     return { type: 'offer', sdp };
@@ -306,6 +309,13 @@ export class FakePeerConnection {
   _completeGathering(): void {
     if (this.iceGatheringState === 'complete') return;
     this.iceGatheringState = 'complete';
+    const local = this.localDescription;
+    if (local !== null && typeof local.sdp === 'string' && !local.sdp.includes('a=candidate:')) {
+      this.localDescription = {
+        type: local.type,
+        sdp: `${local.sdp}a=candidate:1 1 UDP 2122260223 192.0.2.10 49170 typ host\n`,
+      } as RTCSessionDescription;
+    }
     const handler = this.onicegatheringstatechange as
       ((this: RTCPeerConnection, ev: Event) => unknown) | null;
     handler?.call(this as unknown as RTCPeerConnection, new Event('icegatheringstatechange'));

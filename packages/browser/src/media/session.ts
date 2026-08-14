@@ -162,10 +162,7 @@ export class WebRtcMediaSession {
         this.applyCodecs();
         const offer = await this.pc!.createOffer();
         await this.setLocalAndWait(offer);
-        if (offer.sdp === undefined) {
-          throw this.toMediaError(new Error('empty SDP'), 'NEGOTIATION_FAILED');
-        }
-        return offer.sdp;
+        return this.completeLocalSdp('offer');
       } catch (error) {
         this.releaseAfterFailure();
         throw error;
@@ -186,10 +183,7 @@ export class WebRtcMediaSession {
         await this.applyRemoteDescription(remoteSdp, 'offer');
         const answer = await this.pc!.createAnswer();
         await this.setLocalAndWait(answer);
-        if (answer.sdp === undefined) {
-          throw this.toMediaError(new Error('empty SDP'), 'NEGOTIATION_FAILED');
-        }
-        return answer.sdp;
+        return this.completeLocalSdp('answer');
       } catch (error) {
         this.releaseAfterFailure();
         throw error;
@@ -236,10 +230,7 @@ export class WebRtcMediaSession {
         }
         const offer = await this.pc.createOffer({ iceRestart: true });
         await this.setLocalAndWait(offer);
-        if (offer.sdp === undefined) {
-          throw this.toMediaError(new Error('empty SDP'), 'NEGOTIATION_FAILED');
-        }
-        return offer.sdp;
+        return this.completeLocalSdp('offer');
       } catch (error) {
         this.releaseAfterFailure();
         throw error;
@@ -467,6 +458,15 @@ export class WebRtcMediaSession {
     );
   }
 
+  /** Read the complete gathered local SDP, never the pre-gather offer/answer. */
+  private completeLocalSdp(expectedType: RTCSdpType): string {
+    const local = this.pc?.localDescription;
+    if (local?.type !== expectedType || typeof local.sdp !== 'string' || local.sdp.length === 0) {
+      throw this.toMediaError(new Error('empty local SDP'), 'NEGOTIATION_FAILED');
+    }
+    return local.sdp;
+  }
+
   /**
    * Apply the local description, then wait for ICE gathering to complete within
    * the deadline. The gather-completion observer is subscribed BEFORE
@@ -475,7 +475,17 @@ export class WebRtcMediaSession {
    */
   private async setLocalAndWait(description: RTCSessionDescriptionInit): Promise<void> {
     const wait = this.waitForIceComplete();
-    await this.pc!.setLocalDescription(description);
+    // Observe immediately so a synchronous teardown rejection is never orphaned.
+    void wait.catch(() => undefined);
+    try {
+      await this.pc!.setLocalDescription(description);
+    } catch (error) {
+      for (const cancel of [...this.waiters]) {
+        cancel();
+      }
+      await wait.catch(() => undefined);
+      throw error;
+    }
     await wait;
   }
 

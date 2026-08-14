@@ -199,6 +199,9 @@
           if (typeof offerSdp !== 'string' || !offerSdp.includes('m=audio')) {
             throw new Error('offer lacks m=audio');
           }
+          if (!/^a=candidate:/m.test(offerSdp)) {
+            throw new Error('library offer lacks gathered ICE candidates');
+          }
           libPc = ctx.pcs[ctx.pcs.length - 1] ?? null;
 
           // In relay mode the peer may address the SAME TURN host as the library

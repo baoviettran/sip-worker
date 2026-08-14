@@ -147,6 +147,7 @@ describe('WebRtcMediaSession.createOffer', () => {
     const sdp = await offerPromise;
     expect(typeof sdp).toBe('string');
     expect(sdp.length).toBeGreaterThan(0);
+    expect(sdp).toContain('a=candidate:');
     expect(pc.setLocalCalls.length).toBeGreaterThan(0);
     expect(stateTransitions(recorder)).toEqual(['acquiring', 'negotiating']);
   });
@@ -161,6 +162,25 @@ describe('WebRtcMediaSession.createOffer', () => {
     pc._completeGathering();
     await offerPromise;
     expect(resolved).toBe(true);
+  });
+
+  it('observes the ICE waiter when setLocalDescription rejects', async () => {
+    const { pc, session } = setup();
+    pc.setLocalDescription = async (): Promise<void> => {
+      throw new Error('setLocalDescription rejected');
+    };
+    let unhandled: unknown;
+    const onUnhandled = (error: unknown): void => { unhandled = error; };
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      await expect(session.createOffer()).rejects.toBeInstanceOf(Error);
+      await flush();
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
+
+    expect(unhandled).toBeUndefined();
   });
 
   it('resolves immediately when ICE is already complete', async () => {
@@ -220,6 +240,7 @@ describe('WebRtcMediaSession.createAnswer', () => {
     expect(pc.setRemoteCalls[0]!.type).toBe('offer');
     pc._completeGathering();
     const sdp = await answerPromise;
+    expect(sdp).toContain('a=candidate:');
     expect(sdp.length).toBeGreaterThan(0);
     expect(pc.createAnswerCalls.length).toBe(1);
   });
@@ -287,6 +308,7 @@ describe('WebRtcMediaSession restartIce', () => {
     expect(pc.createOfferCalls[pc.createOfferCalls.length - 1]!.iceRestart).toBe(true);
     pc._completeGathering();
     const sdp = await restartPromise;
+    expect(sdp).toContain('a=candidate:');
     expect(sdp.length).toBeGreaterThan(0);
   });
 
