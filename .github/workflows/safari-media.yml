@@ -31,7 +31,10 @@ jobs:
         run: npm run build
       # `--enable` grants the "Allow Remote Automation" capability; it requires
       # admin privileges, so run once as root. The runner then spawns a fresh
-      # `safaridriver -p 4444` (WebDriver /session) itself.
+      # `safaridriver -p 4444` (WebDriver /session) itself. NOTE: `|| true` does
+      # NOT make this a soft gate — `--enable` is idempotent and often already set
+      # on the runner; the runner's own /session creation is the real availability
+      # gate and FAILS loudly (non-zero exit, no skip) if Safari is unusable.
       - name: Enable Safari Remote Automation
         run: sudo safaridriver --enable || true
       - name: Run the Safari media acceptance harness

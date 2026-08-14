@@ -33,11 +33,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONF_SRC="$REPO_ROOT/test/turn/coturn.conf"
 CONF_TMP="$(mktemp)"
 
-# 1. Second loopback alias — REQUIRED for two distinct relay IPs. Ubuntu runners
-#    are privileged; if we cannot add it, we FAIL (the gate must not collapse).
+# 1. Second loopback alias — REQUIRED for two distinct relay IPs. GitHub runners
+#    are unprivileged but have passwordless sudo; if we cannot add it, we FAIL
+#    (the gate must not collapse).
 echo "ensuring loopback alias ${IP_PEER}..."
 if ! ip addr show lo | grep -q "${IP_PEER}/"; then
-  ip addr add "${IP_PEER}/32" dev lo
+  sudo ip addr add "${IP_PEER}/32" dev lo
 fi
 
 # 2. Substitute the two relay/listener IPs into the mounted config.
