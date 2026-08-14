@@ -1,0 +1,301 @@
+<!doctype html>
+<!--
+  Harness document for the v0.5 real-browser WebRTC audio gate. Loads the
+  BUILT/PACKED browser bundle, wires a @sip-worker/core WorkerMediaController to
+  a real WebRtcMediaManager (real RTCPeerConnection per call), and drives a full
+  create -> negotiate -> media -> cleanup cycle against the built code.
+
+  The whole cycle (including the controllable synthetic peer and the fake non-
+  silent microphone) runs inside the page so negotiation, ICE placement, RTP
+  flow, and cleanup share one page context. The Node runner (harness.ts) only
+  invokes `window.__runCallCycle` and asserts on the returned plain-data result.
+
+  server.mjs FAILS (HTTP 503) when packages/browser/dist or packages/core/dist
+  is absent, so this page never silently serves stale/source code.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>sip-worker browser media harness</title>
+  <!--
+    The built browser chunks import the core package by its bare workspace
+    specifier `@sip-worker/core`. Browsers cannot resolve a bare specifier, so
+    we map it onto the served BUILT core bundle. Both sides are built/packed
+    artifacts, never source.
+  -->
+  <script type="importmap">{"imports":{"@sip-worker/core":"/assets/core/index.js"}}</script>
+</head>
+<body>
+  <pre id="status" style="font-family: monospace; color: #eee; background: #111; padding: 1rem;">loading built media bundle…</pre>
+  <script type="module">
+    const harm = document.getElementById('status');
+    const bridge = (window.__webRtcMediaRun = {
+      errors: [],
+      allPcs: [],
+      // Global live-resource tallies shared by every per-cycle clock / device
+      // listener adapter, so "zero after each close" is observable across all
+      // cycles.
+      gTimers: 0,
+      gListeners: 0,
+      lastRemoteAudio: null,
+    });
+    const fail = (msg, error) => {
+      harm.textContent = 'HARNESS_FATAL ' + msg + (error?.message ? ': ' + error.message : '');
+      throw error || new Error(msg);
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    // Synthetic peer + audio tools (plain JS, served at /synthetic-peer.js).
+    const { SyntheticPeer, makeSyntheticSource, measureEnergy } = await import('/synthetic-peer.js');
+
+    // Import built module singletons (shared across cycles — only the
+    // constructor-state is per-cycle).
+    let mediaMod, coreMod;
+    try {
+      mediaMod = await import('/assets/browser/media/index.js');
+      coreMod = await import('/assets/core/index.js');
+      harm.textContent = 'harness loaded: built bundle modules available';
+      bridge.booted = true;
+    } catch (error) {
+      fail('bundle-or-gate-error', error);
+    }
+
+    // Per-cycle state: a fresh manager + port pair + controller, whose
+    // dispose() fully reclaims PC, timers, device listeners, and ports.
+    async function createFreshController(iceServers) {
+      const pcs = [];
+      const ports = mediaMod.createMediaPortPair();
+      let liveTimers = 0;
+      let deviceListeners = 0;
+      let micStream = null; // set per-cycle by makeFakeMicStream
+
+      const env = {
+        mediaDevices: {
+          getUserMedia: async () => {
+            if (!micStream) throw new Error('no fake mic configured');
+            return micStream.stream;
+          },
+          enumerateDevices: async () => [
+            { deviceId: 'fake-mic', label: 'Synthetic Oscillator', groupId: 'g0', kind: 'audioinput' },
+            { deviceId: 'out-0', label: 'Output', groupId: 'g0', kind: 'audiooutput' },
+          ],
+          addEventListener: () => { bridge.gListeners += 1; deviceListeners += 1; },
+          removeEventListener: () => { bridge.gListeners -= 1; deviceListeners -= 1; },
+        },
+        createPeerConnection: (cfg) => {
+          const pc = new RTCPeerConnection(cfg);
+          pcs.push(pc);
+          bridge.allPcs.push(pc);
+          return pc;
+        },
+        createMediaStream: (t) => (t ? new MediaStream(t) : new MediaStream()),
+        getAudioCapabilities: () => {
+          try { return (RTCRtpSender.getCapabilities && RTCRtpSender.getCapabilities('audio')) || null; }
+          catch { return null; }
+        },
+      };
+      const clock = {
+        now: () => Date.now(),
+        setTimeout: (cb, ms) => { bridge.gTimers += 1; return setTimeout(() => { bridge.gTimers -= 1; cb(); }, ms); },
+        clearTimeout: (id) => { bridge.gTimers -= 1; clearTimeout(id); },
+      };
+      const emitter = { emit: function(type, value) { if (type === 'remoteAudio') { this.lastRemoteAudio = value; bridge.lastRemoteAudio = value; } if (type === 'mediaStateChanged') (this.states ||= []).push(value.state); } };
+      emitter.lastRemoteAudio = null;
+      emitter.states = [];
+
+      const manager = new mediaMod.WebRtcMediaManager({
+        env,
+        options: iceServers ? { iceServers } : {},
+        clock,
+        emitter: { emit: (t, v) => emitter.emit(t, v) },
+      });
+      ports.browser.subscribe((m) => manager.postMessage(m));
+      manager.subscribeReplies((r) => ports.browser.postMessage(r));
+      const controller = new coreMod.WorkerMediaController(ports.core);
+
+      return {
+        controller, manager, ports, pcs, env, emitter, clock,
+        liveTimers: () => liveTimers,
+        deviceListeners: () => deviceListeners,
+        globals: () => ({ gTimers: bridge.gTimers, gListeners: bridge.gListeners }),
+        micStreamRef: { get: () => micStream, set: (s) => { micStream = s; } },
+        dispose() {
+          try { controller.close(); } catch {}
+          try { manager.dispose(); } catch {}
+          ports.close();
+          // Late timers from setTimeout callback wrappers may still decrement;
+          // we force them to zero after dispose since the underlying real timer
+          // is now detached.
+          if (micStream) micStream.stop?.();
+          micStream = null;
+        },
+      };
+    }
+
+    // ---- per-cycle driver ----
+    async function runCallCycle({ scenario = 'direct', freqA = 440, freqB = 880, cycleIndex = 0 } = {}) {
+      const result = { cycleIndex, scenario };
+      let ctx = null, peer = null, micSrc = null, libPc = null;
+      const sessionId = 'cycle-' + cycleIndex;
+      try {
+        // STUN or direct: the spec says "interval-local STUN or direct host
+        // candidates — exercise at least a direct path".
+        const iceServers = scenario === 'stun'
+          ? [{ urls: 'stun:stun.l.google.com:19302' }]
+          : [];
+        ctx = await createFreshController(iceServers);
+
+        // The library sends freqB (library -> peer); peer sends freqA.
+        // We supply an oscillator stream as the library's mic via the
+        // per-cycle micStreamRef.
+        micSrc = makeSyntheticSource(freqB);
+        ctx.micStreamRef.set(micSrc);
+
+        // STUN vs direct affects candidate types but not the peer's config
+        // (the library's config flows through env.createPeerConnection).
+        if (scenario === 'stun' || scenario === 'direct') {
+          // OUTGOING: library offers, peer answers.
+          const offerSdp = await ctx.controller.createOffer(sessionId);
+          if (typeof offerSdp !== 'string' || !offerSdp.includes('m=audio')) {
+            throw new Error('offer lacks m=audio');
+          }
+          libPc = ctx.pcs[ctx.pcs.length - 1] ?? null;
+
+          peer = new SyntheticPeer({ iceServers: [], freqHz: freqA, register: (pc) => { bridge.allPcs.push(pc); ctx.pcs.push(pc); } });
+          const answerSdp = await peer.answerOffer(offerSdp);
+          await ctx.controller.setRemote(sessionId, answerSdp);
+        }
+
+        if (!peer || !libPc) throw new Error('peer or library PC not created');
+
+        // Connection + ICE gathering
+        await waitFor(() => libPc.connectionState === 'connected', 'library pc connected', ctx, 20000);
+        await waitFor(() => libPc.iceGatheringState === 'complete', 'library gathering', ctx, 20000);
+        await waitFor(() => peer.pc.connectionState === 'connected', 'peer pc connected', ctx, 20000);
+        await waitFor(() => peer.pc.iceGatheringState === 'complete', 'peer gathering', ctx, 20000);
+
+        // Let media flow, then measure RTP growth both ways.
+        await sleep(1000);
+        const libGrowth = await waitForRtpGrowth(libPc, 15000);
+        const peerGrowth = await waitForRtpGrowth(peer.pc, 15000);
+        result.libraryMedia = { ok: libGrowth.ok, inbound: libGrowth.inbound, outbound: libGrowth.outbound };
+        result.peerMedia = { ok: peerGrowth.ok, inbound: peerGrowth.inbound, outbound: peerGrowth.outbound };
+
+        // Remote tracks both ways
+        result.peerRemoteTracks = peer.remoteAudioTracks();
+        result.libraryRemoteTracks = ctx.emitter.lastRemoteAudio ? ctx.emitter.lastRemoteAudio.stream?.getAudioTracks()?.length || 0 : 0;
+
+        // Audio energy
+        result.libraryEnergy = ctx.emitter.lastRemoteAudio?.stream
+          ? await measureEnergy(ctx.emitter.lastRemoteAudio.stream) : { ok: false, peak: 0, reason: 'no-remote-stream' };
+        result.peerEnergy = await measureEnergy(peer.remoteAudioStream());
+
+        // Selected candidate types
+        result.librarySelectedTypes = await collectSelectedTypes(libPc);
+        result.peerSelectedTypes = await collectSelectedTypes(peer.pc);
+
+        // ICE / connection states
+        result.libraryIceState = libPc.iceConnectionState;
+        result.libraryConnState = libPc.connectionState;
+        result.peerIceState = peer.pc.iceConnectionState;
+        result.peerConnState = peer.pc.connectionState;
+
+        return result;
+      } catch (error) {
+        bridge.errors.push(error);
+        result.error = { name: error.name, message: error.message };
+        return result;
+      } finally {
+        // Cleanup
+        try { peer?.close(); } catch {}
+        try { ctx?.controller.closeSession(sessionId); } catch {}
+        await sleep(300);
+        if (ctx) {
+          result.timersBefore = ctx.liveTimers();
+          result.listenersBefore = ctx.deviceListeners();
+          // Dispose the manager to fully reclaim.
+          ctx.dispose();
+          await sleep(100);
+          result.timersAfter = ctx.liveTimers();
+          result.listenersAfter = ctx.deviceListeners();
+          result.pcsAfter = ctx.pcs.filter((p) => p.connectionState !== 'closed').length;
+        }
+        if (micSrc) micSrc.stop?.();
+      }
+    }
+
+    async function waitFor(func, desc, ctx, timeoutMs) {
+      const start = Date.now();
+      for (;;) {
+        const v = func();
+        if (v) return v;
+        if (Date.now() - start > timeoutMs) {
+          const lastErr = bridge.errors[bridge.errors.length - 1];
+          throw new Error('waitFor(' + desc + ') timed out' + (lastErr ? ': ' + lastErr.message : ''));
+        }
+        await sleep(100);
+      }
+    }
+
+    async function waitForRtpGrowth(pc, timeoutMs = 15000) {
+      let prevIn = 0, prevOut = 0;
+      const start = Date.now();
+      for (;;) {
+        await sleep(400);
+        const s = await snapshot(pc);
+        if (s.inbound.packets > prevIn && s.inbound.bytes > prevIn && s.outbound.packets > prevOut && s.outbound.bytes > prevOut) {
+          return { ok: true, inbound: s.inbound, outbound: s.outbound };
+        }
+        if (s.inbound.packets > prevIn) prevIn = s.inbound.packets;
+        if (s.outbound.packets > prevOut) prevOut = s.outbound.packets;
+        if (Date.now() - start > timeoutMs) return { ok: false, inbound: s.inbound, outbound: s.outbound };
+      }
+    }
+
+    async function snapshot(pc) {
+      const stats = await pc.getStats();
+      const out = { inbound: { packets: 0, bytes: 0 }, outbound: { packets: 0, bytes: 0 } };
+      stats.forEach((s) => {
+        if (s.type === 'inbound-rtp' && s.kind === 'audio') {
+          out.inbound.packets = Math.max(out.inbound.packets, s.packetsReceived ?? 0);
+          out.inbound.bytes = Math.max(out.inbound.bytes, s.bytesReceived ?? 0);
+        } else if (s.type === 'outbound-rtp' && s.kind === 'audio') {
+          out.outbound.packets = Math.max(out.outbound.packets, s.packetsSent ?? 0);
+          out.outbound.bytes = Math.max(out.outbound.bytes, s.bytesSent ?? 0);
+        }
+      });
+      return out;
+    }
+
+    function collectSelectedTypes(pc) {
+      return new Promise((resolve) => {
+        pc.getStats().then((stats) => {
+          let pair = null;
+          stats.forEach((s) => { if (s.type === 'candidate-pair' && s.state === 'succeeded' && (!pair || s.priority > pair.priority)) pair = s; });
+          if (!pair) return resolve({ local: null, remote: null });
+          let local = null, remote = null;
+          stats.forEach((s) => {
+            if (s.type === 'local-candidate' && s.id === pair.localCandidateId) local = s.candidateType;
+            if (s.type === 'remote-candidate' && s.id === pair.remoteCandidateId) remote = s.candidateType;
+          });
+          resolve({ local, remote });
+        });
+      });
+    }
+
+    bridge.runCallCycle = runCallCycle;
+    bridge.measureEnergy = measureEnergy;
+    bridge.createSyntheticSource = makeSyntheticSource;
+
+    bridge.resourceState = () => ({
+      openPcs: bridge.allPcs.filter((p) => p.connectionState !== 'closed').length,
+      timers: bridge.gTimers,
+      listeners: bridge.gListeners,
+    });
+
+    // The Node runner drives through this single entry.
+    window.__runCallCycle = (opts) => runCallCycle(opts);
+  </script>
+</body>
+</html>
