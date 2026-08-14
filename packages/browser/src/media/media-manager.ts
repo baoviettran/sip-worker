@@ -20,6 +20,7 @@ import { MediaError } from '@sip-worker/core';
 import type { MediaErrorCode } from '@sip-worker/core';
 import type { MediaCommand, MediaMessage, MediaReply } from '@sip-worker/core';
 import type { BrowserMediaEnvironment, BrowserMediaEventMap, BrowserMediaOptions } from './types.js';
+import { DEFAULT_MEDIA_OPERATION_TIMEOUT_MS } from './types.js';
 import { MediaDeviceManager } from './device-manager.js';
 import { WebRtcMediaSession } from './session.js';
 import type { WebRtcMediaSessionDeps } from './session.js';
@@ -107,18 +108,16 @@ export class WebRtcMediaManager {
   private owned: WebRtcMediaSession | null = null;
   /** The session id reserved before acquisition; removed on reclamation. */
   private reservedId: string | undefined;
-  /**
-   * Session ids whose resources were reclaimed via closeSession. A command for a
-   * consumed id is a stale/reclaimed message and is ignored, preventing a ghost
-   * session from resurrecting an ended call.
-   */
-  private readonly consumedSessionIds = new Set<string>();
+  /** The most recently reclaimed id; sufficient for the ordered in-process port. */
+  private lastClosedSessionId: string | undefined;
   /** Retained view of the active session's surfaced remote stream (set on `remoteAudio`). */
   private retainedRemoteStream: MediaStream | null = null;
   /** Session-lifecycle observers for the facade's remote-audio cleanup. */
   private readonly sessionEndListeners = new Set<(sessionId: string) => void>();
   /** Serialized negotiation queue; exactly one command dispatched at a time. */
   private readonly queue: PendingRequest[] = [];
+  /** Cancellation hooks for the sole serialized browser operation deadline. */
+  private readonly boundedCancels = new Set<() => void>();
   private processing = false;
   private disposed = false;
   /** Bumped on close/dispose so late tracks/streams and stale continuations drop. */
@@ -170,10 +169,8 @@ export class WebRtcMediaManager {
       case 'createOffer':
       case 'createAnswer':
       case 'setRemote':
-        // A command for an already-reclaimed session is stale: ignore it.
-        if (message.sessionId !== undefined && this.consumedSessionIds.has(message.sessionId)) {
-          return;
-        }
+        // The ordered bridge may deliver work queued immediately before close.
+        if (message.sessionId === this.lastClosedSessionId) return;
         this.enqueueRequest(message);
         return;
       case 'closeSession':
@@ -195,13 +192,14 @@ export class WebRtcMediaManager {
     if (this.disposed) return;
     this.disposed = true;
     this.generation += 1;
+    this.cancelBoundedOperations();
     if (this.owned !== null) {
       this.owned.close();
       this.owned = null;
     }
     this.reservedId = undefined;
     this.reclaimSession('');
-    this.consumedSessionIds.clear();
+    this.lastClosedSessionId = undefined;
     this.devices.dispose();
     this.queue.length = 0;
     for (const unsubscribe of this.replyUnsubscribers) {
@@ -258,9 +256,10 @@ export class WebRtcMediaManager {
           this.owned = this.createSession(sessionId);
         }
         try {
-          const sdp = created || pending.iceRestart !== true
-            ? await this.owned.createOffer()
-            : await this.owned.restartIce();      // C4: restart an active session
+          const operation = created || pending.iceRestart !== true
+            ? this.owned.createOffer()
+            : this.owned.restartIce();      // C4: restart an active session
+          const sdp = await this.runBounded(operation);
           if (generation === this.generation && this.reservedId === sessionId) {
             this.emitResult(requestId, sessionId, sdp);
           }
@@ -276,7 +275,7 @@ export class WebRtcMediaManager {
             const partial = this.owned;
             this.owned = null;
             this.reservedId = undefined;
-            this.consumedSessionIds.add(sessionId);
+            this.lastClosedSessionId = sessionId;
             // Reclaim the session this request operated on (idempotent after a
             // self-fail) so no PC/mic track leaks.
             if (partial !== null) {
@@ -305,12 +304,12 @@ export class WebRtcMediaManager {
         }
         try {
           if (type === 'createAnswer') {
-            const sdp = await this.owned.createAnswer(pending.remoteSdp ?? '');
+            const sdp = await this.runBounded(this.owned.createAnswer(pending.remoteSdp ?? ''));
             if (generation === this.generation && this.reservedId === sessionId) {
               this.emitResult(requestId, sessionId, sdp);
             }
           } else {
-            await this.owned.setRemote(pending.remoteSdp ?? '');
+            await this.runBounded(this.owned.setRemote(pending.remoteSdp ?? ''));
             if (generation === this.generation && this.reservedId === sessionId) {
               this.emitResult(requestId, sessionId);
             }
@@ -324,7 +323,7 @@ export class WebRtcMediaManager {
             const partial = this.owned;
             this.owned = null;
             this.reservedId = undefined;
-            this.consumedSessionIds.add(sessionId);
+            this.lastClosedSessionId = sessionId;
             if (partial !== null) {
               partial.close();
               this.reclaimSession(sessionId);
@@ -337,6 +336,48 @@ export class WebRtcMediaManager {
       default:
         return;
     }
+  }
+
+  /** Race one browser operation against its configured deadline and observe both branches. */
+  private runBounded<T>(operation: Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      let timer = -1;
+      let cancel = (): void => {};
+      const finish = (action: () => void): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== -1) {
+          this.clock.clearTimeout(timer);
+        }
+        action();
+        this.boundedCancels.delete(cancel);
+      };
+
+      cancel = (): void => finish(() => reject(new MediaError(
+        'ABORTED',
+        SAFE_MESSAGES.ABORTED,
+      )));
+      this.boundedCancels.add(cancel);
+      timer = this.clock.setTimeout(() => {
+        finish(() => reject(new MediaError(
+          'MEDIA_OPERATION_TIMEOUT',
+          SAFE_MESSAGES.MEDIA_OPERATION_TIMEOUT,
+        )));
+      }, this.options.mediaOperationTimeoutMs ?? DEFAULT_MEDIA_OPERATION_TIMEOUT_MS);
+
+      operation.then(
+        (value) => finish(() => resolve(value)),
+        (error: unknown) => finish(() => reject(error)),
+      );
+    });
+  }
+  /** Cancel and clear the active bounded operation during close or disposal. */
+  private cancelBoundedOperations(): void {
+    for (const cancel of [...this.boundedCancels]) {
+      cancel();
+    }
+    this.boundedCancels.clear();
   }
 
   /** Construct a fresh session bound to this manager's env/clock/emitter. */
@@ -464,15 +505,16 @@ export class WebRtcMediaManager {
   private handleClose(sessionId: string): void {
     if (this.disposed) return;
     if (this.owned !== null && this.owned.sessionId === sessionId) {
+      this.generation += 1;
+      this.cancelBoundedOperations();
       this.owned.close();
       this.owned = null;
     }
     if (this.reservedId === sessionId) {
       this.reservedId = undefined;
     }
-    // The session's resources are reclaimed; its id is consumed so a late
-    // command cannot resurrect it.
-    this.consumedSessionIds.add(sessionId);
+    // Retain one ordered-bridge tombstone, never lifetime call history.
+    this.lastClosedSessionId = sessionId;
     this.reclaimSession(sessionId);
     // Drop queued requests for the closed session without a reply.
     const kept: PendingRequest[] = [];
@@ -481,9 +523,7 @@ export class WebRtcMediaManager {
     }
     this.queue.length = 0;
     this.queue.push(...kept);
-    // Invalidate any in-flight continuation so a late track/stream is reclaimed
-    // and no late reply is emitted after reclamation.
-    this.generation += 1;
+    // The generation above prevents any cancelled continuation from replying.
     void this.drain();
   }
 

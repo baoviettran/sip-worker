@@ -24,6 +24,7 @@ class FakeClock {
     return id;
   }
   clearTimeout(id: number): void { this.timers.delete(id); }
+  pending(): number { return this.timers.size; }
   advance(ms: number): void {
     const now = this.current + ms;
     for (const [id, timer] of [...this.timers]) {
@@ -96,7 +97,7 @@ function setup(overrides?: { queued?: Array<MediaStream | Promise<MediaStream>> 
   const recorder = new Recorder();
   const manager = new WebRtcMediaManager({
     env,
-    options: { iceGatheringTimeoutMs: 1000, codecPreference: ['opus'] },
+    options: { iceGatheringTimeoutMs: 1000, mediaOperationTimeoutMs: 1000, codecPreference: ['opus'] },
     clock,
     emitter: recorder,
   });
@@ -282,17 +283,64 @@ describe('WebRtcMediaManager one-active-session', () => {
   });
 });
 
+describe('WebRtcMediaManager operation deadlines', () => {
+  it('times out capture, releases a late stream, and unblocks the next session', async () => {
+    const { manager, env, clock, replies } = setup();
+    const gate = deferred<MediaStream>();
+    env.queuedUserMedia.length = 0;
+    env.queuedUserMedia.push(gate.promise as unknown as MediaStream);
+    manager.postMessage({ type: 'createOffer', requestId: 'timeout', sessionId: 's1' });
+    await flush();
+    clock.advance(999);
+    await flush();
+    expect(replyFor(replies, 'timeout')).toBeUndefined();
+    clock.advance(1);
+    await flush();
+    const timeout = replyFor(replies, 'timeout') as { type: 'mediaError'; code: string };
+    expect(timeout.type).toBe('mediaError');
+    expect(timeout.code).toBe('MEDIA_OPERATION_TIMEOUT');
+    expect(manager.activeSessionId).toBeUndefined();
+
+    const late = makeAudioStream();
+    const lateTrack = late.getAudioTracks()[0] as RecTrack;
+    gate.resolve(late);
+    await flush();
+    await flush();
+    expect(lateTrack.stopped).toBe(true);
+
+    env.queuedUserMedia.push(makeAudioStream());
+    manager.postMessage({ type: 'createOffer', requestId: 'fresh', sessionId: 's2' });
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    await settle(manager, pc);
+    expect(replyFor(replies, 'fresh')?.type).toBe('mediaResult');
+    expect(clock.pending()).toBe(0);
+  });
+});
+
 describe('WebRtcMediaManager close + race handling', () => {
+  it('retains no unbounded history across 1,000 closed session ids', () => {
+    const { manager } = setup();
+    for (let index = 0; index < 1_000; index += 1) {
+      manager.postMessage({ type: 'closeSession', sessionId: `closed-${index}` });
+    }
+    const retainedSets = Object.values(manager as unknown as Record<string, unknown>)
+      .filter((value): value is Set<unknown> => value instanceof Set);
+    expect(Math.max(0, ...retainedSets.map((value) => value.size))).toBeLessThanOrEqual(1);
+    manager.dispose();
+  });
+
   it('closeSession is fire-and-forget: issues NO reply and cancels the pending request', async () => {
-    const { manager, env, replies } = setup();
+    const { manager, env, clock, replies } = setup();
     const gate = deferred<MediaStream>();
     env.queuedUserMedia.length = 0;
     env.queuedUserMedia.push(gate.promise as unknown as MediaStream);
     manager.postMessage({ type: 'createOffer', requestId: 'pending', sessionId: 's1' });
     await flush();
+    expect(clock.pending()).toBe(1);
     const before = replies.length;
     manager.postMessage({ type: 'closeSession', sessionId: 's1' });
     await flush();
+    expect(clock.pending()).toBe(0);
     expect(replies.length).toBe(before); // no reply for close, none for the cancelled pending
     gate.resolve(makeAudioStream());
     await flush();
