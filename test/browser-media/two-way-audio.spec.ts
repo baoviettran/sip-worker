@@ -124,8 +124,8 @@ test.describe('two-way audio (real RTP, built browser code)', () => {
     // measured) fails — one side's energy can never mask another side's
     // silent-zero. Chromium's headless-shell decodes WebRTC audio to a null
     // sink so its analyser reads silence even while RTP bytes flow — proven
-    // off-line — and honestly reports reason 'suspended-context'. Firefox and
-    // WebKit drive a real decode path and report ok===true. Passing therefore
+    // off-line — and honestly reports reason 'null-audio-decode-sink'. Firefox
+    // and WebKit drive a real decode path and report ok===true. Passing therefore
     // requires, per side, real energy OR an explicit unavailable-context
     // admission; it can never pass by omission or by one side masking another.
     const assertDocumented = (energy?: Energy, label?: string) => {
