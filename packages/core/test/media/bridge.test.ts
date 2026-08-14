@@ -209,6 +209,26 @@ describe('WorkerMediaController serialization', () => {
     expect(err.name).toBe('MediaError');
   });
 
+  for (const code of ['INVALID_STATE', 'MEDIA_OPERATION_TIMEOUT'] as const) {
+    it(`reconstructs ${code} without flattening it`, async () => {
+      const { controller, port } = makeBridge();
+      const offer = controller.createOffer('session-coded');
+      const sent = firstDelivered(port);
+      port.deliver({
+        type: 'mediaError',
+        requestId: sent.requestId,
+        sessionId: 'session-coded',
+        message: 'safe media failure',
+        code,
+      });
+
+      await expect(offer).rejects.toMatchObject({
+        name: 'MediaError',
+        code,
+        sessionId: 'session-coded',
+      });
+    });
+  }
   it('maps an unknown reply code to INTERNAL_ERROR', async () => {
     const { controller, port } = makeBridge();
     const offer = controller.createOffer('session-3');

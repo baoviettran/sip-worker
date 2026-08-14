@@ -597,7 +597,7 @@ export class WebRtcMediaSession {
    */
   private invalidState(message: string): MediaError {
     return new MediaError(
-      /* v8-on-ts */ 'INVALID_STATE' as MediaError['code'],
+      'INVALID_STATE',
       message,
       this.sessionId,
       'negotiation',

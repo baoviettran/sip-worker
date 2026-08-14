@@ -40,6 +40,8 @@ const FAIL_MESSAGES: Readonly<Record<MediaErrorCode, string>> = {
   OUTPUT_SELECTION_UNSUPPORTED: 'Output selection is not supported on this device.',
   PLAYBACK_FAILED: 'Remote audio playback failed.',
   ABORTED: 'The media operation was aborted.',
+  INVALID_STATE: 'The media operation is not valid in the current state.',
+  MEDIA_OPERATION_TIMEOUT: 'The media operation exceeded its configured deadline.',
   INTERNAL_ERROR: 'An internal browser media error occurred.',
 };
 

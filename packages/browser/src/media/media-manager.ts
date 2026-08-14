@@ -5,13 +5,10 @@
  * (`createOffer`/`createAnswer`/`setRemote`/`closeSession`) to and from a single
  * {@link WebRtcMediaSession}. It owns one active session per browser user-agent
  * and serializes every negotiation operation so commands cannot interleave.
- *
  * Every thrown value is mapped to a safe, coded `mediaError` reply carrying no
- * SDP, device, ICE, credential, or stack data. `INVALID_STATE` (which the Task-8
- * session emits for a duplicate/illegal negotiation but which is NOT in core's
- * 12-value `MediaErrorCode` union) is mapped to `INTERNAL_ERROR` at this
- * boundary — the structurally-safe, in-union choice — because core's controller
- * reconstructs any out-of-union code to `INTERNAL_ERROR` anyway.
+ * SDP, device, ICE, credential, or stack data. Known `MediaErrorCode` values,
+ * including `INVALID_STATE`, cross the boundary unchanged. Unknown codes map
+ * to `INTERNAL_ERROR` when core reconstructs the reply.
  *
  * `closeSession` is fire-and-forget (no reply) and cancels every pending request
  * for that session; late tracks/streams are reclaimed on reclamation. Disposal
@@ -61,7 +58,7 @@ const MEDIA_ERROR_CODES: readonly string[] = [
   'PERMISSION_DENIED', 'DEVICE_NOT_FOUND', 'DEVICE_UNAVAILABLE', 'CONSTRAINT_UNSATISFIED',
   'NEGOTIATION_FAILED', 'REMOTE_DESCRIPTION_REJECTED', 'ICE_GATHERING_TIMEOUT',
   'ICE_CONNECTION_FAILED', 'OUTPUT_SELECTION_UNSUPPORTED', 'PLAYBACK_FAILED',
-  'ABORTED', 'INTERNAL_ERROR',
+  'ABORTED', 'INVALID_STATE', 'MEDIA_OPERATION_TIMEOUT', 'INTERNAL_ERROR',
 ];
 
 /** Fixed safe messages; never interpolate exception content into these. */
@@ -77,6 +74,8 @@ const SAFE_MESSAGES: Readonly<Record<MediaErrorCode, string>> = {
   OUTPUT_SELECTION_UNSUPPORTED: 'Output selection is not supported on this device.',
   PLAYBACK_FAILED: 'Remote audio playback failed.',
   ABORTED: 'The media operation was aborted.',
+  INVALID_STATE: 'The media operation is not valid in the current state.',
+  MEDIA_OPERATION_TIMEOUT: 'The media operation exceeded its configured deadline.',
   INTERNAL_ERROR: 'An internal browser media error occurred.',
 };
 
@@ -219,12 +218,10 @@ export class WebRtcMediaManager {
   private enqueueRequest(command: PendingRequest): void {
     if (this.disposed) return;
     if (this.reservedId !== undefined && this.reservedId !== command.sessionId) {
-      // A different active session: reject predictably without disturbing the
-      // active one. The duplicate-operation rejection is INVALID_STATE per the
-      // design, but INVALID_STATE is not in core's 12-code union, so it is
-      // mapped at this boundary to INTERNAL_ERROR (structurally safe).
+      // A second active session is a valid, typed state error and must not
+      // be flattened into an internal implementation failure.
       this.emitErrorFromThrown(
-        new MediaError('INVALID_STATE' as MediaError['code'], 'A media session is already active.'),
+        new MediaError('INVALID_STATE', 'A media session is already active.'),
         command.requestId,
         command.sessionId,
       );
@@ -510,7 +507,7 @@ export class WebRtcMediaManager {
       : { type: 'mediaResult', requestId, sessionId, sdp });
   }
 
-  /** Emit a coded error from a thrown value, mapping INVALID_STATE → INTERNAL_ERROR. */
+  /** Emit a coded error from a thrown value. */
   private emitErrorFromThrown(error: unknown, requestId: string, sessionId: string): void {
     this.emitError(this.codeOf(error), requestId, sessionId);
   }
@@ -538,11 +535,11 @@ export class WebRtcMediaManager {
     }
   }
 
-  /** Map an unknown thrown value to a valid in-union code. C1: INVALID_STATE → INTERNAL_ERROR. */
+  /** Map an unknown thrown value to a valid in-union code. */
   private codeOf(error: unknown): MediaErrorCode {
     if (error instanceof MediaError) {
-      // INVALID_STATE is not in core's union (C1); map to the structurally-safe
-      // INTERNAL_ERROR so no out-of-union code ever crosses the wire.
+      // Known media errors cross the bridge unchanged; only malformed or
+      // externally supplied unknown values become INTERNAL_ERROR.
       if ((MEDIA_ERROR_CODES as readonly string[]).includes(error.code)) {
         return error.code;
       }

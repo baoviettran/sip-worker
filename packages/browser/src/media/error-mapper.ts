@@ -20,6 +20,8 @@ const FIXED_MESSAGES: Readonly<Partial<Record<MediaErrorCode, string>>> = {
   DEVICE_UNAVAILABLE: 'The media device is unavailable or in use by another application.',
   CONSTRAINT_UNSATISFIED: 'The requested audio constraints could not be satisfied.',
   ABORTED: 'The media operation was aborted.',
+  INVALID_STATE: 'The media operation is not valid in the current state.',
+  MEDIA_OPERATION_TIMEOUT: 'The media operation exceeded its configured deadline.',
   INTERNAL_ERROR: 'An internal browser media error occurred.',
 };
 

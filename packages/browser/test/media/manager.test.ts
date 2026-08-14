@@ -8,7 +8,7 @@ const VALID_CODES = [
   'PERMISSION_DENIED', 'DEVICE_NOT_FOUND', 'DEVICE_UNAVAILABLE', 'CONSTRAINT_UNSATISFIED',
   'NEGOTIATION_FAILED', 'REMOTE_DESCRIPTION_REJECTED', 'ICE_GATHERING_TIMEOUT',
   'ICE_CONNECTION_FAILED', 'OUTPUT_SELECTION_UNSUPPORTED', 'PLAYBACK_FAILED',
-  'ABORTED', 'INTERNAL_ERROR',
+  'ABORTED', 'INVALID_STATE', 'MEDIA_OPERATION_TIMEOUT', 'INTERNAL_ERROR',
 ];
 
 /** Injectable clock driving the ICE-gathering deadline deterministically. */
@@ -259,7 +259,7 @@ describe('WebRtcMediaManager one-active-session', () => {
     await flush();
     const s2 = replyFor(replies, 's2-offer') as { type: 'mediaError'; code: string };
     expect(s2.type).toBe('mediaError');
-    expect(s2.code).toBe('INTERNAL_ERROR'); // INVALID_STATE is not in core's union → mapped safely (C1)
+    expect(s2.code).toBe('INVALID_STATE');
     expect(manager.activeSessionId).toBe('s1');
     expect(pc.closed).toBe(false);
   });
