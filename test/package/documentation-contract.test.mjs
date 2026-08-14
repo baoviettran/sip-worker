@@ -193,6 +193,25 @@ const browserMedia = readProject('docs/browser-media.md');
 const mediaErrors = readProject('docs/media-errors.md');
 const compatNote = readProject('docs/compatibility/0.5-browser-media.md');
 const migration05 = readProject('docs/migrations/0.3-to-0.5.md');
+const mediaReview = readProject('docs/reviews/2026-08-13-0.5-real-webrtc-audio-review.md');
+const turnWorkflow = readProject('.github/workflows/browser-media.yml');
+
+// TURN CI must generate both credentials per run; repository secrets are not required.
+assert.doesNotMatch(turnWorkflow, /secrets.COTURN_PASSWORD/, 'TURN workflow must not depend on a static repository password');
+assert.match(turnWorkflow, /Generate ephemeral TURN credentials/);
+assert.match(turnWorkflow, /TURN_USERNAME=.*GITHUB_ENV/);
+assert.match(turnWorkflow, /openssl rand/);
+assert.match(turnWorkflow, /add-mask/);
+assert.match(turnWorkflow, /TURN_PASSWORD=.*GITHUB_ENV/);
+assert.match(browser.description, /real WebRTC audio/i, 'browser package description must describe its real media surface');
+
+// Playwright WebKit is automation evidence, not a shipping-Safari run.
+for (const [name, text] of [['docs/browser-media.md', browserMedia], ['docs/compatibility/0.5-browser-media.md', compatNote]]) {
+  assert.doesNotMatch(text, /WebKit *[/] *Safari|Playwright Desktop Safari/i, name + ' must not label Playwright WebKit as real Safari');
+  assert.match(text, /Playwright WebKit/i, name + ' must identify the automated engine precisely');
+}
+assert.match(mediaReview, /forced-TURN[^]{0,160}(NOT[- ]RUN|unverified)/i);
+assert.match(mediaReview, /(shipping|real) Safari[^]{0,160}(NOT[- ]RUN|unverified)/i);
 
 // not a completed-v1 production claim
 assert.match(browserMedia, /foundation/i);
@@ -224,15 +243,15 @@ const allCodes = [
   'PERMISSION_DENIED', 'DEVICE_NOT_FOUND', 'DEVICE_UNAVAILABLE', 'CONSTRAINT_UNSATISFIED',
   'NEGOTIATION_FAILED', 'REMOTE_DESCRIPTION_REJECTED', 'ICE_GATHERING_TIMEOUT',
   'ICE_CONNECTION_FAILED', 'OUTPUT_SELECTION_UNSUPPORTED', 'PLAYBACK_FAILED',
-  'ABORTED', 'INTERNAL_ERROR',
+  'ABORTED', 'INVALID_STATE', 'MEDIA_OPERATION_TIMEOUT', 'INTERNAL_ERROR',
 ];
 for (const code of allCodes) {
   assert.match(mediaErrors, new RegExp(code), `media-errors.md must document ${code}`);
   assert.match(browserMedia, new RegExp(code), `browser-media.md must reference ${code}`);
 }
-// INVALID_STATE is deliberately not a user-facing media code; it must be mapped
-// to INTERNAL_ERROR, never documented as a surfaceable code.
-assert.doesNotMatch(mediaErrors, />\s*INVALID_STATE\s*</m, 'media-errors.md must not present INVALID_STATE as a surfaceable code');
+// All canonical media codes, including lifecycle and operation deadlines, must be documented.
+assert.match(mediaErrors, /INVALID_STATE/);
+assert.match(mediaErrors, /MEDIA_OPERATION_TIMEOUT/);
 
 // the answer() migration (0.3 -> 0.5 break) is called out
 assert.match(migration05, /answer\(/);

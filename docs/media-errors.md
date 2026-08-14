@@ -5,7 +5,7 @@ carrying a `code` from the `MediaErrorCode` union and a fixed human `message`.
 `MediaError` is the typed, reconstructible error crossing the core/browser
 boundary. It carries **no SDP, no device ID, no credential, no stack, and no raw
 browser message** (the original cause is kept only in memory, non-enumerable,
-for debugging). `code` is always one of the 12 codes below; an unknown/out-of-union
+for debugging). `code` is always one of the 14 codes below; an unknown/out-of-union
 code in a reply is reconstructed as `INTERNAL_ERROR`.
 
 On a `BrowserUserAgent`, media failures arrive on the `mediaFailed` typed event
@@ -15,7 +15,7 @@ On a `BrowserUserAgent`, media failures arrive on the `mediaFailed` typed event
 troubleshooting; see the running example in
 [`docs/browser-media.md`](./browser-media.md).
 
-## The 12 codes
+## The 14 codes
 
 | Code | When it surfaces | Recovery |
 |---|---|---|
@@ -30,12 +30,9 @@ troubleshooting; see the running example in
 | `OUTPUT_SELECTION_UNSUPPORTED` | `setSinkId` is missing on the element/device. | Capability-gate output selection; do not expose a device switcher when unsupported. |
 | `PLAYBACK_FAILED` | `element.play()` rejected (commonly autoplay policy). | Play within a user gesture; on rejection surface UI and retry on click. |
 | `ABORTED` | The operation was aborted (its `AbortSignal` fired, or `dispose()` ran). | Re-run the operation on a live `BrowserUserAgent`. |
-| `INTERNAL_ERROR` | Any unexpected/unknown failure. Includes the cases where a non-surfaceable state (mapped from the browser's `InvalidStateError`/duplicate-negotiation path) must be reported with a structurally-safe code. | Retry; if persistent, capture the local client environment and file a bug (no SDP/device data in the surfaced error). |
-
-`INVALID_STATE` is **not** part of this union. A browser-side duplicate/illegal
-negotiation can surface from the session as `INVALID_STATE`, but it is mapped to
-`INTERNAL_ERROR` at the bridge so an out-of-union code never crosses the
-boundary. Applications should not match on it.
+| `INVALID_STATE` | A media operation is illegal for the current session state, such as overlapping negotiation or using a closed session. | Wait for the current operation to settle or create a live session; do not retry concurrently. |
+| `MEDIA_OPERATION_TIMEOUT` | A browser media command exceeded the configured operation deadline. | Treat the operation as failed, close the affected call, verify device and network health, then start a fresh session. |
+| `INTERNAL_ERROR` | Any unexpected/unknown failure. | Retry; if persistent, capture the local client environment and file a bug (no SDP/device data in the surfaced error). |
 
 ## Programmatic reference
 
@@ -52,7 +49,7 @@ class MediaError extends Error {
 }
 ```
 
-`MEDIA_ERROR_CODES` is the readonly tuple of the 12 codes; `MediaErrorCode` is
+`MEDIA_ERROR_CODES` is the readonly tuple of the 14 codes; `MediaErrorCode` is
 the union. Both are exported from core and re-exported from the browser root.
-All 12 messages are fixed and safe; never interpolate a raw exception message
+All 14 messages are fixed and safe; never interpolate a raw exception message
 into UI text derived from `MediaError`.

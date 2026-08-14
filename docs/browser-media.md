@@ -205,14 +205,14 @@ failure is observable and terminal.
 ## Typed troubleshooting
 
 Media failures surface as typed `MediaError` values with a `code` from the
-12-value `MediaErrorCode` union, on the `mediaFailed` event and as rejections.
+14-value `MediaErrorCode` union, on the `mediaFailed` event and as rejections.
 Memoize the mapping: the code table [`docs/media-errors.md`](./media-errors.md)
 documents `PERMISSION_DENIED`, `DEVICE_NOT_FOUND`, `DEVICE_UNAVAILABLE`,
 `CONSTRAINT_UNSATISFIED`, `NEGOTIATION_FAILED`, `REMOTE_DESCRIPTION_REJECTED`,
 `ICE_GATHERING_TIMEOUT`, `ICE_CONNECTION_FAILED`, `OUTPUT_SELECTION_UNSUPPORTED`,
-`PLAYBACK_FAILED`, `ABORTED`, and `INTERNAL_ERROR`, each with when it surfaces
-and what to do. The four media events are `mediaStateChanged`, `remoteAudio`,
-`mediaFailed`, and
+`PLAYBACK_FAILED`, `ABORTED`, `INVALID_STATE`, `MEDIA_OPERATION_TIMEOUT`, and
+`INTERNAL_ERROR`, each with when it surfaces and what to do. The four media
+events are `mediaStateChanged`, `remoteAudio`, `mediaFailed`, and
 `deviceChanged`, all sharing one typed surface with the core SIP events
 (`registrationStateChanged`, `callStateChanged`, `incomingCall`, `failed`).
 `no SDP, device ID, credential, or raw constraint ever reaches a public event or
@@ -231,8 +231,8 @@ oscillator audio in-page (no real OS mic). Tested engine families:
 
 - **Chromium** (Playwright Desktop Chrome) — autoplay via launch arg.
 - **Firefox** (Playwright Desktop Firefox) — autoplay via user prefs.
-- **WebKit / Safari** (Playwright Desktop Safari) — autoplay handled in-page by
-  the injected media adapter.
+- **Playwright WebKit** (WebKit engine automation; not shipping Safari) —
+  autoplay is handled in-page by the injected media adapter.
 
 Language/runtime: **Node >= 20**, TypeScript target ES2022 with `dom` lib, the
 package set pinned at **0.5.0** (browser `sip-worker`, core `@sip-worker/core`,

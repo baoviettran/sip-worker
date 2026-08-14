@@ -58,28 +58,21 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Build / pack the browser package (built artifacts only)
         run: npm run build
+      - name: Generate ephemeral TURN credentials
+        shell: bash
+        run: |
+          turn_password="$(openssl rand -hex 24)"
+          echo "::add-mask::$turn_password"
+          echo "TURN_USERNAME=ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+          echo "TURN_PASSWORD=$turn_password" >> "$GITHUB_ENV"
       - name: Provision pinned coturn relay
         id: coturn
         env:
-          # Per-RUN ephemeral credentials generated fresh each run (never baked
-          # into the tree or logs). These are CI secrets, redacted by GitHub.
-          TURN_USERNAME: "turn_${{ github.run_id }}_${{ github.run_attempt }}"
-          TURN_PASSWORD: "${{ secrets.COTURN_PASSWORD }}"
           TURN_PORT: "3478"
-        run: |
-          # TURN_USERNAME is generated inline; TURN_PASSWORD is the single CI
-          # secret. The bootstrap adds the 127.0.0.2 loopback alias (privileged
-          # runner), starts pinned coturn by digest, and bounded health-checks it.
-          if [ -z "$TURN_PASSWORD" ]; then
-            echo "::error::COTURN_PASSWORD secret not set — the forced-relay gate cannot provision TURN and must FAIL (no skip)."
-            exit 1
-          fi
-          bash test/turn/coturn.bootstrap.sh
+        run: bash test/turn/coturn.bootstrap.sh
       - name: Forced TURN relay gate (relay candidates + two-way audio)
         env:
           TURN_URL: "turn:127.0.0.1"
           TURN_PEER_URL: "turn:127.0.0.2"
           TURN_PORT: "3478"
-          TURN_USERNAME: "turn_${{ github.run_id }}_${{ github.run_attempt }}"
-          TURN_PASSWORD: "${{ secrets.COTURN_PASSWORD }}"
         run: npx playwright test --project=chromium turn-relay.spec.ts
