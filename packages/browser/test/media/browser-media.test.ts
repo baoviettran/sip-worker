@@ -145,7 +145,7 @@ describe('BrowserMedia — device delegation', () => {
     await ua.selectMicrophone('mic-1'); // idle: in-memory commit only
     env.queuedUserMedia.push(streamFrom(makeTrack('probe')));
     await ua.prepare();
-    expect(env.getUserMediaConstraints[0]!.audio).toEqual({ deviceId: { ideal: 'mic-1' } });
+    expect(env.getUserMediaConstraints[0]!.audio).toEqual({ deviceId: { exact: 'mic-1' } });
   });
 
   it('rejects when the facade is disposed', async () => {
