@@ -1,17 +1,30 @@
 # sip-worker
 
 A from-scratch TypeScript SIP stack with registration, calls, worker-supervised
-recovery, deterministic liveness, and verified packed ESM/CommonJS/TypeScript
-exports. **0.3.0 is a package-boundary release**: the stack is split into a
-browser entry point (`sip-worker`), an environment-neutral core
-(`@sip-worker/core`), and Node transports (`@sip-worker/node`). This is a clean
-pre-1.0 break from 0.2 — see the
-[migration guide](docs/migrations/0.2-to-0.3.md) for the exact old-to-new import
-map. 0.3.0 remains a **signaling-only prototype**: it ships no real media
-adapter (no RTP/RTCP, no WebRTC, no DTLS/SRTP) and no interop evidence, and it
-is not production-ready for general deployment. A real media adapter plus
-interop evidence gate the 1.0 framing — see the
-[browser v1.0 production roadmap](docs/superpowers/specs/2026-08-12-browser-v1-production-roadmap-design.md).
+recovery, deterministic liveness, real browser WebRTC audio, and verified packed
+ESM/CommonJS/TypeScript exports. The stack is split into a browser entry point
+(`sip-worker`), an environment-neutral core (`@sip-worker/core`), and Node
+transports (`@sip-worker/node`).
+
+**0.5.0 adds real browser WebRTC media**: `sip-worker` ships a `BrowserUserAgent`
+composition root with a `ua.media` facade (device listing, microphone
+selection, and remote-audio playback) over a real `RTCPeerConnection` audio
+session, one active call per user agent (a busy UA answers a second incoming
+call with **486 Busy Here**). This is a **real-media foundation, not a completed
+v1 product**: it still lacks interop evidence against production media stacks,
+multi-call concurrency, Trickle ICE, DTMF/SIP INFO/MSRP, SIPS, and
+observability. A real media adapter plus interop evidence gate the 1.0 framing —
+see the
+[browser v1.0 production roadmap](docs/superpowers/specs/2026-08-12-browser-v1-production-roadmap-design.md)
+and the [browser media guide](docs/browser-media.md) for the shipped surface and
+its exact limitations.
+
+Each staged release is a deliberate pre-1.0 break: 0.3.0 split the single 0.2
+package into the three workspaces (see the
+[migration guide](docs/migrations/0.2-to-0.3.md) for that import map), and 0.5.0
+adds the media surface (see the
+[0.3-to-0.5 migration](docs/migrations/0.3-to-0.5.md), notably
+`Invitation.answer()` no longer takes a local SDP).
 
 Every behavior documented here is exercised by the signaling smoke gate
 (`test/integration/release-smoke.test.ts`) against the public package root, and
@@ -72,6 +85,45 @@ await ua.bye();        // BYE/200; resolves when 'terminated'
 await ua.unregister(); // Contact * / Expires 0; resolves when 'unregistered'
 await ua.disconnect();
 ```
+
+## Browser media use (ESM)
+
+A real-media call in the browser composes a `BrowserUserAgent` over a
+`BrowserWebSocketTransport` and drives audio through the `ua.media` facade. The
+transport, clock, and id generators are injected exactly as in Node; media runs
+over WebRTC with an app-owned `HTMLMediaElement`:
+
+```js
+import { BrowserUserAgent, BrowserWebSocketTransport } from 'sip-worker';
+
+const audio = document.querySelector('audio'); // your element
+const ua = new BrowserUserAgent({
+  transport: new BrowserWebSocketTransport('wss://sip.example.com/ws'),
+  clock,                                    // inject your Clock
+  registrarUri: 'sip:registrar.example.com',
+  aor: 'sip:alice@example.com',
+  contact: 'sip:alice@example.com',
+  idGenerator,
+  media: {
+    iceServers: [ /* short-lived TURN credentials from your backend */ ],
+    iceTransportPolicy: 'relay',
+    audioConstraints: { echoCancellation: true, noiseSuppression: true },
+  },
+});
+
+await ua.media.prepare(); // requests microphone permission via a probe stream
+await ua.connect();
+await ua.register();
+await ua.invite('sip:bob@example.com'); // real two-way WebRTC audio
+audio.addEventListener('click', () => audio.play()); // autoplay needs a gesture
+await ua.bye();
+await ua.dispose(); // releases sessions, ports, and the device listener
+```
+
+Media failures are typed `MediaError` values with a `code`; every code is
+documented in [docs/media-errors.md](docs/media-errors.md). The `answer()`
+signature change on incoming calls (no local SDP argument in 0.5) is covered in
+the [0.3-to-0.5 migration](docs/migrations/0.3-to-0.5.md).
 
 ## Worker-supervised use
 
@@ -209,7 +261,10 @@ or published; the three workspaces are the release artifacts.
 - `npm test` – vitest suite (all virtual-clock deterministic; no real-time waits);
   `pretest` runs the documentation-contract gate
 - `npm run test:docs` – asserts README links resolve, documented scripts exist,
-  the 0.3.0 workspace framing stays honest, and the migration map is complete
+  the 0.5.0 workspace framing stays honest, the migration map is complete, and
+  the v0.5 browser-media contract (HTTP**S**/WSS, permissions, autoplay,
+  Permissions Policy, TURN, every media code, `answer()` migration, tested
+  versions, limitations) is truthful
 - `npm run test:architecture` – asserts the workspace manifests define the
   approved dependency graph and import boundaries
 - `npm run build` – tsup across the core, browser, and Node workspaces emitting
@@ -219,18 +274,23 @@ or published; the three workspaces are the release artifacts.
 
 ## Security status
 
-0.3.0 is a **signaling-only prototype**, not production-ready for general
-deployment. It ships no real media (no RTP/RTCP, no WebRTC, no DTLS/SRTP), no
-TLS/SIPS transports, no `auth-int`, no streaming/siren (no SIP INFO / DTMF /
-RFC 2833 / MSRP), no observability, no high availability (no active/standby,
-shared state, or proxy failover), and no interop evidence (the smoke gate is a
-self-contained loopback). Its `AuthManager` nonce counters are capped at 64 and
-its per-exchange retry state settles, bounding challenge state; no claim of
-general memory safety is made beyond the tested lifecycle boundaries. See
-[SECURITY.md](SECURITY.md) and
+0.5.0 is a **real browser WebRTC media foundation**, not a completed v1
+production product and not production-ready for general real-audio deployment.
+It ships **real WebRTC media** (microphone capture and remote audio over a real
+`RTCPeerConnection`) but still lacks no-`TLS/SIPS`, `auth-int` is refused, and
+there is no streaming/siren (no SIP INFO / DTMF / RFC 2833 / MSRP), no
+observability, no high availability (no active/standby, shared state, or proxy
+failover), and no interop evidence against production media stacks (the media
+gate is a synthetic in-page peer across three browsers). Media security
+requirements for a working deployment — HTTPS, WSS, short-lived TURN
+credentials, Permissions Policy, and autoplay-gesture handling — are documented
+in [docs/browser-media.md](docs/browser-media.md). `AuthManager` nonce counters
+are capped at 64 and its per-exchange retry state settles, bounding challenge
+state; no claim of general memory safety is made beyond the tested lifecycle
+boundaries. See [SECURITY.md](SECURITY.md) and
 [docs/2026-08-11-production-readiness-review.md](docs/2026-08-11-production-readiness-review.md)
-for the complete limits. A real media adapter plus interop evidence gate the
-1.0 framing (see the
+for the complete limits. Interop evidence and broader production hardening gate
+the 1.0 framing (see the
 [browser v1.0 roadmap](docs/superpowers/specs/2026-08-12-browser-v1-production-roadmap-design.md)).
 
 ## Startup sequence

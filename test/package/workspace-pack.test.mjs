@@ -30,8 +30,8 @@ const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
 // exact workspace version; core has no dependencies.
 const EXPECTED_DEPENDENCIES = {
   '@sip-worker/core': undefined,
-  'sip-worker': { '@sip-worker/core': '0.3.0' },
-  '@sip-worker/node': { '@sip-worker/core': '0.3.0' },
+  'sip-worker': { '@sip-worker/core': '0.5.0' },
+  '@sip-worker/node': { '@sip-worker/core': '0.5.0' },
 };
 
 const DIR_BY_NAME = {
@@ -111,7 +111,7 @@ async function assertTarball(tarball, name) {
   } else {
     assert.deepEqual(pkg.dependencies, expected, `${name}: manifest dependencies mismatch`);
   }
-  assert.equal(pkg.version, '0.3.0', `${name}: unexpected version`);
+  assert.equal(pkg.version, '0.5.0', `${name}: unexpected version`);
 }
 
 /**

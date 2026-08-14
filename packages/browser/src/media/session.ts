@@ -201,7 +201,7 @@ export class WebRtcMediaSession {
    * Apply a remote description to the active peer connection. For an outgoing
    * call this is the eventual answer; for an incoming re-INVITE it is the offer.
    * A rejected remote description maps to
-   * {@link @sip-worker/core!MediaErrorCode.REMOTE_DESCRIPTION_REJECTED}.
+   * {@link @sip-worker/core#MediaErrorCode.REMOTE_DESCRIPTION_REJECTED}.
    */
   async setRemote(remoteSdp: string, type?: RTCSdpType): Promise<void> {
     return this.runNegotiation(async () => {

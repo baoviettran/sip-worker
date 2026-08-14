@@ -13,10 +13,13 @@ assert.ok(browserTransport && typeof browserTransport === 'object', 'sip-worker/
 assert.equal(typeof root.SipError, 'function');
 assert.equal(typeof root.SipStreamDecoder, 'function');
 assert.equal(typeof root.UserAgent, 'function');
+assert.equal(typeof root.BrowserUserAgent, 'function');
+assert.equal(typeof root.MediaError, 'function');
 assert.equal(typeof root.AuthManager, 'function');
 assert.equal(typeof root.TransactionLayer, 'function');
 assert.equal(typeof root.Dialog, 'function');
 assert.equal(typeof browserTransport.BrowserWebSocketTransport, 'function');
+assert.equal(typeof root.MEDIA_ERROR_CODES.length === 'number', true);
 
 // ---- SipError semantics ----
 {

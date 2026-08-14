@@ -1,6 +1,6 @@
 /**
  * Map browser user-media/WebRTC exceptions to stable, serializable
- * {@link @sip-worker/core!MediaError}s, and build the browser media
+ * {@link @sip-worker/core#MediaError}s, and build the browser media
  * environment seam.
  *
  * Messages are fixed and safe: the cause's message/name is never interpolated

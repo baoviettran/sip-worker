@@ -2,14 +2,14 @@
  * BrowserUserAgent: composition root tying the core SIP user agent to the
  * browser WebRTC media layer (v0.5).
  *
- * This is COMPOSITION, not inheritance of core {@link @sip-worker/core!UserAgent}.
+ * This is COMPOSITION, not inheritance of core {@link @sip-worker/core#UserAgent}.
  * It owns:
  *   - a media port pair joining two endpoints (core sees only serializable
  *     commands and replies);
  *   - a {@link WebRtcMediaManager} bridging those commands to one browser
  *     WebRTC session on a {@link BrowserMediaEnvironment};
- *   - a {@link @sip-worker/core!WorkerMediaController} the core UA drives;
- *   - a composed core {@link @sip-worker/core!UserAgent} for SIP signaling and
+ *   - a {@link @sip-worker/core#WorkerMediaController} the core UA drives;
+ *   - a composed core {@link @sip-worker/core#UserAgent} for SIP signaling and
  *     session state;
  *   - a {@link BrowserMedia} facade exposed as `ua.media`.
  *
@@ -57,7 +57,7 @@ const CORE_EVENTS: readonly (keyof UserAgentEventMap)[] = [
 /** The single typed event surface shared by core and browser media. */
 export interface BrowserUserAgentEventMap extends UserAgentEventMap, BrowserMediaEventMap {}
 
-/** Composition options: core {@link @sip-worker/core!UserAgentOptions} minus its media controller. */
+/** Composition options: core {@link @sip-worker/core#UserAgentOptions} minus its media controller. */
 export type BrowserUserAgentOptions = Omit<UserAgentOptions, 'mediaController'> & {
   readonly media?: BrowserMediaOptions;
   /** Test/advanced injection; omitted in ordinary applications. */

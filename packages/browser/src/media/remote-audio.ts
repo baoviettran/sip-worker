@@ -10,7 +10,7 @@
  * exactly the elements that still reference the closing session's stream and
  * never touch a different call's element.
  *
- * Errors are {@link @sip-worker/core!MediaError}s with fixed safe messages:
+ * Errors are {@link @sip-worker/core#MediaError}s with fixed safe messages:
  * `OUTPUT_SELECTION_UNSUPPORTED` when `setSinkId` is missing, mapped
  * user-media codes when selection fails, and `PLAYBACK_FAILED` when `play()`
  * rejects. No device ID, credential, stack, or SDP ever appears in an error.
