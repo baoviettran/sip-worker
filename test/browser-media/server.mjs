@@ -126,7 +126,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const host = '127.0.0.1';
   server.listen(port, host, () => {
     console.log(`browser-media server listening on http://${host}:${port}`);
-    startStunServer();
+    startStunServer(host);
   });
   process.on('SIGTERM', () => server.close(() => process.exit(0)));
   process.on('SIGINT', () => server.close(() => process.exit(0)));
@@ -162,7 +162,7 @@ let stunBindingsServed = 0;
 // "Firefox sent STUN our validator rejected" (raw > 0, bindings 0).
 let stunPacketsSeen = 0;
 
-function startStunServer() {
+function startStunServer(host) {
   const sock = dgram.createSocket('udp4');
   sock.on('message', (msg, rinfo) => {
     try {
