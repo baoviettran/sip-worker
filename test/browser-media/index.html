@@ -63,7 +63,7 @@
 
     // Per-cycle state: a fresh manager + port pair + controller, whose
     // dispose() fully reclaims PC, timers, device listeners, and ports.
-    async function createFreshController(iceServers) {
+    async function createFreshController(iceServers, relay) {
       const pcs = [];
       const ports = mediaMod.createMediaPortPair();
       let liveTimers = 0;
@@ -99,7 +99,12 @@
           removeEventListener: () => { bridge.gListeners -= 1; deviceListeners -= 1; },
         },
         createPeerConnection: (cfg) => {
-          const pc = new RTCPeerConnection(cfg);
+          // True relay mode flows iceTransportPolicy:'relay' THROUGH the library
+          // (WebRtcMediaManager options -> session -> env.createPeerConnection),
+          // so a relay gate proves the production option really forces the
+          // transport policy, not merely that the stub wires a config.
+          const finalCfg = relay ? { ...cfg, iceTransportPolicy: 'relay' } : cfg;
+          const pc = new RTCPeerConnection(finalCfg);
           pcs.push(pc);
           bridge.allPcs.push(pc);
           captureCandidates(pc, 'library');
@@ -122,7 +127,13 @@
 
       const manager = new mediaMod.WebRtcMediaManager({
         env,
-        options: iceServers ? { iceServers } : {},
+        // Forced-relay mode flows iceTransportPolicy:'relay' through the production
+        // options channel (WebRtcMediaManagerOptions -> WebRtcMediaSession ->
+        // env.createPeerConnection), so the selected-candidate assertions below
+        // prove the real library option forces relay — not a stub shortcut.
+        options: iceServers
+          ? (relay ? { iceServers, iceTransportPolicy: 'relay' } : { iceServers })
+          : {},
         clock,
         emitter: { emit: (t, v) => emitter.emit(t, v) },
       });
@@ -151,24 +162,27 @@
     }
 
     // ---- per-cycle driver ----
-    async function runCallCycle({ scenario = 'direct', freqA = 440, freqB = 880, cycleIndex = 0 } = {}) {
+    async function runCallCycle({ scenario = 'direct', freqA = 440, freqB = 880, cycleIndex = 0, relay = null } = {}) {
       const result = { cycleIndex, scenario };
       let ctx = null, peer = null, micSrc = null, libPc = null;
       const sessionId = 'cycle-' + cycleIndex;
       try {
-        // STUN or direct: the spec says "interval-local STUN or direct host
-        // candidates — exercise at least a direct path". The STUN server is a
-        // real RFC-5389 binding server started by the gate's own webServer on
-        // loopback (127.0.0.1:4101) — no outbound internet required, so the
-        // srflx candidate comes from a genuine STUN exchange, not a fallback.
+        // STUN, direct, or forced TURN relay. STUN uses a real RFC-5389 binding
+        // server started by the gate's own webServer on loopback. Forced relay
+        // hands each peer a relay-only RTCPeerConnection config (iceServers +
+        // iceTransportPolicy:'relay') so BOTH endpoints may only select relay
+        // candidates. No credentials, SDP, or candidate data are ever placed in
+        // the returned plain-data result.
         const iceServers = scenario === 'stun'
           ? [{ urls: 'stun:127.0.0.1:4101' }]
-          : [];
+          : scenario === 'relay'
+            ? [{ urls: 'turn:' + (relay?.host ?? '127.0.0.1') + ':' + (relay?.port ?? 3478), username: relay?.username ?? '', credential: relay?.credential ?? '' }]
+            : [];
         // Baseline of the STUN server's served-binding counter BEFORE this
         // cycle, so the per-cycle delta (bindings served while THIS call was
         // setting up) is asserted rather than the cumulative total.
         const stunBaseline = Number(await (await fetch('/stun-count')).text());
-        ctx = await createFreshController(iceServers);
+        ctx = await createFreshController(iceServers, relay);
 
         // The library sends freqB (library -> peer); peer sends freqA.
         // We supply an oscillator stream as the library's mic via the
@@ -176,17 +190,28 @@
         micSrc = makeSyntheticSource(freqB);
         ctx.micStreamRef.set(micSrc);
 
-        // STUN vs direct affects candidate types but not the peer's config
-        // (the library's config flows through env.createPeerConnection).
-        if (scenario === 'stun' || scenario === 'direct') {
-          // OUTGOING: library offers, peer answers.
+        if (scenario === 'stun' || scenario === 'direct' || scenario === 'relay') {
+          // OUTGOING: library offers, peer answers. STUN vs direct vs relay
+          // affects candidate types but not the peer's config shape (the
+          // library's config flows through env.createPeerConnection). A relay
+          // peer applies forced-relay transport policy on its own PC.
           const offerSdp = await ctx.controller.createOffer(sessionId);
           if (typeof offerSdp !== 'string' || !offerSdp.includes('m=audio')) {
             throw new Error('offer lacks m=audio');
           }
           libPc = ctx.pcs[ctx.pcs.length - 1] ?? null;
 
-          peer = new SyntheticPeer({ iceServers: [], freqHz: freqA, register: (pc) => { bridge.allPcs.push(pc); ctx.pcs.push(pc); ctx.captureCandidates(pc, 'peer'); } });
+          // In relay mode the peer may address the SAME TURN host as the library
+          // (default, single relay) or a DISTINCT host (`relay.peerHost`). On CI
+          // the peer points at a second loopback alias (127.0.0.2) so coturn hands
+          // the two allocations distinct relay IPs — required for coturn to relay
+          // between two same-server clients. Credentials are never exposed.
+          let turnCfg = { iceServers: [] };
+          if (scenario === 'relay') {
+            const peerTurnUrl = 'turn:' + (relay?.peerHost ?? relay?.host ?? '127.0.0.1') + ':' + (relay?.port ?? 3478);
+            turnCfg = { iceServers: [{ urls: peerTurnUrl, username: relay?.username ?? '', credential: relay?.credential ?? '' }], iceTransportPolicy: 'relay' };
+          }
+          peer = new SyntheticPeer({ ...turnCfg, freqHz: freqA, register: (pc) => { bridge.allPcs.push(pc); ctx.pcs.push(pc); ctx.captureCandidates(pc, 'peer'); } });
           const answerSdp = await peer.answerOffer(offerSdp);
           await ctx.controller.setRemote(sessionId, answerSdp);
         }
@@ -348,6 +373,40 @@
 
     // The Node runner drives through this single entry.
     window.__runCallCycle = (opts) => runCallCycle(opts);
+
+    // Shipping-Safari media acceptance gate. Runs ONE real create->negotiate->
+    // media->cleanup cycle of the BUILT library against the synthetic peer on a
+    // direct host path (no STUN/TURN infra needed in the macOS job), then returns
+    // ONLY plain, non-sensitive data: assertions-passed/failed with the observable
+    // evidence a WebDriver runner can assert over HTTP. No credentials, device
+    // ids, SDP, or candidate strings leave the page.
+    window.runMediaAcceptance = async () => {
+      try {
+        const r = await runCallCycle({ scenario: 'direct', freqA: 523, freqB: 220, cycleIndex: 0, relay: null });
+        const checks = {
+          offerAnswer: !r.error && r.libraryIceState && r.peerIceState != null,
+          connected: r.libraryConnState === 'connected' && r.peerConnState === 'connected',
+          rtpBothWays: r.libraryMedia?.ok === true && r.peerMedia?.ok === true,
+          selectedCandidates: !!(r.librarySelectedTypes?.local && r.librarySelectedTypes?.remote),
+          remoteTracks: (r.libraryRemoteTracks ?? 0) > 0 && (r.peerRemoteTracks ?? 0) > 0,
+          cleanup: (r.pcsAfter ?? -1) === 0,
+        };
+        const passed = Object.values(checks).every(Boolean);
+        return {
+          passed,
+          checks,
+          error: r.error ? { name: r.error.name, message: r.error.message } : null,
+          libraryIceState: r.libraryIceState ?? null,
+          conn: { library: r.libraryConnState ?? null, peer: r.peerConnState ?? null },
+          rtp: {
+            library: r.libraryMedia ? { in: r.libraryMedia.inbound.packets, out: r.libraryMedia.outbound.packets } : null,
+            peer: r.peerMedia ? { in: r.peerMedia.inbound.packets, out: r.peerMedia.outbound.packets } : null,
+          },
+        };
+      } catch (error) {
+        return { passed: false, checks: {}, error: { name: error.name || 'Error', message: error.message || String(error) }, libraryIceState: null, conn: null, rtp: null };
+      }
+    };
   </script>
 </body>
 </html>

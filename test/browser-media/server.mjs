@@ -112,16 +112,25 @@ function ensureBuilt(indexPath, res, label) {
   return true;
 }
 
+// Export the built-only request handler so the Safari runner (safari-runner.mjs)
+// can wrap the exact same contract in a real TLS server (Safari requires a true
+// HTTPS secure context; Playwright's http://localhost trick does not apply).
+export { handler, ROOT };
+
 // Deliberately NO TLS: Playwright treats http://localhost as a secure context,
 // so WebRTC, getUserMedia, and AudioContext all work over plain localhost
 // HTTPS-equivalent. This keeps the gate dependency-free and CI-friendly.
-const server = http.createServer(handler);
-const port = Number(process.env.BROWSER_MEDIA_PORT ?? 4100);
-const host = '127.0.0.1';
-server.listen(port, host, () => {
-  console.log(`browser-media server listening on http://${host}:${port}`);
-  startStunServer();
-});
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const server = http.createServer(handler);
+  const port = Number(process.env.BROWSER_MEDIA_PORT ?? 4100);
+  const host = '127.0.0.1';
+  server.listen(port, host, () => {
+    console.log(`browser-media server listening on http://${host}:${port}`);
+    startStunServer();
+  });
+  process.on('SIGTERM', () => server.close(() => process.exit(0)));
+  process.on('SIGINT', () => server.close(() => process.exit(0)));
+}
 
 /**
  * Minimal RFC-5389 STUN binding server on a fixed loopback port.
@@ -215,5 +224,3 @@ function startStunServer() {
   });
 }
 
-process.on('SIGTERM', () => server.close(() => process.exit(0)));
-process.on('SIGINT', () => server.close(() => process.exit(0)));

@@ -109,14 +109,16 @@ export function measureEnergy(stream, sampleMs = 600) {
  */
 export class SyntheticPeer {
   /**
-   * @param {{ iceServers?: RTCIceServer[], freqHz?: number, register?(pc: RTCPeerConnection): void }} opts
+   * @param {{ iceServers?: RTCIceServer[], iceTransportPolicy?: RTCIceTransportPolicy, freqHz?: number, register?(pc: RTCPeerConnection): void }} opts
    */
   constructor(opts = {}) {
-    this.pc = new RTCPeerConnection(
-      opts.iceServers && opts.iceServers.length
-        ? { iceServers: opts.iceServers }
-        : { iceServers: [] },
-    );
+    const cfg = {};
+    if (opts.iceServers && opts.iceServers.length) cfg.iceServers = opts.iceServers;
+    else cfg.iceServers = [];
+    // Forced-relay peers (the TURN gate) must apply the same transport policy as
+    // the library so BOTH endpoints only consider relay candidates.
+    if (opts.iceTransportPolicy) cfg.iceTransportPolicy = opts.iceTransportPolicy;
+    this.pc = new RTCPeerConnection(cfg);
     if (opts.register) opts.register(this.pc);
     this.source = makeSyntheticSource(opts.freqHz ?? 880);
     for (const track of this.source.stream.getTracks()) {

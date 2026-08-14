@@ -1,0 +1,56 @@
+name: Safari media acceptance (shipping)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 7 * * *"
+
+# Mandatory shipping-Safari media evidence for the v0.5 release gate.
+# A missing runner or an unavailable Safari FAILS the release prerequisite —
+# there is NO `continue-on-error` and NO successful-skip path.
+concurrency:
+  group: safari-media-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  safari:
+    name: Safari getusemedia + real audio on macOS
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build / pack the browser package (built artifacts only)
+        run: npm run build
+      # `--enable` grants the "Allow Remote Automation" capability; it requires
+      # admin privileges, so run once as root. The runner then spawns a fresh
+      # `safaridriver -p 4444` (WebDriver /session) itself.
+      - name: Enable Safari Remote Automation
+        run: sudo safaridriver --enable || true
+      - name: Run the Safari media acceptance harness
+        if: always()
+        env:
+          # The runner serves the built bundle over a self-signed HTTPS harness
+          # and points its own WebDriver fetch at that same localhost; the
+          # throwaway cert is never committed, so disable TLS verification ONLY
+          # for this CI-local self-signed link.
+          NODE_TLS_REJECT_UNAUTHORIZED: "0"
+          HARNESS_PORT: "8443"
+        run: node test/browser-media/safari-runner.mjs
+      - name: Upload Safari runner logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: safari-media-${{ github.run_id }}
+          path: |
+            test-results/
+            console-*.log
+          if-no-files-found: ignore
+          retention-days: 7
