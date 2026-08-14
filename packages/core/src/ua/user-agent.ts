@@ -318,7 +318,7 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
       throw new Error('UserAgent not connected');
     }
     if (this.activeInviter !== undefined) {
-      throw new Error('Call already in progress');
+      throw new SipError(0, 'Call already in progress', 'INVALID_STATE');
     }
 
     const mediaController = this.options.mediaController;
