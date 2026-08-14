@@ -92,7 +92,7 @@ const MEDIA_CODEC_SET: ReadonlySet<MediaCodec> = new Set(MEDIA_CODECS);
 const UNKNOWN_OPERATION = 'media operation';
 
 /** Sort key for validated (normalized) options, kept in one place. */
-type NormalizedMediaOptions = {
+export type NormalizedMediaOptions = {
   readonly iceServers?: readonly RTCIceServer[];
   readonly iceTransportPolicy?: RTCIceTransportPolicy;
   readonly iceGatheringTimeoutMs: number;

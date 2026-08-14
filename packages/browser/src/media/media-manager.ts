@@ -88,6 +88,10 @@ const SAFE_MESSAGES: Readonly<Record<MediaErrorCode, string>> = {
  * negotiation operations are serialized one at a time. `closeSession` is
  * fire-and-forget, cancels pending requests, and reclaims the session. Disposal
  * is idempotent.
+ *
+ * @internal Not a public API surface: `BrowserUserAgent` constructs the media
+ * bridge for you; the type appears in the `BrowserMedia` constructor signature
+ * only because the facade is composition-rooted on it.
  */
 export class WebRtcMediaManager {
   private readonly env: BrowserMediaEnvironment;

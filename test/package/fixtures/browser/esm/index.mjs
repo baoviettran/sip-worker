@@ -22,6 +22,7 @@ import {
 
 import { BrowserWebSocketTransport } from 'sip-worker/transport';
 import { BrowserWebSocketTransport as SubpathTransport } from 'sip-worker/transport';
+import { createBrowserMediaEnvironment } from 'sip-worker/media';
 
 // ---- root re-exports core ----
 for (const C of [SipError, SipStreamDecoder, UserAgent, BrowserUserAgent, AuthManager, TransactionLayer, Dialog]) {
@@ -92,6 +93,16 @@ assert.equal(transport.isConnected(), false);
   // transport is disconnected at this point; connecting re-uses the closed
   // instance's reject path, so assert the class wires rather than the socket.
   assert.ok(ua instanceof UserAgent);
+}
+
+// ---- v0.5 media subpath: createBrowserMediaEnvironment is a real value ----
+{
+  // The subpath factory resolves in Node (getters only throw if a missing
+  // browser global is actually dereferenced, which this fixture never does).
+  const env = createBrowserMediaEnvironment();
+  assert.equal(typeof env.createPeerConnection, 'function');
+  assert.equal(typeof env.getAudioCapabilities, 'function');
+  assert.equal(typeof env.createMediaStream, 'function');
 }
 
 // ---- v0.5: BrowserUserAgent constructs and ua.media exposes the facade ----

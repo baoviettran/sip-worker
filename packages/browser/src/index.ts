@@ -30,5 +30,6 @@ export type {
   BrowserMediaOptions,
   MediaCodec,
   MediaSessionState,
+  NormalizedMediaOptions,
   PrepareMediaOptions,
 } from './media/index.js';

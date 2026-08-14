@@ -51,8 +51,6 @@ interface BrowserMedia {
     setAudioOutput(element: HTMLMediaElement, deviceId: string): Promise<void>;
 }
 
-// Warning: (ae-unresolved-link) The @link reference could not be resolved: The reference is ambiguous because "BrowserMedia" has more than one declaration; you need to add a TSDoc member reference selector
-//
 // @public
 class BrowserMedia {
     // Warning: (ae-forgotten-export) The symbol "WebRtcMediaManager" needs to be exported by the entry point index.d.ts
@@ -237,6 +235,19 @@ export type MediaCodec = 'opus' | 'PCMU' | 'PCMA';
 // @public
 export type MediaSessionState = 'new' | 'acquiring' | 'negotiating' | 'connecting' | 'connected' | 'failed' | 'closed';
 
+// Warning: (ae-missing-release-tag) "NormalizedMediaOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type NormalizedMediaOptions = {
+    readonly iceServers?: readonly RTCIceServer[];
+    readonly iceTransportPolicy?: RTCIceTransportPolicy;
+    readonly iceGatheringTimeoutMs: number;
+    readonly mediaOperationTimeoutMs: number;
+    readonly microphoneDeviceId?: string;
+    readonly audioConstraints?: MediaTrackConstraints;
+    readonly codecPreference?: readonly MediaCodec[];
+};
+
 // Warning: (ae-missing-release-tag) "PrepareMediaOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public
@@ -247,7 +258,6 @@ export interface PrepareMediaOptions {
     readonly signal?: AbortSignal;
 }
 
-// Warning: (ae-forgotten-export) The symbol "NormalizedMediaOptions" needs to be exported by the entry point index.d.ts
 // Warning: (ae-missing-release-tag) "validateBrowserMediaOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public

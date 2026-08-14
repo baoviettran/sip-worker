@@ -22,6 +22,7 @@ import type {
   BrowserWebSocketFactory,
   BrowserWebSocketLike,
 } from 'sip-worker/transport';
+import type { BrowserMediaOptions } from 'sip-worker/media';
 import type {
   SipMessage,
   Transport,
@@ -76,6 +77,10 @@ declare const tEvent: TransportEvent;
 void request; void message; void tEvent;
 
 // ---- v0.5: BrowserUserAgent composition root + media facade compile ----
+// ---- v0.5 media subpath type: BrowserMediaOptions resolves from sip-worker/media ----
+declare const mediaOpts: BrowserMediaOptions;
+void mediaOpts;
+
 const browserOptions: BrowserUserAgentOptions = {
   transport,
   clock,

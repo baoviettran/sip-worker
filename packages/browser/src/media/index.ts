@@ -26,5 +26,6 @@ export type {
   BrowserMediaOptions,
   MediaCodec,
   MediaSessionState,
+  NormalizedMediaOptions,
   PrepareMediaOptions,
 } from './types.js';

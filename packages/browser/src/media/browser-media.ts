@@ -35,7 +35,7 @@ export interface BrowserMedia {
 }
 
 /**
- * The {@link BrowserMedia} implementation. Construct with the media manager the
+ * The `BrowserMedia` implementation. Construct with the media manager the
  * `BrowserUserAgent` already owns.
  */
 export class BrowserMedia {

@@ -6,9 +6,12 @@ const assert = require('node:assert/strict');
 
 const root = require('sip-worker');
 const browserTransport = require('sip-worker/transport');
+const browserMedia = require('sip-worker/media');
 
 assert.ok(root && typeof root === 'object', 'sip-worker root must be an object');
 assert.ok(browserTransport && typeof browserTransport === 'object', 'sip-worker/transport must be an object');
+assert.ok(browserMedia && typeof browserMedia === 'object', 'sip-worker/media must be an object');
+assert.equal(typeof browserMedia.createBrowserMediaEnvironment, 'function');
 
 assert.equal(typeof root.SipError, 'function');
 assert.equal(typeof root.SipStreamDecoder, 'function');
