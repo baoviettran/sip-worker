@@ -149,7 +149,7 @@ export class DialogNegotiator {
             // peer leaves the Accepted state instead of retransmitting 2xx.
             this.terminateOwned();
             const reinviteCSeq = Number(request.headers.get('CSeq')?.trim().split(/\s+/)[0] ?? NaN);
-            void this.layer.getTransport().send(serializeMessage(dialog.createAck(event.response, reinviteCSeq)));
+            void this.layer.getTransport().send(serializeMessage(dialog.createAck(event.response, reinviteCSeq))).catch(() => {});
 
             // Bound and content-check the remote answer before applying it to
             // media (design: "Remote SDP is size-bounded before being passed to

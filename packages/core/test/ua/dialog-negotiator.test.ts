@@ -23,7 +23,7 @@ import type { MediaMessage } from '../../src/media/index.js';
 import { Dialog, type IdGenerator } from '../../src/dialogs/dialog.js';
 import { type ViaConfig } from '../../src/dialogs/header-values.js';
 import { DialogNegotiator } from '../../src/ua/dialog-negotiator.js';
-import { SipError } from '../../src/errors.js';
+import { SipError, TransportError } from '../../src/errors.js';
 
 const REMOTE_URI = 'sip:bob@192.0.2.2';
 const AOR = 'sip:alice@example.com';
@@ -364,6 +364,37 @@ describe('DialogNegotiator', () => {
       expect(ack.headers.get('Call-ID')).toBe(reinvite.headers.get('Call-ID'));
       expect(ack.headers.get('To')).toBe(reinvite.headers.get('To'));
       expect(ack.headers.get('Route')).toBe(reinvite.headers.get('Route'));
+    });
+
+    it('does not surface an unhandled rejection when the ACK send fails on a closing socket', async () => {
+      const h = setup();
+      const restart = h.negotiator.restartIce();
+      await flush();
+      const reinvite = lastOutboundInvite(h);
+      await expectPending(restart);
+
+      // The re-INVITE 2xx resolves while the WS socket is already closing, so
+      // the transport's send() rejects (ws.ts:184) instead of emitting bytes.
+      // The ACK send must be handled (swallowed) - an unhandled rejection would
+      // crash the Node process / log in browsers.
+      h.transport.sendError = new TransportError('FakeTransport is not connected');
+      let unhandled: unknown;
+      const onUnhandled = (error: unknown): void => { unhandled = error; };
+      process.on('unhandledRejection', onUnhandled);
+
+      try {
+        respond2xxTo(h, reinvite, STUB_SDP);
+        await flush();
+        h.media.releaseSetRemote();
+        await restart;
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandled);
+      }
+
+      // Whether or not the ACK was emitted is transport-dependent; the invariant
+      // is that the rejected send never escapes as an unhandled rejection.
+      expect(unhandled).toBeUndefined();
+      expect(h.negotiator.busy).toBe(false);
     });
 
     it('rejects with a typed error when the 2xx answer SDP is oversized', async () => {
