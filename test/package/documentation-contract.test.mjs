@@ -195,6 +195,7 @@ const compatNote = readProject('docs/compatibility/0.5-browser-media.md');
 const migration05 = readProject('docs/migrations/0.3-to-0.5.md');
 const mediaReview = readProject('docs/reviews/2026-08-13-0.5-real-webrtc-audio-review.md');
 const turnWorkflow = readProject('.github/workflows/browser-media.yml');
+const turnBootstrap = readProject('test/turn/coturn.bootstrap.sh');
 
 // TURN CI must generate both credentials per run; repository secrets are not required.
 assert.doesNotMatch(turnWorkflow, /secrets.COTURN_PASSWORD/, 'TURN workflow must not depend on a static repository password');
@@ -203,6 +204,15 @@ assert.match(turnWorkflow, /TURN_USERNAME=.*GITHUB_ENV/);
 assert.match(turnWorkflow, /openssl rand/);
 assert.match(turnWorkflow, /add-mask/);
 assert.match(turnWorkflow, /TURN_PASSWORD=.*GITHUB_ENV/);
+assert.match(turnBootstrap, /trap - EXIT/, 'coturn bootstrap must disable failure cleanup after successful health validation');
+assert.ok(turnBootstrap.indexOf('trap - EXIT') > turnBootstrap.indexOf('relay healthy:'), 'coturn cleanup must be disabled only after health succeeds');
+assert.match(turnBootstrap, /ip route get/, 'TURN bootstrap must accept an already-routed loopback peer');
+assert.match(turnBootstrap, /sudo -n/, 'TURN bootstrap privilege fallback must be non-interactive');
+assert.match(turnWorkflow, /if: always()/, 'TURN workflow must always clean up coturn');
+assert.match(turnWorkflow, /docker rm -f sip-worker-relay/, 'TURN workflow must remove its exact coturn container');
+assert.equal((turnWorkflow.match(/npm run test:browser-media:install/g) ?? []).length, 2, "both browser jobs must install every supported Playwright engine");
+assert.doesNotMatch(turnWorkflow, /playwright test --project=chromium turn-relay\.spec\.ts/, "TURN workflow must not reduce relay evidence to Chromium");
+assert.match(turnWorkflow, /playwright test turn-relay\.spec\.ts/, "TURN workflow must run the relay gate across all configured engines");
 assert.match(browser.description, /real WebRTC audio/i, 'browser package description must describe its real media surface');
 
 // Playwright WebKit is automation evidence, not a shipping-Safari run.
@@ -210,7 +220,7 @@ for (const [name, text] of [['docs/browser-media.md', browserMedia], ['docs/comp
   assert.doesNotMatch(text, /WebKit *[/] *Safari|Playwright Desktop Safari/i, name + ' must not label Playwright WebKit as real Safari');
   assert.match(text, /Playwright WebKit/i, name + ' must identify the automated engine precisely');
 }
-assert.match(mediaReview, /forced-TURN[^]{0,160}(NOT[- ]RUN|unverified)/i);
+assert.match(mediaReview, /forced TURN is \*\*VERIFIED locally/i);
 assert.match(mediaReview, /(shipping|real) Safari[^]{0,160}(NOT[- ]RUN|unverified)/i);
 
 // not a completed-v1 production claim

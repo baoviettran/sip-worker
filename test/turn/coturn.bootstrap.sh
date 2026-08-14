@@ -33,12 +33,15 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONF_SRC="$REPO_ROOT/test/turn/coturn.conf"
 CONF_TMP="$(mktemp)"
 
-# 1. Second loopback alias — REQUIRED for two distinct relay IPs. GitHub runners
-#    are unprivileged but have passwordless sudo; if we cannot add it, we FAIL
-#    (the gate must not collapse).
-echo "ensuring loopback alias ${IP_PEER}..."
-if ! ip addr show lo | grep -q "${IP_PEER}/"; then
-  sudo ip addr add "${IP_PEER}/32" dev lo
+# 1. Ensure the second relay IP is usable. Linux routes all of 127.0.0.0/8
+#    through loopback even when only 127.0.0.1 is explicitly assigned. Accept
+#    that capability directly; otherwise use a non-interactive CI sudo fallback.
+echo "ensuring loopback peer ${IP_PEER}..."
+if ip route get "$IP_PEER" 2>/dev/null | grep -Eq "^local .* dev lo"; then
+  echo "loopback peer ${IP_PEER} is already locally routed"
+elif ! sudo -n ip addr add "${IP_PEER}/32" dev lo; then
+  echo "::error::Cannot route ${IP_PEER} through loopback and non-interactive sudo is unavailable." >&2
+  exit 1
 fi
 
 # 2. Substitute the two relay/listener IPs into the mounted config.
@@ -97,3 +100,8 @@ then
   exit 1
 fi
 echo "relay healthy: ${IP_LIBRARY}:${TURN_PORT} answered a Binding Request."
+
+# The relay must outlive this provisioning process so the following Playwright
+# workflow step can use it. The workflow owns unconditional job-level cleanup.
+trap - EXIT
+rm -f "$CONF_TMP"

@@ -211,7 +211,7 @@ describe('WebRtcMediaManager routing', () => {
 });
 
 describe('WebRtcMediaManager error serialization', () => {
-  it('maps a session failure to a mediaError reply with a valid 12-code code', async () => {
+  it('maps a session failure to a mediaError reply with a valid 14-code code', async () => {
     const { manager, env, clock, replies } = setup();
     const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
     pc.autoCompleteIceGathering = false;

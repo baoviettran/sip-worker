@@ -64,6 +64,9 @@
     // Per-cycle state: a fresh manager + port pair + controller, whose
     // dispose() fully reclaims PC, timers, device listeners, and ports.
     async function createFreshController(iceServers, relay) {
+      bridge.diagnosticStage = 'controller-start';
+      bridge.diagnosticCauseName = undefined;
+      bridge.diagnosticConfigShape = undefined;
       const pcs = [];
       const ports = mediaMod.createMediaPortPair();
       let liveTimers = 0;
@@ -88,6 +91,7 @@
       const env = {
         mediaDevices: {
           getUserMedia: async () => {
+            bridge.diagnosticStage = 'get-user-media';
             if (!micStream) throw new Error('no fake mic configured');
             return micStream.stream;
           },
@@ -99,12 +103,18 @@
           removeEventListener: () => { bridge.gListeners -= 1; deviceListeners -= 1; },
         },
         createPeerConnection: (cfg) => {
+          bridge.diagnosticStage = 'peer-connection-constructor';
           // True relay mode flows iceTransportPolicy:'relay' THROUGH the library
           // (WebRtcMediaManager options -> session -> env.createPeerConnection),
           // so a relay gate proves the production option really forces the
           // transport policy, not merely that the stub wires a config.
           const finalCfg = relay ? { ...cfg, iceTransportPolicy: 'relay' } : cfg;
-          const pc = new RTCPeerConnection(finalCfg);
+          const firstServer = finalCfg.iceServers?.[0];
+          bridge.diagnosticConfigShape = JSON.stringify({ serverCount: finalCfg.iceServers?.length ?? 0, urls: Array.isArray(firstServer?.urls) ? 'array' : typeof firstServer?.urls, username: typeof firstServer?.username, credential: typeof firstServer?.credential, policy: finalCfg.iceTransportPolicy });
+          let pc;
+          try { pc = new RTCPeerConnection(finalCfg); }
+          catch (error) { bridge.diagnosticCauseName = error?.name ?? 'unknown'; throw error; }
+          bridge.diagnosticStage = 'peer-connection-created';
           pcs.push(pc);
           bridge.allPcs.push(pc);
           captureCandidates(pc, 'library');
@@ -277,7 +287,7 @@
         return result;
       } catch (error) {
         bridge.errors.push(error);
-        result.error = { name: error.name, message: error.message };
+        result.error = { name: error.name, message: error.message, code: error.code, operation: error.operation, diagnosticStage: bridge.diagnosticStage, causeName: bridge.diagnosticCauseName, configShape: bridge.diagnosticConfigShape };
         return result;
       } finally {
         // Cleanup

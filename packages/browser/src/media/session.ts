@@ -599,12 +599,7 @@ export class WebRtcMediaSession {
     return new MediaError('ABORTED', 'The media operation was aborted.', this.sessionId, operation);
   }
 
-  /**
-   * A duplicate/illegal negotiation operation. `INVALID_STATE` is a local
-   * protocol-level rejection (not a media *failure*), and is not in core's
-   * {@link MediaErrorCode} union; the value is correct per the v0.5 design even
-   * though the type must cast it.
-   */
+  /** A duplicate or illegal negotiation operation. */
   private invalidState(message: string): MediaError {
     return new MediaError(
       'INVALID_STATE',

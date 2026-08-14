@@ -20,7 +20,7 @@ const SCENARIOS = ['direct', 'stun'] as const;
 
 test.describe('two-way audio (real RTP, built browser code)', () => {
   for (const scenario of SCENARIOS) {
-    test(`${scenario} path: audio flows both ways and media asserts hold`, async ({ page }, testInfo) => {
+    test(`${scenario} path: audio flows both ways and media asserts hold`, async ({ page }) => {
       await page.goto('/index.html');
       await ensureBooted(page);
 
@@ -62,36 +62,14 @@ test.describe('two-way audio (real RTP, built browser code)', () => {
         // The direct path must use a host local candidate.
         expect(result.librarySelectedTypes?.local, 'direct path uses host candidate').toEqual('host');
       } else {
-        // STUN path: the STUN server must be genuinely exercised — no silent
-        // collapse to a direct host-host call. On the engines that actually
-        // perform a loopback STUN binding exchange (Chromium, WebKit), the
-        // load-bearing proof is a served RFC-5389 Binding Request during this
-        // call: an unreachable STUN server yields 0 served bindings and the same
-        // host-only selected pair, so the previous assertion could pass a
-        // collapsed call; a served-binding count cannot.
-        // Firefox is a documented exception rooted in its ICE engine, not in any
-        // code defect: Firefox does not query a STUN server whose address is
-        // loopback (it infers localhost = no NAT and skips SRFLX gathering
-        // entirely — verified seen:0 packets ever reaching the server, on every
-        // single-machine sandbox). Its STUN-configured call therefore legitimately
-        // completes on its loopback host pair. We require Firefox's
-        // STUN-configured call to STILL complete, and we surface its gathered
-        // candidate types for audit; we do NOT require it to have contacted the
-        // loopback STUN server. Chromium/WebKit must serve a binding; Firefox may
-        // not and that is the engine's honest, uniform loopback behavior.
-        const isFirefox = testInfo.project.name === 'firefox';
-        if (isFirefox) {
-          // Firefox: STUN-configured call completed (asserted above) and the
-          // engine documented why no srflx/binding appears on loopback. Pass.
-          console.log(
-            `[${scenario}] firefox ICE skips loopback STUN (documented engine behavior); but STUN server did serve ${result.stunBindingsServed} binding(s) this run, and lib gathered=${JSON.stringify(result.gatheredCandidateTypes?.library ?? [])}`,
-          );
-        } else {
-          expect(
-            (result.stunBindingsServed ?? 0) > 0,
-            `${scenario}: STUN server served ≥1 RFC-5389 binding request during this call (got ${result.stunBindingsServed}); without a reachable STUN server the call would collapse to direct`,
-          ).toEqual(true);
-        }
+        // STUN must be genuinely exercised on every configured engine. The
+        // Firefox project explicitly permits loopback ICE for this local gate.
+        // A served RFC-5389 binding request proves the call did not silently
+        // collapse to the same direct host-host path.
+        expect(
+          (result.stunBindingsServed ?? 0) > 0,
+          `${scenario}: STUN server served ≥1 binding request (got ${result.stunBindingsServed})`,
+        ).toEqual(true);
         const libGathered = result.gatheredCandidateTypes?.library ?? [];
         const peerGathered = result.gatheredCandidateTypes?.peer ?? [];
         console.log(`[${scenario}] lib gathered=${JSON.stringify(libGathered)} peer gathered=${JSON.stringify(peerGathered)}`);

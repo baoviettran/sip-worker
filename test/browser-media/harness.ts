@@ -23,7 +23,15 @@ export interface SelectedTypes {
 export interface CallCycleResult {
   cycleIndex: number;
   scenario: 'direct' | 'stun';
-  error?: { name: string; message: string };
+  error?: {
+    name: string;
+    message: string;
+    code?: string;
+    operation?: string;
+    diagnosticStage?: string;
+    causeName?: string;
+    configShape?: string;
+  };
   libraryMedia?: { ok: boolean; inbound: { packets: number; bytes: number }; outbound: { packets: number; bytes: number } };
   peerMedia?: { ok: boolean; inbound: { packets: number; bytes: number }; outbound: { packets: number; bytes: number } };
   peerRemoteTracks?: number;

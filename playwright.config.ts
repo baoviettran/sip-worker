@@ -58,6 +58,9 @@ export default defineConfig({
             'media.autoplay.default': 0,
             'media.autoplay.blocking_policy': 0,
             'media.navigator.streams.fake': false,
+            // The acceptance infrastructure is intentionally loopback-local. Firefox
+            // otherwise filters loopback STUN/TURN candidates before SDP emission.
+            'media.peerconnection.ice.loopback': true,
           },
         },
       },

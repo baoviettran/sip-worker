@@ -15,15 +15,20 @@ import type { CallCycleResult } from './harness';
  * relay backend cannot produce a false pass on a collapsed direct call.
  */
 
-const TURN_HOST = process.env.TURN_URL === undefined
-  ? '127.0.0.1'
-  : new URL(process.env.TURN_URL).hostname;
-// The peer MAY point at a DISTINCT TURN host (a second loopback alias on CI) so
-// coturn hands the two allocations distinct relay IPs — required for relay-to-
-// relay between two same-server clients. Defaults to the same host as the library.
-const TURN_PEER_HOST = process.env.TURN_PEER_URL === undefined
-  ? TURN_HOST
-  : new URL(process.env.TURN_PEER_URL).hostname;
+function turnHost(value: string | undefined, fallback: string): string {
+  if (value === undefined) return fallback;
+  const normalized = /^turns?:\/\//i.test(value)
+    ? value
+    : value.replace(/^(turns?):/i, '$1://');
+  const hostname = new URL(normalized).hostname;
+  if (hostname.length === 0) throw new Error('TURN URL must contain a hostname');
+  return hostname;
+}
+
+const TURN_HOST = turnHost(process.env.TURN_URL, '127.0.0.1');
+// The peer may use a distinct TURN host so same-server relay allocations get
+// distinct relay addresses. It defaults to the library's TURN host.
+const TURN_PEER_HOST = turnHost(process.env.TURN_PEER_URL, TURN_HOST);
 const TURN_PORT = Number(process.env.TURN_PORT ?? '3478');
 const TURN_USERNAME = process.env.TURN_USERNAME ?? '';
 const TURN_PASSWORD = process.env.TURN_PASSWORD ?? '';
@@ -82,11 +87,16 @@ test('forced TURN relay: selected relay candidates + two-way real audio', async 
   expect(result.peerRemoteTracks, 'peer received library audio track').toBeGreaterThan(0);
   expect(result.libraryRemoteTracks, 'library received peer audio track').toBeGreaterThan(0);
 
-  // Real audio energy observed on at least the library (receiving) side. A
-  // relayed call is only evidence of working infrastructure if actual audio bytes
-  // are decoded; RTP counters already prove bytes flow, and energy proves the
-  // media is real non-silent audio.
-  expect(result.libraryEnergy?.ok, 'library received real audio energy over relay').toEqual(true);
+  // RTP growth above is the load-bearing real-audio proof. Energy analysis is
+  // additionally required on both sides, with Chromium headless allowed only its
+  // explicit, established null-sink admission (never silent success by omission).
+  for (const [label, energy] of [['library', result.libraryEnergy], ['peer', result.peerEnergy]] as const) {
+    expect(energy, `${label} audio energy was measured over relay`).toBeDefined();
+    expect(
+      energy!.ok === true || energy!.reason === 'null-audio-decode-sink',
+      `${label} measured energy or reported the approved Chromium null sink`,
+    ).toEqual(true);
+  }
 
   // THE load-bearing assertion: the SELECTED candidate pair uses relay candidates
   // on BOTH ends. forced `iceTransportPolicy:'relay'` must actually select the

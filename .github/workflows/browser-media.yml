@@ -54,8 +54,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Install Chromium for the relay gate
-        run: npx playwright install --with-deps chromium
+      - name: Install browser engines for the relay gate
+        run: npm run test:browser-media:install
       - name: Build / pack the browser package (built artifacts only)
         run: npm run build
       - name: Generate ephemeral TURN credentials
@@ -75,4 +75,7 @@ jobs:
           TURN_URL: "turn:127.0.0.1"
           TURN_PEER_URL: "turn:127.0.0.2"
           TURN_PORT: "3478"
-        run: npx playwright test --project=chromium turn-relay.spec.ts
+        run: npx playwright test turn-relay.spec.ts
+      - name: Clean up coturn
+        if: always()
+        run: docker rm -f sip-worker-relay >/dev/null 2>&1 || true

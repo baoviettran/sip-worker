@@ -9,7 +9,7 @@ a real `RTCPeerConnection` audio session.
 `sip-worker` 0.5.0 is a **real-media foundation**, not a completed v1 production
 product. It supports one active call (busy → `486 Busy Here`), non-trickle ICE
 only, and no DTMF / SIP INFO / MSRP. It is verified for two-way audio on
-Chromium, Firefox, and WebKit/Safari against the built tarball but carries no
+Chromium, Firefox, and Playwright WebKit against the built tarball but carries no
 interop evidence against production media stacks. `sip-worker` is **Node-free**:
 the browser bundle builds with no Node polyfill, and the DOM-typed media surface
 is type-only.

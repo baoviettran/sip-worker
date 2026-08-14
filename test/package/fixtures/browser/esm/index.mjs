@@ -35,7 +35,7 @@ for (const C of [SipError, SipStreamDecoder, UserAgent, BrowserUserAgent, AuthMa
   assert.ok(err instanceof Error);
   assert.equal(err.code, 'PERMISSION_DENIED');
   assert.equal(typeof MEDIA_ERROR_CODES.length, 'number');
-  assert.ok(MEDIA_ERROR_CODES.length >= 12, 'MEDIA_ERROR_CODES should carry the 12-code union');
+  assert.ok(MEDIA_ERROR_CODES.length >= 14, 'MEDIA_ERROR_CODES should carry the 14-code union');
 }
 
 // ---- SipError semantics ----
