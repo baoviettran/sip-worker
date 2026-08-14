@@ -69,6 +69,21 @@
       let liveTimers = 0;
       let deviceListeners = 0;
       let micStream = null; // set per-cycle by makeFakeMicStream
+      // Raw candidate types EMITTED via the onicecandidate event, per role. This
+      // is the faithful "gathered" signal: Firefox emits the server-reflexive
+      // (srflx) candidate during gathering but prunes it from the final
+      // checkable set (its IP equals the host candidate's reachable interface),
+      // so a post-call getStats local-candidate read misses it. The raw capture
+      // records srflx exactly when the STUN binding exchange produced it.
+      const gathered = { library: new Set(), peer: new Set() };
+      const captureCandidates = (pc, side) => {
+        try {
+          pc.addEventListener('icecandidate', (e) => {
+            const m = e.candidate && e.candidate.candidate && e.candidate.candidate.match(/typ ([a-z]+)/);
+            if (m && m[1]) gathered[side].add(m[1]);
+          });
+        } catch {}
+      };
 
       const env = {
         mediaDevices: {
@@ -87,6 +102,7 @@
           const pc = new RTCPeerConnection(cfg);
           pcs.push(pc);
           bridge.allPcs.push(pc);
+          captureCandidates(pc, 'library');
           return pc;
         },
         createMediaStream: (t) => (t ? new MediaStream(t) : new MediaStream()),
@@ -116,6 +132,7 @@
 
       return {
         controller, manager, ports, pcs, env, emitter, clock,
+        gathered, captureCandidates,
         liveTimers: () => liveTimers,
         deviceListeners: () => deviceListeners,
         globals: () => ({ gTimers: bridge.gTimers, gListeners: bridge.gListeners }),
@@ -140,10 +157,17 @@
       const sessionId = 'cycle-' + cycleIndex;
       try {
         // STUN or direct: the spec says "interval-local STUN or direct host
-        // candidates — exercise at least a direct path".
+        // candidates — exercise at least a direct path". The STUN server is a
+        // real RFC-5389 binding server started by the gate's own webServer on
+        // loopback (127.0.0.1:4101) — no outbound internet required, so the
+        // srflx candidate comes from a genuine STUN exchange, not a fallback.
         const iceServers = scenario === 'stun'
-          ? [{ urls: 'stun:stun.l.google.com:19302' }]
+          ? [{ urls: 'stun:127.0.0.1:4101' }]
           : [];
+        // Baseline of the STUN server's served-binding counter BEFORE this
+        // cycle, so the per-cycle delta (bindings served while THIS call was
+        // setting up) is asserted rather than the cumulative total.
+        const stunBaseline = Number(await (await fetch('/stun-count')).text());
         ctx = await createFreshController(iceServers);
 
         // The library sends freqB (library -> peer); peer sends freqA.
@@ -162,7 +186,7 @@
           }
           libPc = ctx.pcs[ctx.pcs.length - 1] ?? null;
 
-          peer = new SyntheticPeer({ iceServers: [], freqHz: freqA, register: (pc) => { bridge.allPcs.push(pc); ctx.pcs.push(pc); } });
+          peer = new SyntheticPeer({ iceServers: [], freqHz: freqA, register: (pc) => { bridge.allPcs.push(pc); ctx.pcs.push(pc); ctx.captureCandidates(pc, 'peer'); } });
           const answerSdp = await peer.answerOffer(offerSdp);
           await ctx.controller.setRemote(sessionId, answerSdp);
         }
@@ -194,6 +218,27 @@
         // Selected candidate types
         result.librarySelectedTypes = await collectSelectedTypes(libPc);
         result.peerSelectedTypes = await collectSelectedTypes(peer.pc);
+        // Gathered local candidates (raw onicecandidate, both roles) so the
+        // STUN scenario can prove a real server-reflexive exchange rather than
+        // collapsing to host-host. Raw capture is used (not the post-call
+        // getStats local-candidate list) because Firefox prunes a same-realm
+        // srflx from the final checkable set — the exchange still happened and
+        // the raw event recorded it.
+        result.gatheredCandidateTypes = {
+          library: [...ctx.gathered.library].sort(),
+          peer: [...ctx.gathered.peer].sort(),
+        };
+        // Engine-agnostic STUN proof: the number of RFC-5389 Binding Requests OUR STUN
+        // server served WHILE THIS CALL was setting up (current counter minus the
+        // per-cycle baseline read before the PC was built; same-origin readbacks
+        // are not possible against the UDP server, so the HTTP server mirrors the
+        // counter). This is the load-bearing hardening — Firefox prunes a
+        // same-realm srflx from its final candidate set, so no per-engine
+        // candidate-type assertion is truthful on every engine, whereas a
+        // served-binding count is identical everywhere. 0 for direct, N>0 for the
+        // STUN scenario.
+        try { result.stunBindingsServed = Number(await (await fetch('/stun-count')).text()) - stunBaseline; }
+        catch { result.stunBindingsServed = 0; }
 
         // ICE / connection states
         result.libraryIceState = libPc.iceConnectionState;
@@ -239,17 +284,24 @@
     }
 
     async function waitForRtpGrowth(pc, timeoutMs = 15000) {
-      let prevIn = 0, prevOut = 0;
+      // Capture a genuine baseline first, then require BOTH packet AND byte
+      // counters to strictly INCREASE from that baseline in BOTH directions
+      // over a real window. A PC that counts once and then freezes (equal
+      // counters in the follow-up snapshot) never satisfies the strict `>`
+      // and must time out -> ok:false. This is a real measured increase, not a
+      // first-snapshot-nonzero check.
+      const baseline = await snapshot(pc);
       const start = Date.now();
       for (;;) {
         await sleep(400);
         const s = await snapshot(pc);
-        if (s.inbound.packets > prevIn && s.inbound.bytes > prevIn && s.outbound.packets > prevOut && s.outbound.bytes > prevOut) {
-          return { ok: true, inbound: s.inbound, outbound: s.outbound };
-        }
-        if (s.inbound.packets > prevIn) prevIn = s.inbound.packets;
-        if (s.outbound.packets > prevOut) prevOut = s.outbound.packets;
-        if (Date.now() - start > timeoutMs) return { ok: false, inbound: s.inbound, outbound: s.outbound };
+        const grew =
+          s.inbound.packets > baseline.inbound.packets &&
+          s.inbound.bytes > baseline.inbound.bytes &&
+          s.outbound.packets > baseline.outbound.packets &&
+          s.outbound.bytes > baseline.outbound.bytes;
+        if (grew) return { ok: true, baseline, inbound: s.inbound, outbound: s.outbound };
+        if (Date.now() - start > timeoutMs) return { ok: false, baseline, inbound: s.inbound, outbound: s.outbound };
       }
     }
 

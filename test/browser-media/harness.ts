@@ -32,6 +32,8 @@ export interface CallCycleResult {
   peerEnergy?: Energy;
   librarySelectedTypes?: SelectedTypes;
   peerSelectedTypes?: SelectedTypes;
+  gatheredCandidateTypes?: { library?: string[]; peer?: string[] };
+  stunBindingsServed?: number;
   libraryIceState?: string;
   libraryConnState?: string;
   peerIceState?: string;

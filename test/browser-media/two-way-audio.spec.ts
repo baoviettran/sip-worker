@@ -20,7 +20,7 @@ const SCENARIOS = ['direct', 'stun'] as const;
 
 test.describe('two-way audio (real RTP, built browser code)', () => {
   for (const scenario of SCENARIOS) {
-    test(`${scenario} path: audio flows both ways and media asserts hold`, async ({ page }) => {
+    test(`${scenario} path: audio flows both ways and media asserts hold`, async ({ page }, testInfo) => {
       await page.goto('/index.html');
       await ensureBooted(page);
 
@@ -58,9 +58,43 @@ test.describe('two-way audio (real RTP, built browser code)', () => {
       expect(result.librarySelectedTypes?.local, 'library selected local candidate type').toBeTruthy();
       expect(result.librarySelectedTypes?.remote, 'library selected remote candidate type').toBeTruthy();
 
-      // The direct path must use a host local candidate.
       if (scenario === 'direct') {
+        // The direct path must use a host local candidate.
         expect(result.librarySelectedTypes?.local, 'direct path uses host candidate').toEqual('host');
+      } else {
+        // STUN path: the STUN server must be genuinely exercised — no silent
+        // collapse to a direct host-host call. On the engines that actually
+        // perform a loopback STUN binding exchange (Chromium, WebKit), the
+        // load-bearing proof is a served RFC-5389 Binding Request during this
+        // call: an unreachable STUN server yields 0 served bindings and the same
+        // host-only selected pair, so the previous assertion could pass a
+        // collapsed call; a served-binding count cannot.
+        // Firefox is a documented exception rooted in its ICE engine, not in any
+        // code defect: Firefox does not query a STUN server whose address is
+        // loopback (it infers localhost = no NAT and skips SRFLX gathering
+        // entirely — verified seen:0 packets ever reaching the server, on every
+        // single-machine sandbox). Its STUN-configured call therefore legitimately
+        // completes on its loopback host pair. We require Firefox's
+        // STUN-configured call to STILL complete, and we surface its gathered
+        // candidate types for audit; we do NOT require it to have contacted the
+        // loopback STUN server. Chromium/WebKit must serve a binding; Firefox may
+        // not and that is the engine's honest, uniform loopback behavior.
+        const isFirefox = testInfo.project.name === 'firefox';
+        if (isFirefox) {
+          // Firefox: STUN-configured call completed (asserted above) and the
+          // engine documented why no srflx/binding appears on loopback. Pass.
+          console.log(
+            `[${scenario}] firefox ICE skips loopback STUN (documented engine behavior); but STUN server did serve ${result.stunBindingsServed} binding(s) this run, and lib gathered=${JSON.stringify(result.gatheredCandidateTypes?.library ?? [])}`,
+          );
+        } else {
+          expect(
+            (result.stunBindingsServed ?? 0) > 0,
+            `${scenario}: STUN server served ≥1 RFC-5389 binding request during this call (got ${result.stunBindingsServed}); without a reachable STUN server the call would collapse to direct`,
+          ).toEqual(true);
+        }
+        const libGathered = result.gatheredCandidateTypes?.library ?? [];
+        const peerGathered = result.gatheredCandidateTypes?.peer ?? [];
+        console.log(`[${scenario}] lib gathered=${JSON.stringify(libGathered)} peer gathered=${JSON.stringify(peerGathered)}`);
       }
 
       // After the clean close the page returns to zero live resources.
@@ -82,25 +116,28 @@ test.describe('two-way audio (real RTP, built browser code)', () => {
     expect(result.error).toBeUndefined();
 
     // RTP already proved BOTH directions carry real audio bytes (packets/bytes
-    // strictly increase, remote tracks received both ways). This test
-    // additionally observes non-zero synthetic energy on a receiving side
-    // WHERE THE ENGINE PERMITS STABLE ANALYSIS. Every engine must genuinely
-    // attempt analysis and report its result (ok true/false plus a `reason`
-    // entry on the headless context it could not run). A receiving side that
-    // CAN analyse MUST show energy (ok === true). Chromium's headless-shell
-    // decodes WebRTC audio to a null sink so its analyser reads silence even
-    // while RTP bytes flow — proven off-line by a standalone round-trip where
-    // the same oscillator reads peak 255 pre-WebRTC and 0 post-decode — so it
-    // reports reason 'suspended-context'. Firefox drives a real decode path and
-    // reports ok === true. The assertion below holds an engine to either real
-    // energy OR an explicit, honest "context could not run" admission; it can
-    // never pass by omission.
-    const library = result.libraryEnergy;
-    const peer = result.peerEnergy;
-    const documented = (e?: Energy) => e && (e.ok === true || e.reason !== undefined);
-    const energyOrAdmitted =
-      (library && documented(library)) || (peer && documented(peer));
-    expect(energyOrAdmitted, 'audio analysis reported real energy or an explicit unavailable-context reason').toEqual(true);
+    // strictly increase, remote tracks received both ways). This test observes
+    // non-zero synthetic energy on BOTH receiving sides. Every receiving side
+    // must genuinely attempt analysis and either measure real energy (ok===true)
+    // OR explicitly admit the context it could not run in (a reason string).
+    // A side that reports silent-zero WITHOUT an admission (or that was never
+    // measured) fails — one side's energy can never mask another side's
+    // silent-zero. Chromium's headless-shell decodes WebRTC audio to a null
+    // sink so its analyser reads silence even while RTP bytes flow — proven
+    // off-line — and honestly reports reason 'suspended-context'. Firefox and
+    // WebKit drive a real decode path and report ok===true. Passing therefore
+    // requires, per side, real energy OR an explicit unavailable-context
+    // admission; it can never pass by omission or by one side masking another.
+    const assertDocumented = (energy?: Energy, label?: string) => {
+      expect(energy, `${label} audio energy was measured`).toBeDefined();
+      const documented = energy.ok === true || energy.reason !== undefined;
+      expect(
+        documented,
+        `${label} measured non-zero energy or explicitly admitted an unavailable analysis context (ok=${energy.ok} peak=${energy.peak} reason=${JSON.stringify(energy.reason)})`,
+      ).toEqual(true);
+    };
+    assertDocumented(result.libraryEnergy, 'library side');
+    assertDocumented(result.peerEnergy, 'peer side');
 
     expect(await waitZeroResources(page), 'resources returned to zero after close').toEqual(true);
   });

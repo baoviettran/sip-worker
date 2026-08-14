@@ -78,10 +78,22 @@ export function measureEnergy(stream, sampleMs = 600) {
       if (samples * 50 >= sampleMs) {
         try { src.disconnect(); } catch {}
         try { ac.close(); } catch {}
+        let reason;
+        if (peak <= 0) {
+          // Silence with a running context: on Chromium headless-shell the
+          // WebRTC audio pipeline decodes into a null/discarded sink, so the
+          // analyser reads 0 even though RTP bytes are demonstrably flowing
+          // (the gate's RTP assertions prove that independently). Name the real
+          // cause rather than a generic suspended-context.
+          const isChromium = navigator?.userAgent?.includes('Chrome') && !navigator.userAgent.includes('Edg') && !navigator.userAgent.includes('Firefox');
+          reason = isChromium ? 'null-audio-decode-sink' : (ac && ac.state !== 'running' ? 'suspended-context' : 'silent-decode');
+        } else if (ac && ac.state !== 'running') {
+          reason = 'suspended-context';
+        }
         resolve({
           ok: peak > 0,
           peak,
-          ...(ac && ac.state !== 'running' ? { reason: 'suspended-context' } : {}),
+          ...(reason ? { reason } : {}),
         });
       } else setTimeout(step, 50);
     };

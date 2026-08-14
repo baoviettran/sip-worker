@@ -18,21 +18,24 @@ test('10 call cycles: zero leaked PCs/tracks/listeners/timers after every close'
 
   const results = await runCycles(page, CYCLES, { scenario: 'direct', freqA: 440, freqB: 880 });
 
-  // Every cycle must deliver real connected media (no page error, RTP grew).
+  // Every cycle must deliver real connected media (no page error, RTP grew)
+  // AND must return to ZERO owned live resources after the per-cycle close —
+  // a leak or nonzero spike in ANY of the 10 cycles fails here, not just a
+  // cumulative leak after the 10th.
   for (let i = 0; i < results.length; i += 1) {
     const r = results[i];
     expect(r.error, `cycle ${i} page error`).toBeUndefined();
     expect(r.libraryConnState, `cycle ${i} library connected`).toEqual('connected');
     expect(r.libraryMedia?.ok, `cycle ${i} library RTP grew`).toEqual(true);
+    expect(r.timersAfter, `cycle ${i} has zero live timers after close`).toEqual(0);
+    expect(r.listenersAfter, `cycle ${i} has zero device listeners after close`).toEqual(0);
+    expect(r.pcsAfter, `cycle ${i} has zero open PCs after close`).toEqual(0);
   }
 
-  // After EVERY cycle the page must be back to zero live resources. We check
-  // after the final cycle (the strongest drift point): if anything leaked on an
-  // earlier cycle, the tenth would still carry it, so a zero after the tenth
-  // cycle proves no cumulative leak.
-  await waitZeroResources(page);
-
-  // 10th-cycle drift: resources exactly zero after the final close.
+  // Cumulative form: after every one of the 10 closes the whole bridge is at
+  // zero open PCs / timers / listeners (waitZeroResources polls the live bridge
+  // tallies), including the 10th.
+  expect(await waitZeroResources(page), 'resources returned to zero after every close').toEqual(true);
   const state = await page.evaluate(() =>
     (window as unknown as {
       __webRtcMediaRun: { resourceState: () => { openPcs: number; timers: number; listeners: number } };
