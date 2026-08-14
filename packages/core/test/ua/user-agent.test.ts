@@ -1340,8 +1340,12 @@ describe('UserAgent truthful event surface', () => {
     expect(rejection.statusCode).toBe(486);
     expect(rejection.headers.get('CSeq')?.trim()).toBe('1 INVITE');
     expect(incoming).toHaveLength(0);
-    expect(ua.activeInvitationsFor).toHaveLength(1);
-    expect([...ua.activeInvitationsFor.values()][0]).toBe(first);
+
+    // The original public Invitation remains the owned call and can still
+    // complete normally after the distinct second INVITE is rejected.
+    first.reject(486, 'Busy Here');
+    await flush();
+    expect(sentResponses(transport, 486)).toBe(2);
 
     await ua.disconnect();
   });
@@ -1367,20 +1371,25 @@ describe('UserAgent truthful event surface', () => {
     await outgoing.catch(() => {});
   });
 
-  it('still routes a duplicate INVITE for the same inviteId to the duplicate path, not 486', async () => {
+  it('routes a duplicate INVITE to the existing public Invitation and retransmits its response', async () => {
     const { ua, transport } = setup();
+    const incoming: Invitation[] = [];
+    ua.on('incomingCall', (event) => incoming.push(event.invitation));
     await ua.connect();
-    receiveIncomingCall(ua, transport);
+    const first = receiveIncomingCall(ua, transport);
+    const answering = first.answer();
+    await flush();
+    expect(sentResponses(transport, 200)).toBe(1);
 
-    // The first call is busy, but a retransmission with the SAME inviteId must
-    // take the duplicate path (no 486 and no new Invitation), not the 486 rule.
     transport.emitData(serializeMessage(makeIncomingInvite('incoming-call@example.com')));
     await flush();
 
     expect(sentResponses(transport, 486)).toBe(0);
-    expect(ua.activeInvitationsFor.size).toBe(1);
+    expect(sentResponses(transport, 200)).toBe(2);
+    expect(incoming).toEqual([first]);
 
-    await ua.disconnect();
+    await ua.disconnect().then(() => {}, () => {});
+    await answering.catch(() => {});
   });
 
   it('accepts a second incoming initial INVITE after the first call is fully terminated', async () => {

@@ -587,7 +587,7 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
    * An invitation is in a "nonterminal" conversation when its session is not
    * terminated or failed — the same predicate core uses to decide session
    * cleanup. Such an invitation still owns a live/or negotiating call and so
-   * counts toward the one-call busy limit. Test observability only.
+   * counts toward the one-call busy limit.
    */
   private hasNonterminalInvitation(): boolean {
     for (const invitation of this.activeInvitations.values()) {
@@ -595,14 +595,6 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
       if (state !== 'terminated' && state !== 'failed') return true;
     }
     return false;
-  }
-
-  /**
-   * Test observability: the active incoming invitations by invite identity.
-   * Purely read-only diagnostics; never part of the public API.
-   */
-  get activeInvitationsFor(): ReadonlyMap<string, Invitation> {
-    return this.activeInvitations;
   }
 
   /**

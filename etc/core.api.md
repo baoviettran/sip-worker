@@ -409,7 +409,7 @@ export function makeResponse(statusCode: number, reasonPhrase: string, headers?:
 // Warning: (ae-missing-release-tag) "MEDIA_ERROR_CODES" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public
-export const MEDIA_ERROR_CODES: readonly ["PERMISSION_DENIED", "DEVICE_NOT_FOUND", "DEVICE_UNAVAILABLE", "CONSTRAINT_UNSATISFIED", "NEGOTIATION_FAILED", "REMOTE_DESCRIPTION_REJECTED", "ICE_GATHERING_TIMEOUT", "ICE_CONNECTION_FAILED", "OUTPUT_SELECTION_UNSUPPORTED", "PLAYBACK_FAILED", "ABORTED", "INTERNAL_ERROR"];
+export const MEDIA_ERROR_CODES: readonly ["PERMISSION_DENIED", "DEVICE_NOT_FOUND", "DEVICE_UNAVAILABLE", "CONSTRAINT_UNSATISFIED", "NEGOTIATION_FAILED", "REMOTE_DESCRIPTION_REJECTED", "ICE_GATHERING_TIMEOUT", "ICE_CONNECTION_FAILED", "OUTPUT_SELECTION_UNSUPPORTED", "PLAYBACK_FAILED", "ABORTED", "INVALID_STATE", "MEDIA_OPERATION_TIMEOUT", "INTERNAL_ERROR"];
 
 // Warning: (ae-missing-release-tag) "MediaCommand" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
@@ -1123,7 +1123,6 @@ export class TypedEventEmitter<Events extends object = UserAgentEventMap> {
 // @public (undocumented)
 export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements UserAgentEventEmitter {
     constructor(options: UserAgentOptions);
-    get activeInvitationsFor(): ReadonlyMap<string, Invitation>;
     bye(): Promise<void>;
     get callState(): string;
     connect(): Promise<void>;
