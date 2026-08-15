@@ -8,7 +8,7 @@
  */
 
 import type { BrowserMediaOptions, MediaSessionState } from '../media/index.js';
-import type { MediaError } from '@sip-worker/core';
+import type { MediaError, MediaErrorCode } from '@sip-worker/core';
 
 /**
  * Per-operation control options reused by every cancellable public mutation.
@@ -182,6 +182,7 @@ export interface BrowserCallEventMap {
     readonly sessionId: string;
     readonly previous: MediaSessionState;
     readonly state: MediaSessionState;
+    readonly reason?: MediaErrorCode;
   };
   readonly remoteAudio: {
     readonly type: 'remoteAudio';

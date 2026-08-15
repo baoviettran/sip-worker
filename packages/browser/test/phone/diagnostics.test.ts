@@ -1,6 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import { DiagnosticRecorder } from '../../src/phone/diagnostics.js';
 import type {
+  MediaErrorCode,
+} from '@sip-worker/core';
+import type {
+  BrowserCallEventMap,
   DiagnosticCode,
   DiagnosticLogger,
   DiagnosticRecord,
@@ -72,5 +76,22 @@ describe('DiagnosticRecorder', () => {
     const recorder = recorderWithLogger(() => {}, false);
     recorder.record('connection.recovery_failed', { attempt: 1 });
     expect(recorder.records).toEqual([]);
+  });
+
+  it('preserves the canonical v0.5 mediaStateChanged reason field on the call event payload', () => {
+    type Payload = BrowserCallEventMap['mediaStateChanged'];
+    // The canonical v0.5 payload carries an optional reason: MediaErrorCode.
+    // A structural payload typed as the phone-level event must accept one.
+    const payload: Payload = {
+      type: 'mediaStateChanged',
+      sessionId: 's-1',
+      previous: 'new',
+      state: 'connected',
+      reason: 'ABORTED',
+    };
+    // Assert the field is actually present and typed as the canonical code union.
+    expectTypeOf<Payload>().toHaveProperty('reason');
+    expectTypeOf<Payload['reason']>().toEqualTypeOf<MediaErrorCode | undefined>();
+    expect(payload.type).toBe('mediaStateChanged');
   });
 });
