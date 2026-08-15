@@ -112,13 +112,19 @@ function setup(overrides?: { queued?: Array<MediaStream | Promise<MediaStream>> 
   return { env, clock, manager, replies, unsubscribe };
 }
 
-/** Drive a negotiation to ICE completion and settle the manager's reply. */
+/**
+ * Drive queued negotiations to ICE completion and settle the manager's
+ * replies. Loops because each sequential negotiation (e.g. a second offer on an
+ * active session) starts a fresh ICE gathering phase after the previous one
+ * completed.
+ */
 async function settle(manager: WebRtcMediaManager, pc: FakePeerConnection): Promise<void> {
-  await flush();
-  if (pc.iceGatheringState !== 'complete') {
-    pc._completeGathering();
+  for (let round = 0; round < 4; round += 1) {
+    await flush();
+    if (pc.iceGatheringState !== 'complete') {
+      pc._completeGathering();
+    }
   }
-  await flush();
   void manager;
 }
 
@@ -477,5 +483,192 @@ describe('session getters', () => {
     manager.postMessage({ type: 'createOffer', requestId: 'obs-1', sessionId: 's1' });
     await settle(manager, pc);
     expect(manager.activeSessionId).toBe('s1');
+  });
+});
+
+describe('WebRtcMediaManager directional routing', () => {
+  it('routes a directional createOffer on an ACTIVE session to the session direction path', async () => {
+    const { manager, env, replies } = setup();
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'off-1', sessionId: 's1' });
+    await settle(manager, pc);
+    expect(pc.transceivers[0]!.direction).toBe('sendrecv');
+    manager.postMessage({ type: 'createOffer', requestId: 'dir-1', sessionId: 's1', direction: 'sendonly' });
+    await settle(manager, pc);
+    expect(pc.transceivers[0]!.direction).toBe('sendonly');
+    const reply = replyFor(replies, 'dir-1');
+    expect(reply!.type).toBe('mediaResult');
+    expect(reply!.requestId).toBe('dir-1');
+  });
+
+  it('routes commitDirection after a staged direction + remote apply and replies a void mediaResult', async () => {
+    const { manager, env, replies } = setup();
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'off-1', sessionId: 's1' });
+    await settle(manager, pc);
+    expect(pc.transceivers[0]!.direction).toBe('sendrecv');
+    manager.postMessage({ type: 'createOffer', requestId: 'dir-1', sessionId: 's1', direction: 'sendonly' });
+    await settle(manager, pc);
+    expect(pc.transceivers[0]!.direction).toBe('sendonly');
+    manager.postMessage({ type: 'setRemote', requestId: 'set-1', sessionId: 's1', remoteSdp: 'v=0' });
+    await settle(manager, pc);
+    manager.postMessage({ type: 'commitDirection', requestId: 'commit-1', sessionId: 's1' });
+    await settle(manager, pc);
+    const reply = replyFor(replies, 'commit-1');
+    expect(reply).toBeDefined();
+    expect(reply!.type).toBe('mediaResult');
+    expect(reply!.requestId).toBe('commit-1');
+    expect(pc.transceivers[0]!.direction).toBe('sendonly');
+    // Commit clears the stage: a subsequent rollback must be a no-op (no rollback call).
+    const rollbackCallsBefore = pc.setLocalCalls.length;
+    manager.postMessage({ type: 'rollbackDirection', requestId: 'roll-1', sessionId: 's1' });
+    await settle(manager, pc);
+    expect(replyFor(replies, 'roll-1')!.type).toBe('mediaResult');
+    expect(pc.setLocalCalls.length).toBe(rollbackCallsBefore);
+  });
+
+  it('rejects a createOffer carrying an unknown direction without disturbing the session', async () => {
+    const { manager, env, replies } = setup();
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({
+      type: 'createOffer',
+      requestId: 'bad-1',
+      sessionId: 's1',
+      direction: 'bogus',
+    } as unknown as MediaCommand);
+    await flush();
+    const reply = replyFor(replies, 'bad-1') as { type: 'mediaError'; code: string };
+    expect(reply.type).toBe('mediaError');
+    expect(reply.code).toBe('INVALID_STATE');
+    expect(manager.activeSessionId).toBeUndefined();
+    expect(pc.closed).toBe(false);
+    // A later valid offer still works on the same session.
+    manager.postMessage({ type: 'createOffer', requestId: 'ok-1', sessionId: 's1' });
+    await settle(manager, pc);
+    expect(replyFor(replies, 'ok-1')!.type).toBe('mediaResult');
+  });
+
+  it('rejects a directional createOffer on a FRESH session with INVALID_STATE instead of silently dropping the direction', async () => {
+    const { manager, env, replies } = setup();
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    // The initial offer is always sendrecv; a directional offer on a session
+    // that has never been negotiated must not be flattened into a plain offer.
+    manager.postMessage({
+      type: 'createOffer',
+      requestId: 'fresh-dir',
+      sessionId: 's1',
+      direction: 'sendonly',
+    });
+    await flush();
+    const reply = replyFor(replies, 'fresh-dir') as { type: 'mediaError'; code: string };
+    expect(reply.type).toBe('mediaError');
+    expect(reply.code).toBe('INVALID_STATE');
+    expect(manager.activeSessionId).toBeUndefined();
+    expect(pc.closed).toBe(false);
+    // A later plain offer still works on the same (fresh) session.
+    manager.postMessage({ type: 'createOffer', requestId: 'ok-1', sessionId: 's1' });
+    await settle(manager, pc);
+    expect(replyFor(replies, 'ok-1')!.type).toBe('mediaResult');
+  });
+});
+
+describe('WebRtcMediaManager.waitForConnected', () => {
+  it('resolves immediately when the session is already connected', async () => {
+    const { manager, env, clock } = setup();
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'off', sessionId: 's1' });
+    await settle(manager, pc);
+    pc._setIceConnection('connected');
+    await expect(manager.waitForConnected('s1')).resolves.toBeUndefined();
+    expect(clock.pending()).toBe(0);
+  });
+
+  it('resolves when the session reaches connected after a pending wait', async () => {
+    const { manager, env, clock } = setup();
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'off', sessionId: 's1' });
+    await settle(manager, pc);
+    const connected = manager.waitForConnected('s1');
+    pc._setIceConnection('connected');
+    await expect(connected).resolves.toBeUndefined();
+    expect(clock.pending()).toBe(0);
+  });
+
+  it('rejects with the media error when the session fails', async () => {
+    const { manager, env, clock } = setup();
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'off', sessionId: 's1' });
+    await settle(manager, pc);
+    const wait = manager.waitForConnected('s1');
+    pc._setIceConnection('checking');
+    pc._setIceConnection('failed');
+    await expect(wait).rejects.toMatchObject({ code: 'ICE_CONNECTION_FAILED' });
+    expect(clock.pending()).toBe(0);
+  });
+
+  it('rejects with the media error when the session is ALREADY failed before the wait', async () => {
+    const { manager, env, clock } = setup();
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'off', sessionId: 's1' });
+    await settle(manager, pc);
+    pc._setIceConnection('checking');
+    pc._setIceConnection('failed');
+    await flush();
+    const wait = manager.waitForConnected('s1', { timeoutMs: 1000 });
+    // The failure already fired; the wait must settle on it, not hang to the
+    // deadline and reject MEDIA_OPERATION_TIMEOUT. Advancing the clock forces
+    // the pre-fix (wrong) timeout rejection so RED is fast.
+    clock.advance(1000);
+    await expect(wait).rejects.toMatchObject({ code: 'ICE_CONNECTION_FAILED' });
+    expect(clock.pending()).toBe(0);
+  });
+
+  it('rejects with ABORTED when the session closes before connecting', async () => {
+    const { manager, env, clock } = setup();
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'off', sessionId: 's1' });
+    await settle(manager, pc);
+    const wait = manager.waitForConnected('s1');
+    manager.postMessage({ type: 'closeSession', sessionId: 's1' });
+    await expect(wait).rejects.toMatchObject({ code: 'ABORTED' });
+    expect(clock.pending()).toBe(0);
+  });
+
+  it('rejects with MEDIA_OPERATION_TIMEOUT when the deadline elapses before connecting', async () => {
+    const { manager, env, clock } = setup();
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'off', sessionId: 's1' });
+    await settle(manager, pc);
+    const wait = manager.waitForConnected('s1', { timeoutMs: 1000 });
+    expect(clock.pending()).toBe(1);
+    clock.advance(1000);
+    await expect(wait).rejects.toMatchObject({ code: 'MEDIA_OPERATION_TIMEOUT' });
+    expect(clock.pending()).toBe(0);
+  });
+
+  it('rejects with ABORTED when the provided signal aborts', async () => {
+    const { manager, env, clock } = setup();
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'off', sessionId: 's1' });
+    await settle(manager, pc);
+    const controller = new AbortController();
+    const wait = manager.waitForConnected('s1', { signal: controller.signal });
+    controller.abort();
+    await expect(wait).rejects.toMatchObject({ code: 'ABORTED' });
+    expect(clock.pending()).toBe(0);
+  });
+
+  it('does not settle a waiter for a different session', async () => {
+    const { manager, env, clock } = setup();
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'off', sessionId: 's1' });
+    await settle(manager, pc);
+    const other = manager.waitForConnected('other-session');
+    pc._setIceConnection('connected'); // s1 connects; other-session waiter must NOT settle
+    await flush();
+    expect(clock.pending()).toBe(1); // still waiting on its deadline
+    manager.dispose();
+    await expect(other).rejects.toMatchObject({ code: 'ABORTED' });
+    expect(clock.pending()).toBe(0);
   });
 });

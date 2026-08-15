@@ -18,7 +18,7 @@
 
 import { MediaError } from '@sip-worker/core';
 import type { MediaErrorCode } from '@sip-worker/core';
-import type { MediaCommand, MediaMessage, MediaReply } from '@sip-worker/core';
+import type { MediaCommand, MediaDirection, MediaMessage, MediaReply } from '@sip-worker/core';
 import type { BrowserMediaEnvironment, BrowserMediaEventMap, BrowserMediaOptions } from './types.js';
 import { DEFAULT_MEDIA_OPERATION_TIMEOUT_MS } from './types.js';
 import { MediaDeviceManager } from './device-manager.js';
@@ -45,12 +45,26 @@ export interface WebRtcMediaManagerDeps {
   };
 }
 
+/** Options bounding a {@link WebRtcMediaManager.waitForConnected} wait. */
+export interface WaitForConnectedOptions {
+  /** Deadline (ms); settles with `MEDIA_OPERATION_TIMEOUT` when it elapses. */
+  readonly timeoutMs?: number;
+  /** Abort the wait with `ABORTED`. */
+  readonly signal?: AbortSignal;
+}
+
+/** A media-state event the manager routes to internal connected waiters. */
+type SessionStateEvent =
+  | BrowserMediaEventMap['mediaStateChanged']
+  | BrowserMediaEventMap['mediaFailed'];
+
 /** A queued, not-yet-dispatched media request awaiting a reply. */
 interface PendingRequest {
   readonly requestId: string;
   readonly sessionId: string;
-  readonly type: 'createOffer' | 'createAnswer' | 'setRemote';
+  readonly type: 'createOffer' | 'createAnswer' | 'setRemote' | 'commitDirection' | 'rollbackDirection';
   readonly iceRestart?: boolean;
+  readonly direction?: MediaDirection;
   readonly remoteSdp?: string;
 }
 
@@ -61,6 +75,14 @@ const MEDIA_ERROR_CODES: readonly string[] = [
   'ICE_CONNECTION_FAILED', 'OUTPUT_SELECTION_UNSUPPORTED', 'PLAYBACK_FAILED',
   'ABORTED', 'INVALID_STATE', 'MEDIA_OPERATION_TIMEOUT', 'INTERNAL_ERROR',
 ];
+
+/** Valid transceiver directions a directional offer may stage, in canonical order. */
+const VALID_DIRECTIONS: readonly MediaDirection[] = ['sendrecv', 'sendonly', 'inactive'];
+
+/** Narrow a runtime direction value to the typed union, or reject it. */
+function isValidDirection(value: string): value is MediaDirection {
+  return (VALID_DIRECTIONS as readonly string[]).includes(value);
+}
 
 /** Fixed safe messages; never interpolate exception content into these. */
 const SAFE_MESSAGES: Readonly<Record<MediaErrorCode, string>> = {
@@ -118,6 +140,12 @@ export class WebRtcMediaManager {
   private readonly queue: PendingRequest[] = [];
   /** Cancellation hooks for the sole serialized browser operation deadline. */
   private readonly boundedCancels = new Set<() => void>();
+  /** Internal observers of session media-state events (drives waitForConnected). */
+  private readonly sessionStateListeners = new Set<(event: SessionStateEvent) => void>();
+  /** Cancellation hooks for in-flight connected waiters; drained on dispose. */
+  private readonly connectedWaiters = new Set<() => void>();
+  /** Terminal media failures per session id (drives the waitForConnected fast-path). */
+  private readonly sessionErrors = new Map<string, MediaError>();
   private processing = false;
   private disposed = false;
   /** Bumped on close/dispose so late tracks/streams and stale continuations drop. */
@@ -167,8 +195,19 @@ export class WebRtcMediaManager {
     if (this.disposed || message === null || typeof message !== 'object') return;
     switch (message.type) {
       case 'createOffer':
+        // The ordered bridge may deliver work queued immediately before close.
+        if (message.sessionId === this.lastClosedSessionId) return;
+        if (message.direction !== undefined && !isValidDirection(message.direction)) {
+          // A malformed direction must not create or disturb a session.
+          this.emitError('INVALID_STATE', message.requestId, message.sessionId);
+          return;
+        }
+        this.enqueueRequest(message);
+        return;
       case 'createAnswer':
       case 'setRemote':
+      case 'commitDirection':
+      case 'rollbackDirection':
         // The ordered bridge may deliver work queued immediately before close.
         if (message.sessionId === this.lastClosedSessionId) return;
         this.enqueueRequest(message);
@@ -193,6 +232,13 @@ export class WebRtcMediaManager {
     this.disposed = true;
     this.generation += 1;
     this.cancelBoundedOperations();
+    // Settle every pending connected waiter with ABORTED; the waiters below
+    // are drained after their sessions close.
+    for (const cancel of [...this.connectedWaiters]) {
+      cancel();
+    }
+    this.connectedWaiters.clear();
+    this.sessionErrors.clear();
     if (this.owned !== null) {
       this.owned.close();
       this.owned = null;
@@ -249,6 +295,13 @@ export class WebRtcMediaManager {
     switch (type) {
       case 'createOffer': {
         const created = this.owned === null;
+        if (created && pending.direction !== undefined) {
+          // A directional offer requires an ESTABLISHED session: the initial
+          // offer is always sendrecv. Reject rather than silently dropping the
+          // requested direction.
+          this.emitError('INVALID_STATE', requestId, sessionId);
+          return;
+        }
         if (this.reservedId === undefined) {
           this.reservedId = sessionId;
         }
@@ -256,9 +309,13 @@ export class WebRtcMediaManager {
           this.owned = this.createSession(sessionId);
         }
         try {
-          const operation = created || pending.iceRestart !== true
+          const operation = created
             ? this.owned.createOffer()
-            : this.owned.restartIce();      // C4: restart an active session
+            : pending.iceRestart === true
+              ? this.owned.restartIce()      // C4: restart an active session
+              : pending.direction !== undefined
+                ? this.owned.createDirectionalOffer(pending.direction)
+                : this.owned.createOffer();
           const sdp = await this.runBounded(operation);
           if (generation === this.generation && this.reservedId === sessionId) {
             this.emitResult(requestId, sessionId, sdp);
@@ -333,6 +390,40 @@ export class WebRtcMediaManager {
         }
         return;
       }
+      case 'commitDirection':
+      case 'rollbackDirection': {
+        // Direction transactions require an existing, active session.
+        if (this.owned === null || this.owned.sessionId !== sessionId) {
+          this.emitError('INTERNAL_ERROR', requestId, sessionId);
+          return;
+        }
+        try {
+          const operation = type === 'commitDirection'
+            ? this.owned.commitDirection()
+            : this.owned.rollbackDirection();
+          await this.runBounded(operation);
+          if (generation === this.generation && this.reservedId === sessionId) {
+            this.emitResult(requestId, sessionId);
+          }
+        } catch (error) {
+          // A direction-transaction failure is terminal in the session (it
+          // fails itself with NEGOTIATION_FAILED), so reclaim like the other
+          // terminal paths. Generation-guarded like every failure path so a
+          // stale continuation can never clobber a newer live session.
+          if (generation === this.generation) {
+            const partial = this.owned;
+            this.owned = null;
+            this.reservedId = undefined;
+            this.lastClosedSessionId = sessionId;
+            if (partial !== null) {
+              partial.close();
+              this.reclaimSession(sessionId);
+            }
+            this.emitError(this.codeOf(error), requestId, sessionId);
+          }
+        }
+        return;
+      }
       default:
         return;
     }
@@ -382,6 +473,9 @@ export class WebRtcMediaManager {
 
   /** Construct a fresh session bound to this manager's env/clock/emitter. */
   private createSession(sessionId: string): WebRtcMediaSession {
+    // A reused session id must not inherit a prior terminal failure.
+    this.sessionErrors.delete(sessionId);
+    let session: WebRtcMediaSession;
     const deps: WebRtcMediaSessionDeps = {
       env: this.env,
       options: this.options,
@@ -407,12 +501,24 @@ export class WebRtcMediaManager {
           ) {
             this.retainedRemoteStream = (value as { stream: MediaStream }).stream;
           }
+          if (type === 'mediaFailed' && session.currentState === 'failed') {
+            // Record only TERMINAL failures. A non-terminal mediaFailed (e.g. a
+            // replaceMicrophone rollback) leaves the session usable and must
+            // not pin the session id to an error.
+            this.sessionErrors.set(sessionId, (value as { error: MediaError }).error);
+          }
+          if (type === 'mediaStateChanged' || type === 'mediaFailed') {
+            for (const listener of [...this.sessionStateListeners]) {
+              listener(value as SessionStateEvent);
+            }
+          }
           this.emitter.emit(type, value);
         },
       },
       sessionId,
     };
-    return new WebRtcMediaSession(deps);
+    session = new WebRtcMediaSession(deps);
+    return session;
   }
 
   // ------------------------------------------------------------------
@@ -495,6 +601,84 @@ export class WebRtcMediaManager {
     return (): void => {
       this.sessionEndListeners.delete(listener);
     };
+  }
+
+  /**
+   * Resolve when the media session with the given id reaches `connected`.
+   * Observes the manager's EXISTING media-state events under the injected clock
+   * (this is a manager concern, not a worker-protocol command). Settles on:
+   * `connected` (resolve), `mediaFailed` (reject with the media error), session
+   * close (reject `ABORTED`), `options.signal` abort (reject `ABORTED`), or
+   * `options.timeoutMs` elapsing (reject `MEDIA_OPERATION_TIMEOUT`). A session
+   * already connected resolves immediately.
+   */
+  async waitForConnected(sessionId: string, options?: WaitForConnectedOptions): Promise<void> {
+    const current = this.owned;
+    if (current !== null && current.sessionId === sessionId) {
+      if (current.currentState === 'connected') return;
+      if (current.currentState === 'failed') {
+        // The failure already fired before the wait started; settle on it
+        // rather than hanging to the deadline.
+        throw this.sessionErrors.get(sessionId)
+          ?? new MediaError('NEGOTIATION_FAILED', SAFE_MESSAGES.NEGOTIATION_FAILED);
+      }
+      if (current.currentState === 'closed') {
+        throw this.sessionErrors.get(sessionId)
+          ?? new MediaError('ABORTED', SAFE_MESSAGES.ABORTED);
+      }
+    } else if (this.sessionErrors.has(sessionId)) {
+      // The session already failed and was reclaimed; settle on its error.
+      throw this.sessionErrors.get(sessionId)!;
+    }
+    const timeoutMs = options?.timeoutMs ?? DEFAULT_MEDIA_OPERATION_TIMEOUT_MS;
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let timer = -1;
+      let onAbort: () => void = () => undefined;
+
+      const listener = (event: SessionStateEvent): void => {
+        if (event.sessionId !== sessionId) return;
+        if (event.type === 'mediaStateChanged') {
+          if (event.state === 'connected') {
+            finish(() => resolve());
+          } else if (event.state === 'closed') {
+            finish(() => reject(new MediaError('ABORTED', SAFE_MESSAGES.ABORTED)));
+          }
+        } else {
+          finish(() => reject(event.error));
+        }
+      };
+
+      const cleanup = (): void => {
+        if (timer !== -1) this.clock.clearTimeout(timer);
+        this.sessionStateListeners.delete(listener);
+        this.connectedWaiters.delete(cancel);
+        options?.signal?.removeEventListener('abort', onAbort);
+      };
+
+      const finish = (action: () => void): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        action();
+      };
+
+      const cancel = (): void => finish(() => reject(new MediaError('ABORTED', SAFE_MESSAGES.ABORTED)));
+
+      this.sessionStateListeners.add(listener);
+      this.connectedWaiters.add(cancel);
+      onAbort = (): void => finish(() => reject(new MediaError('ABORTED', SAFE_MESSAGES.ABORTED)));
+      if (options?.signal !== undefined) {
+        if (options.signal.aborted) {
+          onAbort();
+          return;
+        }
+        options.signal.addEventListener('abort', onAbort, { once: true });
+      }
+      timer = this.clock.setTimeout(() => {
+        finish(() => reject(new MediaError('MEDIA_OPERATION_TIMEOUT', SAFE_MESSAGES.MEDIA_OPERATION_TIMEOUT)));
+      }, timeoutMs);
+    });
   }
 
   // ------------------------------------------------------------------

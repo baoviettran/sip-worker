@@ -248,6 +248,11 @@ export class FakePeerConnection {
     this.createOfferCalls.push(options);
     if (options?.iceRestart === true) {
       this.iceGatheringState = 'new';
+    } else if (this.localDescription !== null) {
+      // A re-negotiation on a session that already set a local description
+      // starts a fresh ICE gathering phase (matches browser behavior). The
+      // first offer keeps whatever gathering state the test pre-set.
+      this.iceGatheringState = 'new';
     }
     const sdp = `v=0\no=sip-worker ${++this.offerCounter} 0 IN IP4 0.0.0.0\n` +
       `s=-\nm=audio 49170 RTP/AVP\n`;
@@ -351,4 +356,9 @@ export class FakePeerConnection {
 
 function nameOf(_o: object, _k: string): unknown {
   return (_o as Record<string, unknown>)[_k];
+}
+
+/** Complete ICE gathering on a fake peer connection (test convenience). */
+export function completeGathering(pc: FakePeerConnection): void {
+  pc._completeGathering();
 }

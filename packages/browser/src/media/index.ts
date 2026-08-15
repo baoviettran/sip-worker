@@ -8,7 +8,7 @@ export type { WebRtcMediaSessionDeps } from './session.js';
 export { createMediaPortPair } from './port-pair.js';
 export type { MediaPortPair } from './port-pair.js';
 export { WebRtcMediaManager } from './media-manager.js';
-export type { WebRtcMediaManagerDeps, MediaManagerClock } from './media-manager.js';
+export type { WebRtcMediaManagerDeps, MediaManagerClock, WaitForConnectedOptions } from './media-manager.js';
 export { RemoteAudioRenderer } from './remote-audio.js';
 export { BrowserMedia } from './browser-media.js';
 export type { BrowserMedia as BrowserMediaInterface } from './browser-media.js';

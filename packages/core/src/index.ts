@@ -95,6 +95,7 @@ export {
 } from './media/index.js';
 export type {
   MediaCommand,
+  MediaDirection,
   MediaMessage,
   MediaPort,
   MediaReply,

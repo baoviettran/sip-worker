@@ -1,6 +1,6 @@
 import type { Clock } from '../transport/index.js';
 import { SipError } from '../errors.js';
-import type { MediaMessage, MediaPort, MediaReply, MediaRequestMessage } from './protocol.js';
+import type { MediaDirection, MediaMessage, MediaPort, MediaReply, MediaRequestMessage } from './protocol.js';
 import { MediaError, MEDIA_ERROR_CODES } from './errors.js';
 import type { MediaErrorCode } from './errors.js';
 
@@ -94,13 +94,37 @@ export class WorkerMediaController {
   /**
    * Request a local SDP offer for the given session. When `options.iceRestart`
    * is true the offer asks for a forced ICE restart; omitted (or false) leaves
-   * the existing transport in place.
+   * the existing transport in place. When `options.direction` is present the
+   * offer stages a directional re-negotiation (the transceiver direction is set
+   * before the offer is created); omitted keeps the current direction.
    */
-  createOffer(sessionId: string, options?: { iceRestart?: boolean }): Promise<string> {
-    const command: MediaRequestMessage = options?.iceRestart
-      ? { type: 'createOffer', requestId: requestId(), sessionId, iceRestart: true }
-      : { type: 'createOffer', requestId: requestId(), sessionId };
+  createOffer(sessionId: string, options?: { iceRestart?: boolean; direction?: MediaDirection }): Promise<string> {
+    const command: MediaRequestMessage = {
+      type: 'createOffer',
+      requestId: requestId(),
+      sessionId,
+      ...(options?.iceRestart === true ? { iceRestart: true as const } : {}),
+      ...(options?.direction !== undefined ? { direction: options.direction } : {}),
+    };
     return this.sendAndAwait<string>(command);
+  }
+
+  /**
+   * Confirm a staged direction transaction after the remote description for the
+   * negotiated offer has been applied. Clears the staging so the staged
+   * direction becomes the confirmed direction.
+   */
+  commitDirection(sessionId: string): Promise<void> {
+    return this.sendAndAwait<void>({ type: 'commitDirection', requestId: requestId(), sessionId });
+  }
+
+  /**
+   * Abort a staged direction transaction: the main side reverts the local
+   * signaling state, restores the confirmed transceiver direction, and clears
+   * the staging.
+   */
+  rollbackDirection(sessionId: string): Promise<void> {
+    return this.sendAndAwait<void>({ type: 'rollbackDirection', requestId: requestId(), sessionId });
   }
 
   /** Request an SDP answer from the given remote offer. */

@@ -120,6 +120,78 @@ describe('WorkerMediaController serialization', () => {
     expect('iceRestart' in sent ? sent.iceRestart : undefined).toBeUndefined();
   });
 
+  it('posts a clone-safe direction on a directional createOffer', () => {
+    const { controller, port } = makeBridge();
+    controller.createOffer('session-1', { direction: 'sendonly' });
+    const sent = firstDelivered(port);
+    expect(sent).toMatchObject({
+      type: 'createOffer',
+      requestId: expect.any(String),
+      sessionId: 'session-1',
+      direction: 'sendonly',
+    });
+    // A directional offer with no explicit restart carries NO iceRestart key:
+    // the conditional spread leaves the absence guarantee intact.
+    expect('iceRestart' in sent).toBe(false);
+    // Direction stays plain data and structured-clone safe.
+    expect(() => structuredClone(sent)).not.toThrow();
+  });
+
+  it('leaves direction absent on a plain createOffer', () => {
+    const { controller, port } = makeBridge();
+    controller.createOffer('session-1');
+    const sent = firstDelivered(port);
+    expect(sent.type).toBe('createOffer');
+    expect('direction' in sent ? sent.direction : undefined).toBeUndefined();
+  });
+
+  it('posts both iceRestart and direction on a restarting directional offer', () => {
+    const { controller, port } = makeBridge();
+    controller.createOffer('session-1', { iceRestart: true, direction: 'inactive' });
+    const sent = firstDelivered(port);
+    expect(sent).toMatchObject({ type: 'createOffer', iceRestart: true, direction: 'inactive' });
+    expect(() => structuredClone(sent)).not.toThrow();
+  });
+
+  it('emits a commitDirection command and resolves void on the matching result', async () => {
+    const { controller, port } = makeBridge();
+    const done = controller.commitDirection('session-1');
+    const sent = firstDelivered(port);
+    expect(sent.type).toBe('commitDirection');
+    expect(sent.sessionId).toBe('session-1');
+    expect(() => structuredClone(sent)).not.toThrow();
+    port.deliver({ type: 'mediaResult', requestId: sent.requestId, sessionId: 'session-1' });
+    await expect(done).resolves.toBeUndefined();
+  });
+
+  it('emits a rollbackDirection command and resolves void on the matching result', async () => {
+    const { controller, port } = makeBridge();
+    const done = controller.rollbackDirection('session-1');
+    const sent = firstDelivered(port);
+    expect(sent.type).toBe('rollbackDirection');
+    expect(sent.sessionId).toBe('session-1');
+    expect(() => structuredClone(sent)).not.toThrow();
+    port.deliver({ type: 'mediaResult', requestId: sent.requestId, sessionId: 'session-1' });
+    await expect(done).resolves.toBeUndefined();
+  });
+
+  it('carries the operation name for a failing commitDirection', async () => {
+    const { controller, port } = makeBridge();
+    const done = controller.commitDirection('session-1');
+    const sent = firstDelivered(port);
+    port.deliver({
+      type: 'mediaError',
+      requestId: sent.requestId,
+      sessionId: 'session-1',
+      message: 'no staged direction',
+      code: 'INVALID_STATE',
+    });
+    const err = await done.catch((e: unknown) => e) as MediaError;
+    expect(err.code).toBe('INVALID_STATE');
+    expect(err.sessionId).toBe('session-1');
+    expect(err.operation).toBe('commitDirection');
+  });
+
   it('resolves createOffer to STUB_SDP when the matching result arrives', async () => {
     const { controller, port } = makeBridge();
     const offer = controller.createOffer('session-1');
@@ -384,6 +456,30 @@ describe('StubMainMediaHandler', () => {
     expect(handler.offers('sess-plain')).toBe(STUB_SDP);
   });
 
+  it('records the direction carried on a directional createOffer', () => {
+    const port = new FakePort();
+    const handler = new StubMainMediaHandler(port);
+    port.deliver({ type: 'createOffer', requestId: 'req-d', sessionId: 'sess', direction: 'sendonly' });
+    expect(handler.direction('sess')).toBe('sendonly');
+    expect(handler.offers('sess')).toBe(STUB_SDP);
+  });
+
+  it('acknowledges commitDirection with a void mediaResult', () => {
+    const port = new FakePort();
+    new StubMainMediaHandler(port);
+    port.deliver({ type: 'commitDirection', requestId: 'req-c', sessionId: 'sess' });
+    const reply = firstDelivered(port);
+    expect(reply).toStrictEqual({ type: 'mediaResult', requestId: 'req-c', sessionId: 'sess' });
+  });
+
+  it('acknowledges rollbackDirection with a void mediaResult', () => {
+    const port = new FakePort();
+    new StubMainMediaHandler(port);
+    port.deliver({ type: 'rollbackDirection', requestId: 'req-r', sessionId: 'sess' });
+    const reply = firstDelivered(port);
+    expect(reply).toStrictEqual({ type: 'mediaResult', requestId: 'req-r', sessionId: 'sess' });
+  });
+
   it('records remote SDP for createAnswer and setRemote', () => {
     const port = new FakePort();
     const handler = new StubMainMediaHandler(port);
@@ -428,6 +524,15 @@ describe('StubMainMediaHandler', () => {
     expect(handler.remoteSdp('sess')).toBeUndefined();
     expect(handler.offers('sess')).toBeUndefined();
   });
+
+  it('drops the recorded direction after closeSession', () => {
+    const port = new FakePort();
+    const handler = new StubMainMediaHandler(port);
+    port.deliver({ type: 'createOffer', requestId: 'req-1', sessionId: 'sess', direction: 'inactive' });
+    expect(handler.direction('sess')).toBe('inactive');
+    port.deliver({ type: 'closeSession', sessionId: 'sess' });
+    expect(handler.direction('sess')).toBeUndefined();
+  });
 });
 
 describe('WorkerMediaController bounded lifecycle', () => {
@@ -458,6 +563,35 @@ describe('WorkerMediaController bounded lifecycle', () => {
       expect(controller.pendingRequestCount).toBe(0);
       expect(clock.pending()).toBe(0);
     }
+    controller.close();
+    expect(controller.pendingRequestCount).toBe(0);
+    expect(clock.pending()).toBe(0);
+  });
+
+  it('returns pending requests and timers to baseline for a commitDirection cycle', async () => {
+    const clock = new FakeClock();
+    const { controller, port } = makeBridge({ clock, deadlineMs: 1000 });
+    expect(controller.pendingRequestCount).toBe(0);
+    expect(clock.pending()).toBe(0);
+
+    const done = controller.commitDirection('session-1');
+    const sent = lastDelivered(port);
+    expect(sent.type).toBe('commitDirection');
+    expect(controller.pendingRequestCount).toBe(1);
+    expect(clock.pending()).toBe(1); // the armed deadline timer
+    port.deliver({ type: 'mediaResult', requestId: sent.requestId, sessionId: 'session-1' });
+    await expect(done).resolves.toBeUndefined();
+    expect(controller.pendingRequestCount).toBe(0);
+    expect(clock.pending()).toBe(0);
+
+    const rolled = controller.rollbackDirection('session-1');
+    const rollSent = lastDelivered(port);
+    expect(rollSent.type).toBe('rollbackDirection');
+    controller.closeSession('session-1');
+    await expect(rolled).rejects.toMatchObject({ code: 'MEDIA_UNAVAILABLE' });
+    expect(controller.pendingRequestCount).toBe(0);
+    expect(clock.pending()).toBe(0);
+
     controller.close();
     expect(controller.pendingRequestCount).toBe(0);
     expect(clock.pending()).toBe(0);

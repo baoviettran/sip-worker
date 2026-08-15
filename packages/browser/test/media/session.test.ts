@@ -4,6 +4,7 @@ import type { WebRtcMediaSessionDeps } from '../../src/media/session.js';
 import type { BrowserMediaEventMap } from '../../src/media/types.js';
 import { FakePeerConnection } from '../support/fake-media-environment.js';
 import { FakeMediaEnvironment } from '../support/fake-media-environment.js';
+import { completeGathering } from '../support/fake-media-environment.js';
 
 /** Injectable clock driving the ICE-gathering deadline deterministically. */
 class FakeClock {
@@ -449,5 +450,135 @@ describe('WebRtcMediaSession close', () => {
     expect(track.stopped).toBe(true); // late track reclaimed
     expect(env.peerConnectionCalls).toHaveLength(0); // NO peer connection created (late PC would leak)
     expect(stateTransitions(recorder).at(-1)).toBe('closed'); // no closed->negotiating repost
+  });
+});
+
+describe('WebRtcMediaSession directional offers', () => {
+  it('stages a direction on the transceiver and returns complete SDP after gathering', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    const staged = session.createDirectionalOffer('sendonly');
+    await flush();
+    expect(pc.transceivers[0]!.direction).toBe('sendonly');
+    completeGathering(pc);
+    const sdp = await staged;
+    expect(sdp).toContain('a=candidate:');
+    expect(sdp.length).toBeGreaterThan(0);
+    // A direction offer publishes NO hold state: no remoteAudio/hold events.
+    expect((session as unknown as { stagedDirection?: string }).stagedDirection).toBe('sendonly');
+    expect((session as unknown as { confirmedDirection?: string }).confirmedDirection).toBe('sendrecv');
+  });
+
+  it('rolls the staged direction back with setLocalDescription({type: rollback})', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    const staged = session.createDirectionalOffer('sendonly');
+    await completeGathering(pc);
+    await staged;
+    expect(pc.transceivers[0]!.direction).toBe('sendonly');
+    await session.rollbackDirection();
+    expect(pc.setLocalCalls.at(-1)).toMatchObject({ type: 'rollback' });
+    expect(pc.transceivers[0]!.direction).toBe('sendrecv');
+    expect((session as unknown as { stagedDirection?: string }).stagedDirection).toBeUndefined();
+    expect((session as unknown as { confirmedDirection?: string }).confirmedDirection).toBe('sendrecv');
+  });
+
+  it('commits the staged direction and clears the stage', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    const staged = session.createDirectionalOffer('sendonly');
+    await completeGathering(pc);
+    await staged;
+    await session.setRemote('v=0\no=remote 1 1 IN IP4 0.0.0.0\ns=-\nm=audio 5004 RTP/AVP\n');
+    await session.commitDirection();
+    expect((session as unknown as { confirmedDirection?: string }).confirmedDirection).toBe('sendonly');
+    expect((session as unknown as { stagedDirection?: string }).stagedDirection).toBeUndefined();
+    expect(pc.transceivers[0]!.direction).toBe('sendonly');
+  });
+
+  it('commit with nothing staged is a safe no-op that keeps sendrecv', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    await session.commitDirection();
+    expect((session as unknown as { confirmedDirection?: string }).confirmedDirection).toBe('sendrecv');
+    expect((session as unknown as { stagedDirection?: string }).stagedDirection).toBeUndefined();
+    expect(pc.transceivers[0]!.direction).toBe('sendrecv');
+  });
+
+  it('a rollback setLocalDescription failure is terminal NEGOTIATION_FAILED with a clean stage', async () => {
+    const { session, pc, recorder } = setup();
+    await fullOffer(session, pc);
+    const staged = session.createDirectionalOffer('sendonly');
+    await completeGathering(pc);
+    await staged;
+    pc.setLocalDescription = async (): Promise<void> => {
+      throw new Error('rollback rejected');
+    };
+    await expect(session.rollbackDirection()).rejects.toMatchObject({ code: 'NEGOTIATION_FAILED' });
+    expect(failureCode(recorder)).toBe('NEGOTIATION_FAILED');
+    expect(session.currentState).toBe('failed');
+    expect((session as unknown as { stagedDirection?: string }).stagedDirection).toBeUndefined();
+    expect(pc.closed).toBe(true);
+  });
+
+  it('clears a staged direction when a later setRemote failure fails the session', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    const staged = session.createDirectionalOffer('sendonly');
+    await completeGathering(pc);
+    await staged;
+    expect((session as unknown as { stagedDirection?: string }).stagedDirection).toBe('sendonly');
+    pc._rejectNextRemote();
+    await expect(session.setRemote('v=0\no=remote 1 1 IN IP4 0.0.0.0\ns=-\nm=audio 5004 RTP/AVP\n'))
+      .rejects.toMatchObject({ code: 'REMOTE_DESCRIPTION_REJECTED' });
+    // A terminal failure must not leave a stale staged direction behind.
+    expect((session as unknown as { stagedDirection?: string }).stagedDirection).toBeUndefined();
+    expect(session.currentState).toBe('failed');
+  });
+
+  it('rejects an in-flight rollback with ABORTED when the session closes during it', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    const staged = session.createDirectionalOffer('sendonly');
+    await completeGathering(pc);
+    await staged;
+    let releaseSetLocal!: (v: void) => void;
+    const gate = new Promise<void>((resolve) => { releaseSetLocal = resolve; });
+    pc.setLocalDescription = (): Promise<void> => gate;
+    const rollback = session.rollbackDirection();
+    await flush(); // rollback now awaiting the gated setLocalDescription
+    session.close();
+    releaseSetLocal();
+    await expect(rollback).rejects.toMatchObject({ code: 'ABORTED' });
+    expect((session as unknown as { stagedDirection?: string }).stagedDirection).toBeUndefined();
+  });
+});
+
+describe('WebRtcMediaSession remote direction', () => {
+  it('exposes the remote direction from a sendonly remote offer', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    await session.setRemote(
+      'v=0\no=remote 1 1 IN IP4 0.0.0.0\ns=-\nm=audio 5004 RTP/AVP 0\na=sendonly\n',
+      'offer',
+    );
+    expect(session.remoteDirection).toBe('sendonly');
+  });
+
+  it('exposes the remote direction from an inactive remote offer', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    await session.setRemote(
+      'v=0\no=remote 1 1 IN IP4 0.0.0.0\ns=-\nm=audio 5004 RTP/AVP 0\na=inactive\n',
+      'offer',
+    );
+    expect(session.remoteDirection).toBe('inactive');
+  });
+
+  it('stays undefined when the remote offer carries no direction attribute', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    await session.setRemote('v=0\no=remote 1 1 IN IP4 0.0.0.0\ns=-\nm=audio 5004 RTP/AVP\n', 'offer');
+    expect(session.remoteDirection).toBeUndefined();
   });
 });

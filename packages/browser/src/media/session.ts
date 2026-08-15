@@ -17,6 +17,7 @@
  */
 
 import { MediaError } from '@sip-worker/core';
+import type { MediaDirection } from '@sip-worker/core';
 import type { BrowserMediaEventMap, MediaSessionState } from './types.js';
 import { DEFAULT_ICE_GATHERING_TIMEOUT_MS } from './types.js';
 import type { BrowserMediaEnvironment, BrowserMediaOptions } from './types.js';
@@ -67,6 +68,20 @@ export class WebRtcMediaSession {
 
   private state: MediaSessionState = 'new';
   private closed = false;
+
+  /**
+   * The last confirmed negotiated direction. The transceiver always matches
+   * this between direction transactions; a staged direction never survives a
+   * commit/rollback/failure.
+   */
+  private confirmedDirection: MediaDirection = 'sendrecv';
+  /**
+   * A direction staged in a pending negotiation. Cleared on commit, rollback,
+   * failure, or close — no half-staged direction survives.
+   */
+  private stagedDirection: MediaDirection | undefined;
+  /** The direction the remote peer declared in its most recent description. */
+  private remoteDirectionValue: MediaDirection | 'recvonly' | undefined;
 
   /** The single peer connection this session owns for its whole life. */
   private pc: RTCPeerConnection | null = null;
@@ -125,6 +140,16 @@ export class WebRtcMediaSession {
     return this.state;
   }
 
+  /**
+   * The direction the remote peer declared in its most recent applied remote
+   * description, when the SDP carries an explicit audio direction attribute.
+   * `'recvonly'` (a remote that only receives) is observable but is not a
+   * local offer direction, so it falls outside {@link MediaDirection}.
+   */
+  get remoteDirection(): MediaDirection | 'recvonly' | undefined {
+    return this.remoteDirectionValue;
+  }
+
   private transition(next: MediaSessionState, reason?: StateReason): void {
     if (this.state === next) return;
     const previous = this.state;
@@ -140,6 +165,7 @@ export class WebRtcMediaSession {
 
   private fail(error: MediaError): void {
     if (this.state === 'failed' || this.state === 'closed') return;
+    this.stagedDirection = undefined; // no half-staged direction survives a failure
     this.transition('failed', error.code);
     this.emitter.emit('mediaFailed', {
       type: 'mediaFailed',
@@ -239,6 +265,79 @@ export class WebRtcMediaSession {
   }
 
   /**
+   * Stage a directional re-negotiation on an ACTIVE session: set the
+   * transceiver direction, create and apply the complete local offer, and wait
+   * for ICE gathering before returning the SDP. The direction is STAGED, not
+   * confirmed — {@link commitDirection} confirms it after the remote
+   * description applies, and {@link rollbackDirection} reverts it. Publishing
+   * hold state is deliberately out of scope here (hold is a later control
+   * task). Any failure is terminal `NEGOTIATION_FAILED` with no staged
+   * direction surviving.
+   */
+  async createDirectionalOffer(direction: MediaDirection): Promise<string> {
+    return this.runNegotiation(async () => {
+      if (this.pc === null || this.transceiver === null) {
+        throw this.invalidState('no active session');
+      }
+      try {
+        this.stagedDirection = direction;
+        this.transceiver.direction = direction;
+        this.applyCodecs();
+        const offer = await this.pc!.createOffer();
+        await this.setLocalAndWait(offer);
+        return this.completeLocalSdp('offer');
+      } catch (error) {
+        this.stagedDirection = undefined;
+        this.releaseAfterFailure();
+        throw error;
+      }
+    });
+  }
+
+  /**
+   * Confirm a staged direction transaction: the staged direction becomes the
+   * confirmed direction and the stage clears. A commit with nothing staged is
+   * a safe no-op (the confirmed direction stays as-is). Callers sequence this
+   * AFTER the remote description for the negotiated offer is successfully
+   * applied.
+   */
+  async commitDirection(): Promise<void> {
+    return this.runNegotiation(async () => {
+      if (this.pc === null) throw this.invalidState('no active session');
+      if (this.stagedDirection === undefined) return;
+      this.confirmedDirection = this.stagedDirection;
+      this.stagedDirection = undefined;
+    });
+  }
+
+  /**
+   * Abort a staged direction transaction: revert the local signaling state via
+   * `setLocalDescription({type:'rollback'})`, restore the confirmed transceiver
+   * direction, and clear the stage. A rollback with nothing staged is a safe
+   * no-op. A rollback failure is terminal `NEGOTIATION_FAILED`; no
+   * half-staged direction survives.
+   */
+  async rollbackDirection(): Promise<void> {
+    return this.runNegotiation(async () => {
+      if (this.pc === null || this.transceiver === null) {
+        throw this.invalidState('no active session');
+      }
+      if (this.stagedDirection === undefined) return;
+      try {
+        this.transceiver.direction = this.confirmedDirection;
+        await this.pc!.setLocalDescription({ type: 'rollback' });
+        if (this.closed) throw this.aborted('rollback');
+        this.stagedDirection = undefined;
+      } catch (error) {
+        this.stagedDirection = undefined;
+        const err = this.toMediaError(error, 'NEGOTIATION_FAILED');
+        this.fail(err);
+        throw err;
+      }
+    });
+  }
+
+  /**
    * Transactionally replace the active microphone track: replace the attached
    * track, commit the new selection, then stop the old track. Any earlier failure
    * rolls back — the old track stays attached and the new track is stopped — and
@@ -290,6 +389,7 @@ export class WebRtcMediaSession {
     this.opSeq += 1; // invalidate every in-flight operation
     this.waitSeq += 1; // invalidate every in-flight waiter
     this.negotiating = false;
+    this.stagedDirection = undefined; // no half-staged direction survives close
     this.teardown();
     if (this.state !== 'failed') {
       this.transition('closed');
@@ -444,6 +544,10 @@ export class WebRtcMediaSession {
     }
     try {
       await this.pc!.setRemoteDescription({ type, sdp });
+      // Expose the direction the remote peer declared. Read-only SDP parse —
+      // no SDP text is ever edited. `recvonly` is observable but not a local
+      // offer direction, so it falls outside the typed `MediaDirection` union.
+      this.remoteDirectionValue = parseRemoteDirection(sdp);
     } catch {
       throw this.remoteRejected();
     }
@@ -608,6 +712,30 @@ export class WebRtcMediaSession {
       'negotiation',
     );
   }
+}
+
+/**
+ * The audio direction a remote description declares, or undefined when the
+ * first `m=audio` section carries no explicit direction attribute. Read-only:
+ * the session never edits SDP text.
+ */
+function parseRemoteDirection(sdp: string): MediaDirection | 'recvonly' | undefined {
+  let inAudio = false;
+  for (const raw of sdp.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line.startsWith('m=')) {
+      inAudio = /^m=audio(?:[ \t]|$)/.test(line);
+      continue;
+    }
+    if (!inAudio) continue;
+    if (
+      line === 'a=sendrecv' || line === 'a=sendonly'
+      || line === 'a=recvonly' || line === 'a=inactive'
+    ) {
+      return line.slice(2) as MediaDirection | 'recvonly';
+    }
+  }
+  return undefined;
 }
 
 /** The first audio track of a directly-owned media stream, if any. */

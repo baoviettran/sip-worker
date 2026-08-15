@@ -1,4 +1,4 @@
-import type { MediaMessage, MediaPort, MediaReply } from './protocol.js';
+import type { MediaDirection, MediaMessage, MediaPort, MediaReply } from './protocol.js';
 import { STUB_SDP } from './protocol.js';
 
 /**
@@ -11,6 +11,7 @@ export class StubMainMediaHandler {
   private readonly remoteBySession = new Map<string, string>();
   private readonly closedSessionsSet = new Set<string>();
   private readonly restartRequests = new Set<string>();
+  private readonly directionsBySession = new Map<string, MediaDirection>();
   private readonly detach: () => void;
   private closed = false;
 
@@ -40,6 +41,11 @@ export class StubMainMediaHandler {
     return this.restartRequests.has(sessionId);
   }
 
+  /** The most recent direction a createOffer for the session carried, if any. */
+  direction(sessionId: string): MediaDirection | undefined {
+    return this.directionsBySession.get(sessionId);
+  }
+
   /** Stop listening; further commands are ignored. */
   unsubscribe(): void {
     this.closed = true;
@@ -51,6 +57,7 @@ export class StubMainMediaHandler {
     if (message.type === 'createOffer') {
       this.offersBySession.set(message.sessionId, STUB_SDP);
       if (message.iceRestart) this.restartRequests.add(message.sessionId);
+      if (message.direction !== undefined) this.directionsBySession.set(message.sessionId, message.direction);
       this.reply({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId, sdp: STUB_SDP });
       return;
     }
@@ -64,12 +71,19 @@ export class StubMainMediaHandler {
       this.reply({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId });
       return;
     }
+    if (message.type === 'commitDirection' || message.type === 'rollbackDirection') {
+      // Direction transactions are acknowledged with a void mediaResult: the
+      // stub owns no real transceiver state to commit or roll back.
+      this.reply({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId });
+      return;
+    }
     if (message.type === 'closeSession') {
       // Fire-and-forget: record the close, drop per-session state, emit no reply.
       this.closedSessionsSet.add(message.sessionId);
       this.offersBySession.delete(message.sessionId);
       this.remoteBySession.delete(message.sessionId);
       this.restartRequests.delete(message.sessionId);
+      this.directionsBySession.delete(message.sessionId);
       return;
     }
   }

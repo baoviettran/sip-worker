@@ -26,15 +26,40 @@ export const STUB_SDP = [
   '',
 ].join('\r\n');
 
+/**
+ * The direction an audio transceiver offers/negotiates. Only the three
+ * structured-clone-safe plain string values below are valid; a direction offer
+ * stages the transceiver direction but publishes no hold state (hold is a
+ * separate concern layered on top in later control tasks).
+ */
+export type MediaDirection = 'sendrecv' | 'sendonly' | 'inactive';
+
 export type MediaCommand =
   /**
    * Request a local SDP offer. `iceRestart`, when true, asks the media layer to
    * force an ICE restart on the next negotiation; omitted/false keeps the
-   * current transport. Plain-data and structured-clone safe.
+   * current transport. `direction`, when present, stages a directional
+   * re-negotiation (the transceiver direction is set before the offer is
+   * created); omitted keeps the current direction. Plain-data and
+   * structured-clone safe.
    */
-  | { type: 'createOffer'; requestId: string; sessionId: string; iceRestart?: boolean }
+  | { type: 'createOffer'; requestId: string; sessionId: string; iceRestart?: boolean; direction?: MediaDirection }
   | { type: 'createAnswer'; requestId: string; sessionId: string; remoteSdp: string }
   | { type: 'setRemote'; requestId: string; sessionId: string; remoteSdp: string }
+  /**
+   * Confirm a staged direction transaction after the remote description for the
+   * negotiated offer has been applied. Clears the staging so the staged
+   * direction becomes the confirmed direction. Plain-data and structured-clone
+   * safe.
+   */
+  | { type: 'commitDirection'; requestId: string; sessionId: string }
+  /**
+   * Abort a staged direction transaction: revert the local signaling state
+   * (`setLocalDescription({type:'rollback'})`), restore the confirmed
+   * transceiver direction, and clear the staging. Plain-data and
+   * structured-clone safe.
+   */
+  | { type: 'rollbackDirection'; requestId: string; sessionId: string }
   /**
    * Fire-and-forget notification that the session is done. Carries no
    * requestId and expects no reply: the main side releases per-session state.
