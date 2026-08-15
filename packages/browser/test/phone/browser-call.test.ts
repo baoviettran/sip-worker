@@ -207,3 +207,93 @@ describe('BrowserCall — per-call lifecycle', () => {
     await phone.dispose();
   });
 });
+
+describe('BrowserCall — setMuted (exact microphone mute ownership)', () => {
+  it('mutes the local track, emits one immutable mutedChanged, survives replacement, and never touches remote tracks', async () => {
+    const h = buildPhone();
+    const { phone, pc } = h;
+    await phone.connect();
+    const call = phone.createCall('sip:bob@example.com') as OutgoingBrowserCall;
+    const start = call.start();
+    await answerInviteAndConnectMedia();
+    await start;
+    expect(call.state).toBe('established');
+
+    const mutedEvents: BrowserCallEventMap['mutedChanged'][] = [];
+    call.on('mutedChanged', (event) => { mutedEvents.push(event); });
+    const localTrack = pc.transceivers[0]!.sender.track as unknown as { enabled: boolean };
+    const remoteTracks = [pc._emitRemoteAudioTrack() as unknown as { enabled: boolean }];
+    expect(localTrack.enabled).toBe(true);
+    expect(remoteTracks[0]!.enabled).toBe(true);
+
+    call.setMuted(true);
+    expect(localTrack.enabled).toBe(false);
+    expect(call.muted).toBe(true);
+    expect(mutedEvents).toEqual([
+      { type: 'mutedChanged', previous: false, muted: true },
+    ]);
+    call.setMuted(true); // idempotent: no event
+    expect(mutedEvents).toHaveLength(1);
+
+    // A replacement microphone must come in muted; remote tracks stay enabled.
+    const replacementTrack = { id: 'replacement-mic', enabled: true, stop(): void {} };
+    h.env.queuedUserMedia.push({
+      getTracks: () => [replacementTrack],
+      getAudioTracks: () => [replacementTrack],
+    } as unknown as MediaStream);
+    await h.manager.replaceActiveMicrophone('mic-2');
+    expect((pc.transceivers[0]!.sender.track as unknown as { enabled: boolean }).enabled).toBe(false);
+    expect(call.muted).toBe(true); // the call's committed boolean survives the swap
+    expect(remoteTracks.every((track) => track.enabled)).toBe(true);
+    await phone.dispose();
+  });
+
+  it('unmutes the local track and emits previous:true muted:false', async () => {
+    const { phone, pc } = buildPhone();
+    await phone.connect();
+    const call = phone.createCall('sip:bob@example.com') as OutgoingBrowserCall;
+    const start = call.start();
+    await answerInviteAndConnectMedia();
+    await start;
+
+    const mutedEvents: BrowserCallEventMap['mutedChanged'][] = [];
+    call.on('mutedChanged', (event) => { mutedEvents.push(event); });
+    const localTrack = pc.transceivers[0]!.sender.track as unknown as { enabled: boolean };
+    call.setMuted(true);
+    call.setMuted(false);
+    expect(localTrack.enabled).toBe(true);
+    expect(call.muted).toBe(false);
+    expect(mutedEvents).toEqual([
+      { type: 'mutedChanged', previous: false, muted: true },
+      { type: 'mutedChanged', previous: true, muted: false },
+    ]);
+    await phone.dispose();
+  });
+
+  it('throws canonical INVALID_STATE synchronously on a terminal call', async () => {
+    const { phone } = buildPhone();
+    await phone.connect();
+    const call = phone.createCall('sip:bob@example.com') as OutgoingBrowserCall;
+    const start = call.start();
+    await answerInviteAndConnectMedia();
+    await start;
+    expect(call.state).toBe('established');
+
+    emitRemoteBye();
+    await settle();
+    expect(call.state).toBe('terminated');
+    expect(() => call.setMuted(true))
+      .toThrowError(expect.objectContaining({ code: 'INVALID_STATE' }));
+    await phone.dispose();
+  });
+
+  it('throws canonical INVALID_STATE synchronously when no media session is active', async () => {
+    const { phone } = buildPhone();
+    await phone.connect();
+    const call = phone.createCall('sip:bob@example.com') as OutgoingBrowserCall;
+    // The call has never negotiated, so the manager owns no media session.
+    expect(() => call.setMuted(true))
+      .toThrowError(expect.objectContaining({ code: 'INVALID_STATE' }));
+    await phone.dispose();
+  });
+});

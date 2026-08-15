@@ -544,6 +544,24 @@ export class WebRtcMediaManager {
   }
 
   /**
+   * Mute/unmute the active session's microphone. Synchronous and idempotent:
+   * routes to the sole active session, which flips `localTrack.enabled` and
+   * emits a fresh `mutedChanged` only when the value changes. A disposed
+   * manager rejects `ABORTED`; no active session rejects canonical
+   * `INVALID_STATE` synchronously.
+   */
+  setMuted(muted: boolean): void {
+    if (this.disposed) {
+      throw new MediaError('ABORTED', 'The media operation was aborted.');
+    }
+    const session = this.owned;
+    if (session === null || this.reservedId === undefined) {
+      throw new MediaError('INVALID_STATE', 'No active media session is available.');
+    }
+    session.setMuted(muted);
+  }
+
+  /**
    * Transactionally replace the microphone during an ACTIVE call. Resolves the
    * current active session and delegates the acquire→replaceTrack→commit→stop
    * order (with rollback) to {@link WebRtcMediaSession.replaceMicrophone}, then

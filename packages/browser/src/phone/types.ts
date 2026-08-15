@@ -176,7 +176,7 @@ export interface BrowserCallEventMap {
   readonly mutedChanged: {
     readonly type: 'mutedChanged';
     readonly previous: boolean;
-    readonly state: boolean;
+    readonly muted: boolean;
   };
   readonly mediaStateChanged: {
     readonly type: 'mediaStateChanged';

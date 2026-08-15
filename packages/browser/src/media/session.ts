@@ -83,6 +83,18 @@ export class WebRtcMediaSession {
   /** The direction the remote peer declared in its most recent description. */
   private remoteDirectionValue: MediaDirection | 'recvonly' | undefined;
 
+  /**
+   * The persisted microphone mute preference. Survives device replacement and
+   * ICE restart; only {@link setMuted} writes it.
+   */
+  private mutedValue = false;
+  /**
+   * The local hold preference. Hold behaviour is a later control task; this
+   * field exists so {@link applyTrackEnabled} is the single source of truth
+   * both mute and hold share. `setMuted` only READS it, never writes it.
+   */
+  private localHoldValue = false;
+
   /** The single peer connection this session owns for its whole life. */
   private pc: RTCPeerConnection | null = null;
   private transceiver: RTCRtpTransceiver | null = null;
@@ -148,6 +160,11 @@ export class WebRtcMediaSession {
    */
   get remoteDirection(): MediaDirection | 'recvonly' | undefined {
     return this.remoteDirectionValue;
+  }
+
+  /** Whether the local microphone is muted (persisted, independent of hold). */
+  get muted(): boolean {
+    return this.mutedValue;
   }
 
   private transition(next: MediaSessionState, reason?: StateReason): void {
@@ -338,10 +355,46 @@ export class WebRtcMediaSession {
   }
 
   /**
+   * Set the persistent microphone mute preference synchronously and idempotently.
+   * Only {@link applyTrackEnabled} is touched: this NEVER stops, replaces,
+   * renegotiates, or modifies remote tracks. A repeated value emits nothing; a
+   * changed value emits one fresh (immutable) `mutedChanged` event. A terminal
+   * (failed/closed) session rejects canonical `INVALID_STATE`.
+   */
+  setMuted(muted: boolean): void {
+    if (this.closed || this.state === 'failed') {
+      throw this.invalidState('no active session');
+    }
+    if (muted === this.mutedValue) return;
+    const previous = this.mutedValue;
+    this.mutedValue = muted;
+    this.applyTrackEnabled();
+    this.emitter.emit('mutedChanged', {
+      type: 'mutedChanged',
+      sessionId: this.sessionId,
+      previous,
+      muted,
+    });
+  }
+
+  /**
+   * Apply the combined transmission formula to the attached local track. This is
+   * the single source of truth both mute (Task 10) and hold (Task 11) share:
+   * a track transmits only when it is neither muted nor locally held.
+   */
+  private applyTrackEnabled(): void {
+    if (this.localTrack !== null) {
+      this.localTrack.enabled = !this.mutedValue && !this.localHoldValue;
+    }
+  }
+
+  /**
    * Transactionally replace the active microphone track: replace the attached
    * track, commit the new selection, then stop the old track. Any earlier failure
    * rolls back — the old track stays attached and the new track is stopped — and
-   * the promise rejects.
+   * the promise rejects. A muted (or held) call stages the new track's enabled
+   * state BEFORE attach so no audio leaks between replaceTrack and commit, and
+   * re-applies it at commit so the preference survives the swap.
    */
   async replaceMicrophone(newTrack: MediaStreamTrack): Promise<void> {
     if (this.closed) throw this.aborted('replaceMicrophone');
@@ -355,6 +408,9 @@ export class WebRtcMediaSession {
     if (typeof sender.replaceTrack !== 'function') {
       throw this.invalidState('microphone replacement unavailable');
     }
+    // A muted (or held) call must never transmit: stage the new track's enabled
+    // state BEFORE attach so no audio leaks between replaceTrack and commit.
+    newTrack.enabled = !this.mutedValue && !this.localHoldValue;
     try {
       await sender.replaceTrack(newTrack);
     } catch (error) {
@@ -374,6 +430,7 @@ export class WebRtcMediaSession {
     }
     // Commit.
     this.localTrack = newTrack;
+    this.applyTrackEnabled();
     oldTrack.stop();
   }
 
@@ -449,6 +506,7 @@ export class WebRtcMediaSession {
     const track = firstAudioTrack(stream);
     if (track !== undefined) {
       this.localTrack = track;
+      this.applyTrackEnabled(); // a persisted mute/hold applies on acquisition
       if (typeof transceiver.sender.replaceTrack === 'function') {
         await transceiver.sender.replaceTrack(track);
       }

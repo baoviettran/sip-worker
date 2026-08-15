@@ -113,15 +113,19 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
   // Shared active methods.
   // ------------------------------------------------------------------
 
-  /** Mute/unmute the local microphone for the active call. */
-  setMuted(_muted: boolean): void {
-    // Task 10 wires the media-session mute path through the shared owner.
-    this.mutedValue = _muted;
-    this.emit('mutedChanged', {
-      type: 'mutedChanged',
-      previous: !_muted,
-      state: _muted,
-    });
+  /**
+   * Mute/unmute the local microphone for the active call. Routes synchronously
+   * to the media session, which is the source of truth: the session flips
+   * `localTrack.enabled` and emits `mutedChanged`, which
+   * {@link notifyMediaEvent} commits + forwards immutably. A terminal call, or
+   * a call with no owned media session, throws canonical `INVALID_STATE`
+   * synchronously.
+   */
+  setMuted(muted: boolean): void {
+    if (this.stateValue === 'terminated' || this.stateValue === 'failed') {
+      throw this.invalidCallState();
+    }
+    this.runtime.manager.setMuted(muted);
   }
 
   /** Place the call on hold (directional signalling staged in Task 11). */
@@ -217,7 +221,23 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
       this.emit('mediaFailed', value as BrowserCallEventMap['mediaFailed']);
     } else if (type === 'remoteAudio') {
       this.emit('remoteAudio', value as BrowserCallEventMap['remoteAudio']);
+    } else if (type === 'mutedChanged') {
+      const event = value as BrowserMediaEventMap['mutedChanged'];
+      if (event.sessionId !== this.mediaSessionId) return;
+      // The session accepted the change; commit the boolean and forward the
+      // event immutably (a fresh object per emission).
+      this.mutedValue = event.muted;
+      this.emit('mutedChanged', {
+        type: 'mutedChanged',
+        previous: event.previous,
+        muted: event.muted,
+      });
     }
+  }
+
+  /** The canonical synchronous error for a mute on a terminal/no-session call. */
+  private invalidCallState(): Error {
+    return Object.assign(new Error('The call is not active.'), { code: 'INVALID_STATE' });
   }
 
   protected observeOwnerOperation(

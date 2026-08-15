@@ -68,6 +68,10 @@ export interface BrowserMediaEventMap {
     readonly error: MediaError;
   };
   readonly deviceChanged: { readonly type: 'deviceChanged' };
+  readonly mutedChanged: {
+    readonly type: 'mutedChanged'; readonly sessionId: string;
+    readonly previous: boolean; readonly muted: boolean;
+  };
 }
 
 /** The named primary codecs the v0.5 media layer may order/narrow by MIME subtype. */

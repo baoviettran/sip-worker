@@ -59,11 +59,14 @@ class Recorder {
 interface RecTrack extends MediaStreamTrack { stopped: boolean; }
 function makeAudioTrack(): RecTrack {
   let stopped = false;
+  let enabled = true;
   return {
     get stopped(): boolean { return stopped; },
     set stopped(v: boolean) { stopped = v; },
     kind: 'audio', id: 'mic-track',
     get readyState(): MediaStreamTrackState { return stopped ? 'ended' : 'live'; },
+    get enabled(): boolean { return enabled; },
+    set enabled(v: boolean) { enabled = v; },
     stop(): void { stopped = true; },
   } as unknown as RecTrack;
 }
@@ -90,8 +93,10 @@ interface Setup {
 /** Build a manager; by default queues one mic stream + one fresh peer connection. */
 function setup(overrides?: { queued?: Array<MediaStream | Promise<MediaStream>> }): Setup {
   // The device manager's pre-check needs at least one audio input to pass.
+  // `mic-2` is present so a live replacement can be driven during a call.
   const env = new FakeMediaEnvironment([
     { deviceId: 'mic-1', label: 'Mic', groupId: 'g-1', kind: 'audioinput' },
+    { deviceId: 'mic-2', label: 'Mic 2', groupId: 'g-1', kind: 'audioinput' },
   ]);
   const clock = new FakeClock();
   const recorder = new Recorder();
@@ -670,5 +675,52 @@ describe('WebRtcMediaManager.waitForConnected', () => {
     manager.dispose();
     await expect(other).rejects.toMatchObject({ code: 'ABORTED' });
     expect(clock.pending()).toBe(0);
+  });
+});
+
+describe('WebRtcMediaManager.setMuted', () => {
+  it('routes mute to the active session and flips the attached local track', async () => {
+    const { manager, env, replies } = setup();
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'off-1', sessionId: 's1' });
+    await settle(manager, pc);
+    expect(replyFor(replies, 'off-1')!.type).toBe('mediaResult');
+    const local = pc.transceivers[0]!.sender.track as unknown as { enabled: boolean };
+    expect(local.enabled).toBe(true);
+    manager.setMuted(true);
+    expect(local.enabled).toBe(false);
+    manager.setMuted(false);
+    expect(local.enabled).toBe(true);
+  });
+
+  it('rejects mute with canonical INVALID_STATE synchronously when no active session', () => {
+    const { manager } = setup();
+    expect(() => manager.setMuted(true))
+      .toThrowError(expect.objectContaining({ code: 'INVALID_STATE' }));
+  });
+
+  it('keeps the replacement microphone muted and leaves remote tracks enabled', async () => {
+    const { manager, env, replies } = setup();
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'off-1', sessionId: 's1' });
+    await settle(manager, pc);
+    expect(replyFor(replies, 'off-1')!.type).toBe('mediaResult');
+    // Deliver a remote audio track so we can assert mute never touches it.
+    const remote = pc._emitRemoteAudioTrack() as unknown as { enabled: boolean };
+    expect(remote.enabled).toBe(true);
+    manager.setMuted(true);
+    expect(remote.enabled).toBe(true);
+
+    // A replacement device: queue a second mic stream, then swap it in.
+    const replacement = makeAudioTrack();
+    env.queuedUserMedia.push({
+      getTracks: () => [replacement],
+      getAudioTracks: () => [replacement],
+    } as unknown as MediaStream);
+    await manager.replaceActiveMicrophone('mic-2');
+    const local = pc.transceivers[0]!.sender.track as unknown as { enabled: boolean };
+    expect(local).toBe(replacement as unknown as { enabled: boolean });
+    expect(replacement.enabled).toBe(false); // replacement comes in muted
+    expect(remote.enabled).toBe(true); // remote tracks untouched by mute or swap
   });
 });

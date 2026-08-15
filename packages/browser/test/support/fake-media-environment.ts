@@ -146,9 +146,10 @@ function makeDefaultCapabilities(): RTCRtpCapabilities {
  * `restartIce`, remote (`ontrack`) delivery, and `close()`.
  */
 
-/** Fake audio track with stop/replace observability. */
+/** Fake audio track with stop/replace/enabled observability. */
 class FakeMediaStreamTrack {
   stopped = false;
+  enabled = true;
   readonly kind: string;
   readonly id: string;
   constructor(kind: string, public readonly label = `fake-${kind}-${Math.random().toString(36).slice(2)}`) {
@@ -156,8 +157,6 @@ class FakeMediaStreamTrack {
     this.id = label;
   }
   stop(): void { this.stopped = true; }
-  set enabled(_v: boolean) {}
-  get enabled(): boolean { return true; }
 }
 
 /** Fake stream over a caller-provided list of tracks. */

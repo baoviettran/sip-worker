@@ -60,12 +60,15 @@ interface RecTrack extends MediaStreamTrack {
 
 function makeAudioTrack(): RecTrack {
   let stopped = false;
+  let enabled = true;
   const track = {
     get stopped(): boolean { return stopped; },
     set stopped(v: boolean) { stopped = v; },
     kind: 'audio',
     id: 'mic-track',
     get readyState(): MediaStreamTrackState { return stopped ? 'ended' : 'live'; },
+    get enabled(): boolean { return enabled; },
+    set enabled(v: boolean) { enabled = v; },
     stop(): void { stopped = true; },
   };
   return track as unknown as RecTrack;
@@ -580,5 +583,154 @@ describe('WebRtcMediaSession remote direction', () => {
     await fullOffer(session, pc);
     await session.setRemote('v=0\no=remote 1 1 IN IP4 0.0.0.0\ns=-\nm=audio 5004 RTP/AVP\n', 'offer');
     expect(session.remoteDirection).toBeUndefined();
+  });
+});
+
+describe('WebRtcMediaSession.setMuted', () => {
+  function activeLocalTrack(session: WebRtcMediaSession): RecTrack {
+    return (session as unknown as { localTrack: RecTrack }).localTrack;
+  }
+
+  function mutedEvents(recorder: Recorder): Array<
+    Extract<BrowserMediaEventMap['mutedChanged'], { type: 'mutedChanged' }>
+  > {
+    return recorder.events.filter((e) => e.type === 'mutedChanged') as Array<
+      Extract<BrowserMediaEventMap['mutedChanged'], { type: 'mutedChanged' }>
+    >;
+  }
+
+  it('mutes the local track and emits one immutable mutedChanged; a repeated mute emits nothing', async () => {
+    const { session, pc, recorder } = setup();
+    await fullOffer(session, pc);
+    const local = activeLocalTrack(session);
+    expect(local.enabled).toBe(true);
+
+    session.setMuted(true);
+    expect(local.enabled).toBe(false);
+    expect((session as unknown as { mutedValue: boolean }).mutedValue).toBe(true);
+    expect(mutedEvents(recorder)).toEqual([
+      { type: 'mutedChanged', sessionId: 's1', previous: false, muted: true },
+    ]);
+
+    session.setMuted(true); // idempotent: same value, no event
+    expect(mutedEvents(recorder)).toHaveLength(1);
+  });
+
+  it('unmutes the local track and emits previous:true muted:false', async () => {
+    const { session, pc, recorder } = setup();
+    await fullOffer(session, pc);
+    const local = activeLocalTrack(session);
+    session.setMuted(true);
+    session.setMuted(false);
+    expect(local.enabled).toBe(true);
+    expect(mutedEvents(recorder)).toEqual([
+      { type: 'mutedChanged', sessionId: 's1', previous: false, muted: true },
+      { type: 'mutedChanged', sessionId: 's1', previous: true, muted: false },
+    ]);
+  });
+
+  it('emits a fresh immutable mutedChanged object on every change', async () => {
+    const { session, pc, recorder } = setup();
+    await fullOffer(session, pc);
+    session.setMuted(true);
+    session.setMuted(false);
+    const events = mutedEvents(recorder);
+    expect(events).toHaveLength(2);
+    expect(events[0]).not.toBe(events[1]); // distinct references, never reused
+  });
+
+  it('keeps the track disabled while held and combines mute with hold orthogonally', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    const local = activeLocalTrack(session);
+    const held = session as unknown as { localHoldValue: boolean };
+    held.localHoldValue = true; // Task 11 owns writing this; Task 10 only reads it
+
+    session.setMuted(true);
+    expect(local.enabled).toBe(false); // muted + held
+    session.setMuted(false);
+    expect(local.enabled).toBe(false); // held still disables the track
+    held.localHoldValue = false;
+    session.setMuted(true);
+    expect(local.enabled).toBe(false); // muted alone
+    session.setMuted(false);
+    expect(local.enabled).toBe(true); // neither muted nor held
+  });
+
+  it('persists the muted preference across an ICE restart', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    const local = activeLocalTrack(session);
+    session.setMuted(true);
+    expect(local.enabled).toBe(false);
+    pc._setIceConnection('connected');
+    const restart = session.restartIce();
+    await flush();
+    pc._completeGathering();
+    await restart;
+    expect(local.enabled).toBe(false); // mute survives the restart (track untouched)
+  });
+
+  it('applies mute without throwing while the local track is ending', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    const local = activeLocalTrack(session);
+    local.stop(); // readyState becomes 'ended' (device ended mid-call)
+    session.setMuted(true);
+    expect((session as unknown as { mutedValue: boolean }).mutedValue).toBe(true);
+    expect(local.enabled).toBe(false);
+    session.setMuted(false); // unmute after the track ended still no-ops cleanly
+    expect(local.enabled).toBe(true);
+  });
+
+  it('keeps the replacement track muted and restores the prior enabled state on rollback', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    const oldTrack = activeLocalTrack(session);
+    session.setMuted(true);
+    expect(oldTrack.enabled).toBe(false);
+
+    const newTrack = makeAudioTrack();
+    await session.replaceMicrophone(newTrack);
+    expect(activeLocalTrack(session)).toBe(newTrack);
+    expect(newTrack.enabled).toBe(false); // replacement comes in muted
+    expect(oldTrack.stopped).toBe(true);
+
+    // A failed replacement rolls back and restores the prior (muted) state.
+    const replacement = makeAudioTrack();
+    pc.transceivers[0]!.sender.failNextReplaceTrack = true;
+    await expect(session.replaceMicrophone(replacement))
+      .rejects.toMatchObject({ code: 'INTERNAL_ERROR' });
+    expect(activeLocalTrack(session)).toBe(newTrack);
+    expect(newTrack.enabled).toBe(false); // prior muted state preserved
+    expect(replacement.stopped).toBe(true);
+  });
+
+  it('restores the prior enabled state on rollback when unmuted', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    const oldTrack = activeLocalTrack(session);
+    expect(oldTrack.enabled).toBe(true);
+    const newTrack = makeAudioTrack();
+    pc.transceivers[0]!.sender.failNextReplaceTrack = true;
+    await expect(session.replaceMicrophone(newTrack))
+      .rejects.toMatchObject({ code: 'INTERNAL_ERROR' });
+    expect(activeLocalTrack(session)).toBe(oldTrack);
+    expect(oldTrack.enabled).toBe(true); // unmuted state preserved
+    expect(newTrack.stopped).toBe(true);
+  });
+
+  it('rejects INVALID_STATE on a closed or failed session', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    session.close();
+    expect(() => session.setMuted(true))
+      .toThrowError(expect.objectContaining({ code: 'INVALID_STATE' }));
+
+    const failed = setup();
+    await fullOffer(failed.session, failed.pc);
+    failed.pc._setIceConnection('failed'); // terminal
+    expect(() => failed.session.setMuted(true))
+      .toThrowError(expect.objectContaining({ code: 'INVALID_STATE' }));
   });
 });

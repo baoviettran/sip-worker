@@ -24,6 +24,7 @@ import {
   type SipResponseMessage,
 } from '@sip-worker/core';
 import { BrowserPhone } from '../../src/phone/browser-phone.js';
+import type { WebRtcMediaManager } from '../../src/media/media-manager.js';
 import type { BrowserWebSocketFactory, BrowserWebSocketLike } from '../../src/transport/ws.js';
 import type { BrowserLifecycleHost } from '../../src/recovery/browser-lifecycle.js';
 import type { BrowserPhoneOptions, ReconnectOptions } from '../../src/phone/types.js';
@@ -199,6 +200,8 @@ export interface PhoneHarness {
   readonly env: FakeMediaEnvironment;
   readonly pc: FakePeerConnection;
   readonly clock: ControlledClock;
+  /** The runtime's media manager, for driving in-call device replacement. */
+  readonly manager: WebRtcMediaManager;
 }
 
 interface BuildPhoneOptions {
@@ -221,6 +224,7 @@ export function buildPhone(options: BuildPhoneOptions = {}): PhoneHarness {
   const lifecycle = new FakeLifecycleHost();
   const env = new FakeMediaEnvironment([
     { deviceId: 'mic-1', label: 'Mic', groupId: 'g-1', kind: 'audioinput' },
+    { deviceId: 'mic-2', label: 'Mic 2', groupId: 'g-1', kind: 'audioinput' },
     { deviceId: 'spk-1', label: 'Speaker', groupId: 'g-2', kind: 'audiooutput' },
   ]);
   const pc = new FakePeerConnection();
@@ -270,6 +274,9 @@ export function buildPhone(options: BuildPhoneOptions = {}): PhoneHarness {
     env,
     pc,
     clock,
+    // The phone keeps its runtime private; the harness reaches the manager
+    // through it so tests can drive in-call device replacement directly.
+    manager: (phone as unknown as { runtime: { manager: WebRtcMediaManager } }).runtime.manager,
   };
   current = harness;
   return harness;
@@ -374,7 +381,7 @@ function localUriOf(fromOrTo: string): string {
 
 /** A media stream with a single microphone audio track (send-capable). */
 function makeAudioStream(): MediaStream {
-  const track = { id: 'mic-track', stop(): void {}, get enabled() { return true; }, set enabled(_v: boolean) {} };
+  const track = { id: 'mic-track', stop(): void {}, enabled: true };
   return { getTracks: () => [track], getAudioTracks: () => [track], stop(): void {} } as unknown as MediaStream;
 }
 
