@@ -9,6 +9,7 @@
 
 import type { BrowserMediaOptions, MediaSessionState } from '../media/index.js';
 import type { MediaError, MediaErrorCode } from '@sip-worker/core';
+import type { IncomingBrowserCall } from './browser-call.js';
 
 /**
  * Per-operation control options reused by every cancellable public mutation.
@@ -147,7 +148,7 @@ export interface BrowserPhoneEventMap {
   };
   readonly incomingCall: {
     readonly type: 'incomingCall';
-    readonly call: unknown; // IncomingBrowserCall — staged in a later task
+    readonly call: IncomingBrowserCall;
   };
   readonly failed: {
     readonly type: 'failed';

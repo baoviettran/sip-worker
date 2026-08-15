@@ -37,6 +37,18 @@ export { normalizeBrowserPhoneOptions } from './phone/index.js';
 export { DiagnosticRecorder, MAX_CONTEXT_LENGTH } from './phone/index.js';
 export type { DiagnosticRecorderOptions } from './phone/index.js';
 export {
+  PhoneRuntime,
+  BrowserPhone,
+  BrowserCall,
+  OutgoingBrowserCall,
+  IncomingBrowserCall,
+} from './phone/index.js';
+export type {
+  BrowserPhoneInit,
+  PhoneEnvironment,
+  PhoneRuntimeCoreOptions,
+} from './phone/index.js';
+export {
   DEFAULT_RECONNECT_OPTIONS,
   MAX_RECONNECT_ATTEMPTS,
   MAX_RECONNECT_DELAY_MS,
