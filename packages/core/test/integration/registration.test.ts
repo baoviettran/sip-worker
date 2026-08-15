@@ -133,12 +133,37 @@ describe('UserAgent registration integration', () => {
 
     // Simulate temporary transport disconnect (network outage, not close)
     transport.simulateDisconnect();
-    expect(ua.registerState).toBe('unregistered');
+    expect(ua.registerState).toBe('recovering');
 
     // Simulate transport reconnect — UA should re-register automatically
     transport.simulateReconnect();
     expect(server.requests.length).toBeGreaterThan(requestsBeforeReconnect);
     expect(ua.registerState).toBe('registered');
+
+    await ua.disconnect();
+  });
+
+  it('makes registration recovery an awaitable owned exchange', async () => {
+    const { ua, server, transport } = setup();
+    await ua.connect();
+    server.start();
+
+    await ua.register();
+    const callId = server.requests[0]!.headers.get('Call-ID');
+    expect(ua.registerState).toBe('registered');
+    const requestsBeforeRecovery = server.requests.length;
+
+    // Lose the transport: the UA marks registration recovery pending and the
+    // registered identity is preserved; then reconnect and await it explicitly.
+    transport.simulateDisconnect();
+    expect(ua.registerState).toBe('recovering');
+    transport.simulateReconnect();
+    await (ua as unknown as { recoverRegistration: () => Promise<void> }).recoverRegistration();
+
+    expect(ua.registerState).toBe('registered');
+    const recovery = server.requests[server.requests.length - 1]!;
+    expect(recovery.headers.get('Call-ID')).toBe(callId);
+    expect(server.requests.length).toBeGreaterThan(requestsBeforeRecovery);
 
     await ua.disconnect();
   });

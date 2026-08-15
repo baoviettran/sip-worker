@@ -1454,3 +1454,19 @@ describe('UserAgent truthful event surface', () => {
     expect(response.headers.get('CSeq')).toBe('2 INVITE');
   });
 });
+
+describe('UserAgent awaitable registration recovery', () => {
+  it('exposes an awaitable recoverRegistration() hook that resolves immediately when recovery is not pending', async () => {
+    const { ua } = setup({ liveness: new RecordingLiveness() });
+    await ua.connect();
+
+    const uaWithHook = ua as unknown as { recoverRegistration?: () => Promise<void> };
+    expect(typeof uaWithHook.recoverRegistration).toBe('function');
+    // With no reconnect intent pending, recovery resolves without a wire send and
+    // leaves the UA in its current (unregistered) state.
+    await uaWithHook.recoverRegistration!();
+    expect(ua.registerState).toBe('unregistered');
+
+    await ua.disconnect();
+  });
+});

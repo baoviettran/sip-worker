@@ -571,8 +571,8 @@ describe('Registrar', () => {
     const h = setup();
     await completeRegister(h, [{ status: 200 }]);
     h.registrar.onTransportDisconnected();
-    expect(h.registrar.state).toBe('unregistered');
-    const re = h.registrar.register();
+    expect(h.registrar.state).toBe('recovering');
+    const re = h.registrar.recover();
     await flush();
     respond(h, 200);
     await re;
@@ -822,5 +822,144 @@ describe('Registrar', () => {
     await expect(registration).rejects.toThrow(SipError);
     expect(h.sent).toHaveLength(1);
     expect(h.registrar.state).toBe('failed');
+  });
+
+  it('drives an awaitable recovery that preserves Call-ID and serializes', async () => {
+    const h = setup();
+    await completeRegister(h, [{ status: 200 }]);
+    const before = h.registrar.status();
+    h.registrar.onTransportDisconnected();
+    expect(h.registrar.state).toBe('recovering');
+
+    // A second recover() while a cycle is active returns the SAME promise, and
+    // recovery consumes exactly one CSeq per wire attempt (nextCSeq + 1).
+    const first = h.registrar.recover();
+    const second = h.registrar.recover();
+    expect(second).toBe(first);
+    await flush();
+    respond(h, 200, { expires: '120' });
+    await first;
+
+    const after = h.registrar.status();
+    expect(after.callId).toBe(before.callId);
+    expect(after.nextCSeq).toBeGreaterThan(before.nextCSeq);
+    expect(after.nextCSeq).toBe(before.nextCSeq + 1);
+    // One refresh only: the granted expiry arms a single refresh timer and the
+    // completed recovery client transaction has torn itself down.
+    await flush();
+    h.clock.advance(0);
+    await flush();
+    expect(h.clock.pending()).toBe(1);
+    expect(h.registrar.state).toBe('registered');
+  });
+
+  it('returns a resolved recovery when there was no transport loss', async () => {
+    const h = setup();
+    await completeRegister(h, [{ status: 200 }]);
+    await h.registrar.recover();
+    // No new wire attempt and no refresh churn: still registered, same identity.
+    expect(h.registrar.status()).toMatchObject({ state: 'registered', nextCSeq: 2 });
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it('fails recovery with REGISTRATION_RECOVERY_FAILED on a nonrecoverable final', async () => {
+    const h = setup();
+    await completeRegister(h, [{ status: 200 }]);
+    h.registrar.onTransportDisconnected();
+    const recovery = h.registrar.recover();
+    await flush();
+    respond(h, 403);
+    await expect(recovery).rejects.toMatchObject({ code: 'REGISTRATION_RECOVERY_FAILED' });
+    expect(h.registrar.state).toBe('failed');
+  });
+
+  it('an explicit unregister() cancels pending recovery intent before the removal REGISTER', async () => {
+    const h = setup();
+    await completeRegister(h, [{ status: 200 }]);
+    h.registrar.onTransportDisconnected();
+    const unregistration = h.registrar.unregister();
+    await flush();
+    const request = h.sent[h.sent.length - 1]!;
+    expect(request.headers.get('Contact')).toBe('*');
+    expect(h.registrar.state).toBe('unregistering');
+    respond(h, 200);
+    await unregistration;
+    expect(h.registrar.state).toBe('unregistered');
+    // Cancelled: a later recover() must not resurrect the canceled re-registration.
+    await h.registrar.recover();
+    expect(h.sent.map((r) => r.headers.get('Contact'))).toEqual([CONTACT, '*']);
+    expect(h.registrar.state).toBe('unregistered');
+  });
+
+  it('records recovering intent when the transport drops during a refresh', async () => {
+    const h = setup();
+    await completeRegister(h, [{ status: 200, over: { expires: '120' } }]);
+    // Let the armed refresh fire; leave it in flight (no answer) and drop.
+    h.clock.advance(60 * 1000);
+    await flush();
+    expect(h.registrar.state).toBe('registering');
+    h.registrar.onTransportDisconnected();
+    // The in-flight refresh exchange settles with a failure; recovery is pending.
+    expect(h.registrar.state).toBe('failed');
+    const recovery = h.registrar.recover();
+    await flush();
+    expect(h.sent).toHaveLength(3);
+    respond(h, 200, { expires: '120' });
+    await recovery;
+    expect(h.registrar.state).toBe('registered');
+  });
+
+  it('records failed when the transport drops during an in-flight unregister', async () => {
+    const h = setup();
+    await completeRegister(h, [{ status: 200 }]);
+    const unregistration = h.registrar.unregister();
+    await flush();
+    h.registrar.onTransportDisconnected();
+    await expect(Promise.race([unregistration, new Promise((resolve) => setTimeout(resolve, 20))]))
+      .rejects.toMatchObject({ code: 'TRANSPORT_FAILED' });
+    expect(h.registrar.state).toBe('failed');
+  });
+
+  it('emits a state event for every effective transition', async () => {
+    const h = setup();
+    const observed: string[] = [];
+    const readState = (): void => { observed.push(h.registrar.state); };
+
+    const registration = h.registrar.register();
+    await flush();
+    readState(); // registering
+    expect(h.registrar.state).toBe('registering');
+    respond(h, 200);
+    await registration;
+    readState(); // registered
+
+    h.registrar.onTransportDisconnected();
+    readState(); // recovering
+
+    const recovery = h.registrar.recover();
+    await flush();
+    readState(); // registering (the owned recovery exchange is in flight)
+    expect(h.registrar.state).toBe('registering');
+    respond(h, 200);
+    await recovery;
+    readState(); // registered
+
+    const unregistration = h.registrar.unregister();
+    await flush();
+    readState(); // unregistering
+    respond(h, 200);
+    await unregistration;
+    readState(); // unregistered
+
+    await h.registrar.dispose(new Error('test cleanup'));
+    expect(observed).toEqual([
+      'registering',
+      'registered',
+      'recovering',
+      'registering',
+      'registered',
+      'unregistering',
+      'unregistered',
+    ]);
   });
 });

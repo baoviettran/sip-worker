@@ -19,4 +19,5 @@ export type RegisterState =
   | 'registering'
   | 'registered'
   | 'unregistering'
+  | 'recovering'
   | 'failed';

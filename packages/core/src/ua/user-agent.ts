@@ -98,6 +98,7 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
   private activeInvitations = new Map<string, Invitation>();
   private dialogOwners = new Map<string, DialogOwner>();
   private liveness?: LivenessStrategy;
+  private recoveryPromise?: Promise<void>;
 
   constructor(options: UserAgentOptions) {
     super();
@@ -311,6 +312,45 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
     }
   }
 
+  /**
+   * Recover registration after a transport loss. Returns the same shared
+   * promise while a recovery cycle is in flight (serialization), starting the
+   * registration ingress for the connected generation and forwarding the
+   * `recovering` registration state until the re-registration settles.
+   */
+  recoverRegistration(): Promise<void> {
+    this.assertOperational();
+    if (this.registrar === undefined) {
+      return Promise.resolve();
+    }
+    if (this.recoveryPromise !== undefined) return this.recoveryPromise;
+    this.ingress?.start();
+    const previousState = this.registerState;
+    const attempt = (async (): Promise<void> => {
+      try {
+        await this.registrar!.recover();
+        if (this.registerState !== previousState) {
+          this.emit('registrationStateChanged', {
+            type: 'registrationStateChanged',
+            state: this.registerState,
+            identity: this.identity!,
+          });
+        }
+      } catch (error) {
+        this.emit('failed', {
+          type: 'failed',
+          error: error instanceof Error ? error : new Error(String(error)),
+          identity: this.identity!,
+        });
+        throw error;
+      }
+    })();
+    const observed = (this.recoveryPromise = attempt.finally(() => {
+      if (this.recoveryPromise === observed) this.recoveryPromise = undefined;
+    }));
+    return observed;
+  }
+
   /** Initiate an outgoing call to the specified target URI. */
   async invite(target: string): Promise<void> {
     this.assertOperational();
@@ -433,6 +473,7 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
     // transitions synchronously remove their indexed ownership; the explicit
     // clears below make shutdown complete even for already-terminal owners.
     this.registrar?.dispose(error);
+    this.recoveryPromise = undefined;
     const owners = new Set<DialogOwner>(this.dialogOwners.values());
     if (this.activeInviter !== undefined) owners.add(this.activeInviter);
     for (const invitation of this.activeInvitations.values()) owners.add(invitation);
@@ -455,7 +496,7 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
     this.registrar = undefined;
   }
 
-  /** Handle transport disconnect: stop ingress, cancel refresh, mark reconnect pending. */
+  /** Handle transport disconnect: stop ingress, cancel refresh, mark recovery pending. */
   private onTransportDisconnected(): void {
     this.ingress?.stop();
     this.registrar?.onTransportDisconnected();
@@ -463,10 +504,10 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
     // might reconnect. The UA tracks its own lifecycle separately.
   }
 
-  /** Handle transport reconnect: restart ingress, notify registrar. */
+  /** Handle transport reconnect: restart ingress and awaitably recover registration. */
   private onTransportReconnected(): void {
     this.ingress?.start();
-    this.registrar?.onTransportConnected();
+    void this.recoverRegistration();
   }
 
   /**

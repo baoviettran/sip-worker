@@ -117,6 +117,7 @@ export class Registrar {
   private refreshTimer = -1;
   private refreshMs = 0;
   private reconnectPending = false;
+  private recoveryPromise: Promise<void> | undefined;
   private unsubscribe: (() => void) | undefined;
   private deferred: { resolve: () => void; reject: (reason: unknown) => void } | undefined;
   private requestVersion = 0;
@@ -175,12 +176,16 @@ export class Registrar {
 
   /**
    * Unregister: cancel the refresh timer, then send `REGISTER` with Contact `*`
-   * and `Expires: 0`. Resolves only on the 2xx.
+   * and `Expires: 0`. Resolves only on the 2xx. An explicit unregister wins over
+   * any pending reconnect recovery: reconnect intent and the shared recovery
+   * promise are cancelled before the removal REGISTER goes out, so the removal
+   * is an owned exchange rather than racing a recovery re-registration.
    */
   unregister(): Promise<void> {
     if (this.disposed) {
       return Promise.reject(new SipError(0, 'Registrar has been disposed', 'LIFECYCLE_ABORTED'));
     }
+    this.cancelRecoveryIntent();
     if (this.stateValue === 'registering' || this.stateValue === 'unregistering') {
       return Promise.reject(new SipError(0, 'a registration exchange is already in progress', 'INVALID_STATE'));
     }
@@ -189,15 +194,35 @@ export class Registrar {
     return this.startExchange(this.nextRequest(0, '*'));
   }
 
-  /** UA hook: transport is up again after a loss — re-issue the registration. */
-  onTransportConnected(): void {
-    if (this.disposed) return;
-    if (!this.reconnectPending) return;
+  /**
+   * Recover registration after a transport loss. This is an explicit, owned
+   * exchange with a shared promise: while exactly one recovery cycle is active,
+   * a second `recover()` returns the SAME promise (serialization). The
+   * re-registration reuses the stable Call-ID and consumes exactly one CSeq per
+   * wire attempt, and a failure maps to `SipError` code
+   * `REGISTRATION_RECOVERY_FAILED`.
+   */
+  recover(): Promise<void> {
+    if (this.disposed) {
+      return Promise.reject(new SipError(0, 'Registrar has been disposed', 'LIFECYCLE_ABORTED'));
+    }
+    if (this.recoveryPromise !== undefined) return this.recoveryPromise;
+    // No reconnect intent: recovery is a no-op that resolves immediately without
+    // touching the wire (the UA may call it on a reconnect with nothing pending).
+    if (!this.reconnectPending) return Promise.resolve();
     this.reconnectPending = false;
-    void this.register();
+    this.transition('recovering');
+    const attempt = this.startExchange(this.nextRequest(undefined, this.contact)).catch((reason: unknown) => {
+      throw this.asRecoveryFailure(reason);
+    });
+    const observed = attempt.finally(() => {
+      if (this.recoveryPromise === observed) this.recoveryPromise = undefined;
+    });
+    this.recoveryPromise = observed;
+    return observed;
   }
 
-  /** UA hook: transport lost — settle any in-flight exchange, drop to unregistered, cancel refresh. */
+  /** UA hook: transport lost — settle any in-flight exchange, drop to recovering, cancel refresh. */
   onTransportDisconnected(): void {
     if (this.disposed) return;
     this.teardownExchange();
@@ -210,9 +235,27 @@ export class Registrar {
       this.stateValue = 'failed';
       deferred.reject(new SipError(0, 'transport disconnected during a registration exchange', 'TRANSPORT_FAILED'));
     } else if (this.stateValue !== 'unregistering') {
-      this.stateValue = 'unregistered';
+      this.stateValue = 'recovering';
     }
     this.reconnectPending = true;
+  }
+
+  /** Unset a pending recovery once the owned cycle has been claimed or cancelled. */
+  private cancelRecoveryIntent(): void {
+    this.reconnectPending = false;
+    this.recoveryPromise = undefined;
+  }
+
+  private transition(next: RegisterState): void {
+    this.stateValue = next;
+  }
+
+  /** Map a failure in a recovery exchange to the typed recovery error code. */
+  private asRecoveryFailure(reason: unknown): SipError {
+    const message = reason instanceof Error ? reason.message : String(reason);
+    return new SipError(0, message, 'REGISTRATION_RECOVERY_FAILED', {
+      cause: reason instanceof Error ? reason : undefined,
+    });
   }
 
   /**
@@ -442,7 +485,7 @@ export class Registrar {
     this.teardownExchange();
     this.releaseAuthBudget();
     this.cancelRefresh();
-    this.reconnectPending = false;
+    this.cancelRecoveryIntent();
     const deferred = this.deferred;
     this.deferred = undefined;
     if (deferred !== undefined) {
