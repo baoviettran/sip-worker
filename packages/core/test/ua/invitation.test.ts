@@ -3,8 +3,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { Headers, makeRequest, bodyText } from '../../src/messages/index.js';
-import type { SipRequestMessage } from '../../src/messages/message.js';
+import { Headers, makeRequest, makeResponse, bodyText, withTextBody } from '../../src/messages/index.js';
+import type { SipRequestMessage, SipResponseMessage } from '../../src/messages/message.js';
 import { parseMessage } from '../../src/messages/parser.js';
 import { TransactionLayer, deriveTimers } from '../../src/transactions/index.js';
 import type { TransactionLayerEvent } from '../../src/transactions/types.js';
@@ -43,10 +43,21 @@ class FakeMediaPort {
   private listeners = new Set<(message: MediaMessage) => void>();
 
   postMessage(message: MediaMessage): void {
-    if (message.type !== 'createOffer' && message.type !== 'createAnswer' && message.type !== 'setRemote') {
+    if (message.type !== 'createOffer' && message.type !== 'createAnswer' && message.type !== 'setRemote'
+      && message.type !== 'commitDirection' && message.type !== 'rollbackDirection') {
       return;
     }
     this.commands.push(message);
+    if (message.type === 'createAnswer') return; // held until answerCreateAnswer/rejectPendingCreateAnswer
+    if (message.type === 'setRemote' || message.type === 'commitDirection' || message.type === 'rollbackDirection') {
+      queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId }));
+      return;
+    }
+    const direction = (message as { direction?: 'sendrecv' | 'sendonly' | 'inactive' }).direction;
+    const sdp = direction === undefined || direction === 'sendrecv'
+      ? STUB_SDP
+      : STUB_SDP.replace('a=sendrecv', `a=${direction}`);
+    queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId, sdp }));
   }
 
   subscribe(listener: (message: MediaMessage) => void): () => void {
@@ -187,6 +198,56 @@ function okResponses(sent: Uint8Array[]): Array<{ msg: any; bytes: Uint8Array }>
     }
   }
   return out;
+}
+
+/** Assert a promise has not settled yet. */
+const PENDING = Symbol('pending');
+function expectPending<T>(promise: Promise<T>): Promise<void> {
+  return expect(Promise.race([promise, PENDING])).resolves.toBe(PENDING);
+}
+
+/** Drive an incoming invitation to confirmed: answer + deliver the initial ACK. */
+async function confirmIncoming(h: Harness): Promise<void> {
+  const answer = h.invitation.answer();
+  h.media.answerCreateAnswer();
+  await flush();
+  const ok = okResponses(h.sent).at(-1)!.msg;
+  const ackHeaders = new Headers();
+  ackHeaders.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-ack-confirm');
+  ackHeaders.set('Max-Forwards', '70');
+  ackHeaders.set('From', ok.headers.get('From') ?? '');
+  ackHeaders.set('To', ok.headers.get('To') ?? '');
+  ackHeaders.set('Call-ID', ok.headers.get('Call-ID') ?? '');
+  ackHeaders.set('CSeq', `${(ok.headers.get('CSeq') ?? '1 INVITE').split(' ')[0]} ACK`);
+  routeRequest(h, makeRequest('ACK', REMOTE_URI, ackHeaders));
+  await answer;
+  expect(h.invitation.session.state).toBe('confirmed');
+}
+
+/** The most recent outbound INVITE (re-INVITE for hold/resume). */
+function lastOutboundInvite(h: Harness): SipRequestMessage {
+  const invites = h.sent
+    .map((bytes) => parseMessage(bytes))
+    .filter((p): p is { ok: true; value: { kind: 'request'; method: string } & SipRequestMessage } =>
+      p.ok && p.value.kind === 'request' && p.value.method === 'INVITE')
+    .map((p) => p.value as SipRequestMessage);
+  const last = invites.at(-1);
+  if (last === undefined) throw new Error('no outbound INVITE');
+  return last;
+}
+
+/** Answer the given re-INVITE with a 200 carrying an SDP answer. */
+function respondOkToInvite(h: Harness, reinvite: SipRequestMessage, sdp = STUB_SDP): void {
+  const headers = new Headers();
+  headers.set('Via', reinvite.headers.get('Via') ?? '');
+  headers.set('From', reinvite.headers.get('From') ?? '');
+  headers.set('To', reinvite.headers.get('To') ?? '');
+  headers.set('Call-ID', reinvite.headers.get('Call-ID') ?? '');
+  headers.set('CSeq', reinvite.headers.get('CSeq') ?? '');
+  headers.set('Contact', `<${LOCAL_URI}>`);
+  let message: SipResponseMessage = makeResponse(200, 'OK', headers);
+  if (sdp !== undefined) message = withTextBody(message, sdp, 'application/sdp') as SipResponseMessage;
+  h.layer.receive(message);
 }
 
 describe('Invitation (incoming SIP call session)', () => {
@@ -857,5 +918,51 @@ describe('Invitation (incoming SIP call session)', () => {
     expect(byeResponse.statusCode).toBe(200);
 
     expect(h.invitation.session.state).toBe('terminated');
+  });
+
+  describe('Invitation hold and resume', () => {
+    it('hold sends an in-dialog re-INVITE and resolves only once the direction commits', async () => {
+      const h = setup();
+      await confirmIncoming(h);
+
+      const held = h.invitation.hold('sendonly');
+      await flush();
+      const reinvite = lastOutboundInvite(h);
+      expect(reinvite.headers.get('To')).toContain(`tag=${h.invitation.dialog?.remoteTag}`);
+      expect(bodyText(reinvite)).toContain('a=sendonly');
+      await expectPending(held);
+
+      respondOkToInvite(h, reinvite);
+      await held;
+      expect(h.invitation.session.state).toBe('confirmed');
+    });
+
+    it('resume restores a sendrecv direction', async () => {
+      const h = setup();
+      await confirmIncoming(h);
+      const held = h.invitation.hold('inactive');
+      await flush();
+      respondOkToInvite(h, lastOutboundInvite(h));
+      await held;
+
+      const resumed = h.invitation.resume();
+      await flush();
+      const resumeInvite = lastOutboundInvite(h);
+      expect(bodyText(resumeInvite)).toContain('a=sendrecv');
+      respondOkToInvite(h, resumeInvite);
+      await resumed;
+      expect(h.invitation.session.state).toBe('confirmed');
+    });
+
+    it('exposes remoteHold through the negotiator callback', async () => {
+      const h = setup();
+      await confirmIncoming(h);
+      expect(h.invitation.remoteHold).toBe(false);
+    });
+
+    it('rejects hold with INVALID_STATE before confirmation', async () => {
+      const h = setup();
+      await expect(h.invitation.hold('sendonly')).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    });
   });
 });

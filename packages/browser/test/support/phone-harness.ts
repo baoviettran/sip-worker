@@ -260,6 +260,9 @@ export function buildPhone(options: BuildPhoneOptions = {}): PhoneHarness {
     mediaEnvironment: env,
     clock,
     idGenerator: idGenerator(),
+    // RFC 3261 14.2 glare-retry windows are deterministic under random=0: the
+    // Call-ID owner waits 2100ms, the other endpoint 0ms (both floor(0*1901/2001)).
+    random: () => 0,
   });
 
   const harness: PhoneHarness = {
@@ -358,6 +361,68 @@ export function emitRemoteBye(remoteTag = remoteTagOfLast200(), branch = 'remote
   );
 }
 
+/** The most recently emitted remote re-INVITE, for the matching ACK helper. */
+let lastRemoteReinvite: MessageHead | undefined;
+
+/**
+ * Send an in-dialog re-INVITE from the remote peer (holds/un-holds the phone).
+ * Mirrors `emitRemoteBye`: INVITE To → re-INVITE From + remote tag, INVITE From
+ * → re-INVITE To, the INVITE's Call-ID, an incremented CSeq (default 2), a fresh
+ * Via branch, and an SDP body whose `a=` line carries the requested direction.
+ */
+export function emitRemoteReinvite(
+  direction: 'sendrecv' | 'sendonly' | 'inactive' = 'sendonly',
+  cseq = 2,
+): void {
+  const harness = currentHarness();
+  const inv = lastInvite();
+  if (inv === undefined) throw new Error('no outbound INVITE to build re-INVITE from');
+  const headers = new Headers();
+  headers.set('Via', `SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-${cseq}-reinvite`);
+  headers.set('Max-Forwards', '70');
+  const from = inv.to.includes('tag=') ? inv.to : `${inv.to};tag=${remoteTagOfLast200()}`;
+  headers.set('From', from);
+  headers.set('To', inv.from);
+  headers.set('Call-ID', inv.callId);
+  headers.set('CSeq', `${cseq} INVITE`);
+  headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
+  headers.set('Content-Type', 'application/sdp');
+  const sdp = STUB_SDP.replace('a=sendrecv', `a=${direction}`);
+  lastRemoteReinvite = {
+    method: 'INVITE',
+    callId: inv.callId,
+    cseqLine: `${cseq} INVITE`,
+    via: headers.get('Via') ?? '',
+    from,
+    to: inv.from,
+  };
+  harness.socket.emitMessage(
+    serializeMessage(makeRequest('INVITE', localUriOf(inv.from), headers, new TextEncoder().encode(sdp))),
+  );
+}
+
+/**
+ * Send the ACK that completes the most recent remote re-INVITE (the phone's
+ * 200 OK was already sent): same From/To/Call-ID as the re-INVITE, a fresh Via
+ * branch, and the ACK method.
+ */
+export function emitReinviteAck(cseq?: number): void {
+  const harness = currentHarness();
+  const reinvite = lastRemoteReinvite;
+  if (reinvite === undefined) throw new Error('no remote re-INVITE to ACK');
+  const cseqNum = cseq ?? (reinvite.cseqLine.split(' ')[0] ?? '2');
+  const headers = new Headers();
+  headers.set('Via', `SIP/2.0/UDP 192.0.2.2:5060;branch=z9hG4bK-${cseqNum}-ack`);
+  headers.set('Max-Forwards', '70');
+  headers.set('From', reinvite.from);
+  headers.set('To', reinvite.to);
+  headers.set('Call-ID', reinvite.callId);
+  headers.set('CSeq', `${cseqNum} ACK`);
+  harness.socket.emitMessage(
+    serializeMessage(makeRequest('ACK', localUriOf(reinvite.to), headers)),
+  );
+}
+
 /** The callee/ser tag assigned by the phone's most recent outbound 200 OK. */
 function remoteTagOfLast200(): string {
   const harness = currentHarness();
@@ -380,7 +445,7 @@ function localUriOf(fromOrTo: string): string {
 
 
 /** A media stream with a single microphone audio track (send-capable). */
-function makeAudioStream(): MediaStream {
+export function makeAudioStream(): MediaStream {
   const track = { id: 'mic-track', stop(): void {}, enabled: true };
   return { getTracks: () => [track], getAudioTracks: () => [track], stop(): void {} } as unknown as MediaStream;
 }

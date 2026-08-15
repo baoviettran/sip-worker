@@ -41,6 +41,7 @@ export interface InviterOptions {
   readonly layer: TransactionLayer;
   readonly clock: Clock;
   readonly controller: WorkerMediaController;
+  readonly random?: () => number;
   readonly authManager?: AuthManager;
   readonly credentials?: { readonly username: string; readonly password: string };
   readonly onDialogCreated?: (dialog: Dialog) => void;
@@ -69,6 +70,7 @@ export class Inviter {
   private readonly layer: TransactionLayer;
   private readonly clock: Clock;
   private readonly controller: WorkerMediaController;
+  private readonly random: (() => number) | undefined;
   private readonly authManager?: AuthManager;
   private readonly credentials?: { readonly username: string; readonly password: string };
   private readonly onDialogCreated: ((dialog: Dialog) => void) | undefined;
@@ -115,6 +117,7 @@ export class Inviter {
     this.layer = options.layer;
     this.clock = options.clock;
     this.controller = options.controller;
+    this.random = options.random;
     this.authManager = options.authManager;
     this.credentials = options.credentials;
     this.onDialogCreated = options.onDialogCreated;
@@ -414,6 +417,7 @@ export class Inviter {
   }
 
   private activeNegotiator: DialogNegotiator | undefined;
+  private remoteHoldValue = false;
 
   /** Request an ICE restart on the confirmed dialog. */
   restartIce(): Promise<void> {
@@ -425,6 +429,70 @@ export class Inviter {
       return Promise.reject(new SipError(0, 'call not confirmed', 'INVALID_STATE'));
     }
     return negotiator.restartIce();
+  }
+
+  /** Place the confirmed call on local hold (RFC 3264 directional offer). */
+  hold(direction: 'sendonly' | 'inactive'): Promise<void> {
+    if (this.disposed) {
+      return Promise.reject(new SipError(0, 'Inviter has been disposed', 'LIFECYCLE_ABORTED'));
+    }
+    const negotiator = this.ensureNegotiator();
+    if (negotiator === undefined) {
+      return Promise.reject(new SipError(0, 'call not confirmed', 'INVALID_STATE'));
+    }
+    return negotiator.hold(direction);
+  }
+
+  /** Resume the confirmed call from local hold. */
+  resume(): Promise<void> {
+    if (this.disposed) {
+      return Promise.reject(new SipError(0, 'Inviter has been disposed', 'LIFECYCLE_ABORTED'));
+    }
+    const negotiator = this.ensureNegotiator();
+    if (negotiator === undefined) {
+      return Promise.reject(new SipError(0, 'call not confirmed', 'INVALID_STATE'));
+    }
+    return negotiator.resume();
+  }
+
+  /** Probe the confirmed dialog with an in-dialog OPTIONS. */
+  validateDialog(): Promise<void> {
+    if (this.disposed) {
+      return Promise.reject(new SipError(0, 'Inviter has been disposed', 'LIFECYCLE_ABORTED'));
+    }
+    const negotiator = this.ensureNegotiator();
+    if (negotiator === undefined) {
+      return Promise.reject(new SipError(0, 'call not confirmed', 'INVALID_STATE'));
+    }
+    return negotiator.validateDialog();
+  }
+
+  /** Whether the remote peer is holding (committed on the re-INVITE ACK). */
+  get remoteHold(): boolean {
+    return this.remoteHoldValue;
+  }
+
+  private readonly remoteHoldListeners = new Set<(held: boolean) => void>();
+
+  /**
+   * Subscribe to committed remote-hold changes. Each listener fires on an
+   * effective change after the matching re-INVITE ACK commits; the returned
+   * function unsubscribes.
+   */
+  subscribeRemoteHold(listener: (held: boolean) => void): () => void {
+    this.remoteHoldListeners.add(listener);
+    return (): void => { this.remoteHoldListeners.delete(listener); };
+  }
+
+  private setRemoteHold(held: boolean): void {
+    if (this.remoteHoldValue === held) return;
+    this.remoteHoldValue = held;
+    for (const listener of [...this.remoteHoldListeners]) listener(held);
+  }
+
+  /** Forward a stateless ACK completing a remote re-INVITE to the negotiator. */
+  handleIncomingAck(request: SipRequestMessage): void {
+    this.activeNegotiator?.handleIncomingAck(request);
   }
 
   /** Build the negotiator once (and only once) the selected dialog exists. */
@@ -440,6 +508,9 @@ export class Inviter {
       idGenerator: this.idGenerator,
       via: this.viaConfig,
       contact: this.contact,
+      random: this.random,
+      isCallIdOwner: true,
+      onRemoteHoldChanged: (held): void => this.setRemoteHold(held),
     });
     return this.activeNegotiator;
   }
@@ -848,6 +919,11 @@ export class Inviter {
   /** Handle a request addressed to the confirmed dialog. */
   handleIncomingRequest(transaction: ServerTransaction, request: SipRequestMessage): void {
     if (this.disposed) return;
+    // An ACK completing a remote re-INVITE's 2xx (stateless path) is forwarded.
+    if (request.method === 'ACK') {
+      this.handleIncomingAck(request);
+      return;
+    }
     // An in-dialog re-INVITE is answered through the serialized negotiator.
     if (request.method === 'INVITE') {
       const negotiator = this.ensureNegotiator();

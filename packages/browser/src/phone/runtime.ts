@@ -60,6 +60,11 @@ export interface PhoneRuntimeCoreOptions {
   readonly diagnostics?: DiagnosticRecorder;
   /** Recovery identity (Call-ID + next CSeq) to resume a registration. */
   readonly initialIdentity?: RegistrationIdentity;
+  /**
+   * Injected uniform random in [0,1) for the RFC 3261 14.2 glare-retry window.
+   * Defaults to the real source (`Math.random`); tests inject a fixed value.
+   */
+  readonly random?: () => number;
 }
 
 /** Map a core session state to the public call state. */
@@ -124,6 +129,9 @@ export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & Brows
   /** Live calls, indexed BY OBJECT IDENTITY. */
   private readonly calls = new Set<BrowserCall>();
 
+  /** Remote-hold unsubscribers per live call (owner push → call surface). */
+  private readonly remoteHoldUnsubscribers = new Map<BrowserCall, () => void>();
+
   /** Media-connected waiters keyed by media session id. */
   private readonly mediaWaiters = new Map<string, Set<MediaWaiter>>();
 
@@ -154,6 +162,7 @@ export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & Brows
       idGenerator: options.idGenerator,
       ...(options.initialIdentity === undefined
         ? {} : { initialIdentity: options.initialIdentity }),
+      random: options.random ?? Math.random,
     };
 
     // One in-memory media port pair. The core end is driven by the controller;
@@ -305,6 +314,12 @@ export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & Brows
     // Note: core rejects a second active inviter synchronously with
     // SipError INVALID_STATE, so no second media session is ever contended.
     const call: BrowserCall = new OutgoingBrowserCall(inviter, this);
+    // Live remote-hold push: the owner's committed remote hold (after the
+    // re-INVITE ACK) is routed onto the call surface.
+    this.remoteHoldUnsubscribers.set(
+      call,
+      inviter.subscribeRemoteHold((held): void => call.notifyRemoteHold(held)),
+    );
     this.track(call);
     return call;
   }
@@ -350,6 +365,14 @@ export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & Brows
         }
       }
       this.cleanup.length = 0;
+      for (const unsubscribe of this.remoteHoldUnsubscribers.values()) {
+        try {
+          unsubscribe();
+        } catch {
+          // A remote-hold unsubscribe must never break the shared dispose promise.
+        }
+      }
+      this.remoteHoldUnsubscribers.clear();
       this.calls.clear();
       this.diagnostics?.record('lifecycle.disposed');
     }
@@ -366,6 +389,8 @@ export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & Brows
   /** Detach a call by object identity on terminal state, before observers. */
   releaseCall(call: BrowserCall, terminalState: CallState): void {
     const removed = this.calls.delete(call);
+    this.remoteHoldUnsubscribers.get(call)?.();
+    this.remoteHoldUnsubscribers.delete(call);
     if (removed) {
       this.diagnostics?.record(
         terminalState === 'failed' ? 'call.failed' : 'call.terminated',
@@ -375,6 +400,11 @@ export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & Brows
 
   private wrapIncoming(invitation: Invitation): void {
     const call = new IncomingBrowserCall(invitation, this);
+    // Live remote-hold push for the incoming owner (same channel as outgoing).
+    this.remoteHoldUnsubscribers.set(
+      call,
+      invitation.subscribeRemoteHold((held): void => call.notifyRemoteHold(held)),
+    );
     this.track(call);
     this.emit('incomingCall', { type: 'incomingCall', call });
   }

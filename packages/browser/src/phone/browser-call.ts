@@ -38,6 +38,9 @@ export type { RemoteIdentity } from './types.js';
 
 const DEFAULT_CALL_ESTABLISH_TIMEOUT_MS = 120_000;
 
+/** The default local-hold direction (RFC 3264) when `hold()` omits one. */
+const DEFAULT_HOLD_DIRECTION = 'sendonly';
+
 export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
   /** The owning runtime; supplies core/media/call facts and detach on terminal. */
   protected readonly runtime: PhoneRuntime;
@@ -128,26 +131,59 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
     this.runtime.manager.setMuted(muted);
   }
 
-  /** Place the call on hold (directional signalling staged in Task 11). */
-  hold(): Promise<void> {
-    this.holdValue = Object.freeze({ ...this.holdValue, local: true });
-    this.emit('holdStateChanged', {
-      type: 'holdStateChanged',
-      previous: Object.freeze({ local: false, remote: this.holdValue.remote }),
-      state: this.holdValue,
-    });
-    return Promise.resolve();
+  /**
+   * Place the call on local hold (RFC 3264 directional offer). Commits the
+   * public hold state and emits `holdStateChanged` only AFTER the core
+   * negotiation applies (2xx + ACK + local media direction). A terminal call,
+   * or a call already on local hold, rejects canonical `INVALID_STATE`.
+   */
+  async hold(direction: 'sendonly' | 'inactive' = DEFAULT_HOLD_DIRECTION): Promise<void> {
+    if (this.stateValue === 'terminated' || this.stateValue === 'failed') {
+      throw this.invalidCallState();
+    }
+    if (this.holdValue.local) {
+      throw this.invalidCallState();
+    }
+    const previous = this.holdValue;
+    await this.ownerHold(direction);
+    this.commitHoldState(previous, Object.freeze({ local: true, remote: this.ownerRemoteHold() }));
   }
 
-  /** Resume the call from hold. */
-  resume(): Promise<void> {
-    this.holdValue = Object.freeze({ ...this.holdValue, local: false });
-    this.emit('holdStateChanged', {
-      type: 'holdStateChanged',
-      previous: Object.freeze({ local: true, remote: this.holdValue.remote }),
-      state: this.holdValue,
-    });
-    return Promise.resolve();
+  /**
+   * Resume the call from local hold. Commits the public hold state and emits
+   * `holdStateChanged` only AFTER the core negotiation applies. A terminal
+   * call, or a call not currently on local hold, rejects canonical
+   * `INVALID_STATE`.
+   */
+  async resume(): Promise<void> {
+    if (this.stateValue === 'terminated' || this.stateValue === 'failed') {
+      throw this.invalidCallState();
+    }
+    if (!this.holdValue.local) {
+      throw this.invalidCallState();
+    }
+    const previous = this.holdValue;
+    await this.ownerResume();
+    this.commitHoldState(previous, Object.freeze({ local: false, remote: this.ownerRemoteHold() }));
+  }
+
+  private commitHoldState(previous: HoldState, state: HoldState): void {
+    this.holdValue = state;
+    this.emit('holdStateChanged', { type: 'holdStateChanged', previous, state });
+  }
+
+  /**
+   * Commit a remote-hold change pushed from the owning core owner (fires after
+   * the matching re-INVITE ACK commits). Independent of local hold: only the
+   * `remote` flag changes. A terminal call ignores the push; an unchanged value
+   * emits nothing.
+   */
+  notifyRemoteHold(held: boolean): void {
+    if (this.stateValue === 'terminated' || this.stateValue === 'failed') return;
+    if (this.holdValue.remote === held) return;
+    const previous = this.holdValue;
+    this.holdValue = Object.freeze({ ...this.holdValue, remote: held });
+    this.emit('holdStateChanged', { type: 'holdStateChanged', previous, state: this.holdValue });
   }
 
   /** Send a DTMF digit sequence (RTP event relay staged in Task 11). */
@@ -274,6 +310,19 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
   protected ownerRestartIce(): Promise<void> {
     return Promise.reject(new Error('call not active'));
   }
+
+  protected ownerHold(_direction: 'sendonly' | 'inactive'): Promise<void> {
+    return Promise.reject(new Error('call not active'));
+  }
+
+  protected ownerResume(): Promise<void> {
+    return Promise.reject(new Error('call not active'));
+  }
+
+  /** The owner's committed remote-hold flag (false for an inactive owner). */
+  protected ownerRemoteHold(): boolean {
+    return false;
+  }
 }
 
 function mapCallState(sessionState: string): CallState {
@@ -338,6 +387,18 @@ export class OutgoingBrowserCall extends BrowserCall {
     return this.inviter.restartIce();
   }
 
+  protected override ownerHold(direction: 'sendonly' | 'inactive'): Promise<void> {
+    return this.inviter.hold(direction);
+  }
+
+  protected override ownerResume(): Promise<void> {
+    return this.inviter.resume();
+  }
+
+  protected override ownerRemoteHold(): boolean {
+    return this.inviter.remoteHold;
+  }
+
   private async runEstablish(invite: () => Promise<void>): Promise<void> {
     const observed = this.observeOwnerOperation(invite(), 'outgoing call');
     await observed;
@@ -377,6 +438,18 @@ export class IncomingBrowserCall extends BrowserCall {
 
   protected override ownerRestartIce(): Promise<void> {
     return this.invitation.restartIce();
+  }
+
+  protected override ownerHold(direction: 'sendonly' | 'inactive'): Promise<void> {
+    return this.invitation.hold(direction);
+  }
+
+  protected override ownerResume(): Promise<void> {
+    return this.invitation.resume();
+  }
+
+  protected override ownerRemoteHold(): boolean {
+    return this.invitation.remoteHold;
   }
 
   private async runEstablish(answer: () => Promise<void>): Promise<void> {

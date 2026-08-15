@@ -64,6 +64,8 @@ export type BrowserUserAgentOptions = {
   readonly mediaEnvironment?: BrowserMediaEnvironment;
   /** Explicit VIA address. */
   readonly viaAddress?: string;
+  /** Override the RFC 3261 14.2 glare-retry random source (defaults to `Math.random`). */
+  readonly random?: () => number;
 };
 
 export class BrowserUserAgent extends TypedEventEmitter<BrowserUserAgentEventMap> {
@@ -101,6 +103,7 @@ export class BrowserUserAgent extends TypedEventEmitter<BrowserUserAgentEventMap
       idGenerator: coreOptions.idGenerator,
       mediaEnvironment: env,
       mediaOptions: normalizedMedia,
+      random: coreOptions.random,
     };
     this.runtime = new PhoneRuntime(runtimeOptions);
     this.manager = this.runtime.manager;

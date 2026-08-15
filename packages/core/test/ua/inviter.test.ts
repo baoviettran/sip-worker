@@ -43,15 +43,20 @@ class FakeMediaPort {
   protected listeners = new Set<(message: MediaMessage) => void>();
 
   postMessage(message: MediaMessage): void {
-    if (message.type !== 'createOffer' && message.type !== 'createAnswer' && message.type !== 'setRemote') {
+    if (message.type !== 'createOffer' && message.type !== 'createAnswer' && message.type !== 'setRemote'
+      && message.type !== 'commitDirection' && message.type !== 'rollbackDirection') {
       return;
     }
     this.commands.push(message);
-    if (message.type === 'setRemote') {
+    if (message.type === 'setRemote' || message.type === 'commitDirection' || message.type === 'rollbackDirection') {
       queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId }));
       return;
     }
-    queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId, sdp: STUB_SDP }));
+    const direction = (message as { direction?: 'sendrecv' | 'sendonly' | 'inactive' }).direction;
+    const sdp = direction === undefined || direction === 'sendrecv'
+      ? STUB_SDP
+      : STUB_SDP.replace('a=sendrecv', `a=${direction}`);
+    queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId, sdp }));
   }
 
   subscribe(listener: (message: MediaMessage) => void): () => void {
@@ -1178,5 +1183,59 @@ describe('Inviter (outgoing SIP call session)', () => {
     receive(h, invite, { sdp: STUB_SDP, toTag: 'bob-1' });
     await drainMicrotasks();
     expect(h.inviter.session.state).toBe('failed');
+  });
+
+  describe('Inviter hold and resume', () => {
+    it('hold sends an in-dialog re-INVITE and resolves only once the direction commits', async () => {
+      const h = setup();
+      await confirmCall(h);
+      const held = h.inviter.hold('sendonly');
+      await drainMicrotasks();
+
+      const reinvite = h.sent.filter((r) => r.method === 'INVITE').at(-1)!;
+      expect(reinvite.headers.get('To')).toContain(`tag=${h.inviter.dialog?.remoteTag}`);
+      expect(bodyText(reinvite)).toContain('a=sendonly');
+      expect(finalCSeq(reinvite)).toBeGreaterThan(1);
+      await expectPending(held);
+
+      receive(h, reinvite, { sdp: STUB_SDP });
+      await held;
+      expect(h.inviter.session.state).toBe('confirmed');
+    });
+
+    it('resume restores a sendrecv direction', async () => {
+      const h = setup();
+      await confirmCall(h);
+      const held = h.inviter.hold('inactive');
+      await drainMicrotasks();
+      receive(h, h.sent.filter((r) => r.method === 'INVITE').at(-1)!, { sdp: STUB_SDP });
+      await held;
+
+      const resumed = h.inviter.resume();
+      await drainMicrotasks();
+      const resumeInvite = h.sent.filter((r) => r.method === 'INVITE').at(-1)!;
+      expect(bodyText(resumeInvite)).toContain('a=sendrecv');
+      receive(h, resumeInvite, { sdp: STUB_SDP });
+      await resumed;
+      expect(h.inviter.session.state).toBe('confirmed');
+    });
+
+    it('exposes remoteHold through the negotiator callback', async () => {
+      const h = setup();
+      await confirmCall(h);
+      expect(h.inviter.remoteHold).toBe(false);
+    });
+
+    it('rejects hold with INVALID_STATE before confirmation', async () => {
+      const h = setup();
+      await expect(h.inviter.hold('sendonly')).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    });
+
+    it('rejects hold with LIFECYCLE_ABORTED after dispose', async () => {
+      const h = setup();
+      await confirmCall(h);
+      h.inviter.dispose(new Error('shutdown'));
+      await expect(h.inviter.hold('sendonly')).rejects.toMatchObject({ code: 'LIFECYCLE_ABORTED' });
+    });
   });
 });

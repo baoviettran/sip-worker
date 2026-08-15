@@ -40,6 +40,8 @@ export interface PhoneEnvironment {
   readonly mediaEnvironment: BrowserMediaEnvironment;
   readonly clock: MediaManagerClock;
   readonly idGenerator: IdGenerator;
+  /** Uniform random in [0,1) for the RFC 3261 14.2 glare-retry window. */
+  readonly random: () => number;
 }
 
 /** BrowserPhone constructor options: product config + injected environments. */
@@ -50,6 +52,8 @@ export interface BrowserPhoneInit {
   readonly mediaEnvironment: BrowserMediaEnvironment;
   readonly clock?: MediaManagerClock;
   readonly idGenerator?: IdGenerator;
+  /** Override the RFC 3261 14.2 glare-retry random source (defaults to `Math.random`). */
+  readonly random?: () => number;
 }
 
 export class BrowserPhone {
@@ -97,6 +101,7 @@ export class BrowserPhone {
       mediaEnvironment: init.mediaEnvironment,
       clock: init.clock ?? { now: () => Date.now(), setTimeout, clearTimeout },
       idGenerator: init.idGenerator ?? { branch: () => genId() },
+      random: init.random ?? Math.random,
     };
 
     this.diagnostics = new DiagnosticRecorder({
@@ -122,6 +127,7 @@ export class BrowserPhone {
       mediaEnvironment: this.environment.mediaEnvironment,
       mediaOptions: normalized.media ?? {},
       diagnostics: this.diagnostics,
+      random: this.environment.random,
     };
 
     this.runtime = new PhoneRuntime(runtimeOptions);

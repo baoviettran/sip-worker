@@ -324,6 +324,10 @@ export class WebRtcMediaSession {
       if (this.stagedDirection === undefined) return;
       this.confirmedDirection = this.stagedDirection;
       this.stagedDirection = undefined;
+      // A committed local hold (sendonly/inactive) is the persisted preference
+      // {@link applyTrackEnabled} shares with mute; a sendrecv commit clears it.
+      this.localHoldValue = this.confirmedDirection === 'sendonly' || this.confirmedDirection === 'inactive';
+      this.applyTrackEnabled();
     });
   }
 

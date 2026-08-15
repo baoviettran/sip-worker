@@ -127,6 +127,11 @@ async function fullOffer(session: WebRtcMediaSession, pc: FakePeerConnection): P
   return op;
 }
 
+/** The session-owned local microphone track (active after the first offer). */
+function activeLocalTrack(session: WebRtcMediaSession): RecTrack {
+  return (session as unknown as { localTrack: RecTrack }).localTrack;
+}
+
 function stateTransitions(recorder: Recorder): string[] {
   return recorder.events
     .filter((e) => e.type === 'mediaStateChanged')
@@ -554,6 +559,80 @@ describe('WebRtcMediaSession directional offers', () => {
     releaseSetLocal();
     await expect(rollback).rejects.toMatchObject({ code: 'ABORTED' });
     expect((session as unknown as { stagedDirection?: string }).stagedDirection).toBeUndefined();
+  });
+
+  it('committing a sendonly direction sets localHoldValue and disables the local track', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    const local = activeLocalTrack(session);
+    expect(local.enabled).toBe(true);
+
+    const staged = session.createDirectionalOffer('sendonly');
+    await completeGathering(pc);
+    await staged;
+    await session.setRemote('v=0\no=remote 1 1 IN IP4 0.0.0.0\ns=-\nm=audio 5004 RTP/AVP\n');
+    await session.commitDirection();
+
+    expect((session as unknown as { localHoldValue: boolean }).localHoldValue).toBe(true);
+    expect((session as unknown as { confirmedDirection?: string }).confirmedDirection).toBe('sendonly');
+    expect(local.enabled).toBe(false);
+  });
+
+  it('committing an inactive direction sets localHoldValue and disables the local track', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    const local = activeLocalTrack(session);
+
+    const staged = session.createDirectionalOffer('inactive');
+    await completeGathering(pc);
+    await staged;
+    await session.setRemote('v=0\no=remote 1 1 IN IP4 0.0.0.0\ns=-\nm=audio 5004 RTP/AVP\n');
+    await session.commitDirection();
+
+    expect((session as unknown as { localHoldValue: boolean }).localHoldValue).toBe(true);
+    expect(local.enabled).toBe(false);
+  });
+
+  it('committing a sendrecv resume clears localHoldValue and re-enables the track', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    const local = activeLocalTrack(session);
+
+    const held = session.createDirectionalOffer('sendonly');
+    await completeGathering(pc);
+    await held;
+    await session.setRemote('v=0\no=remote 1 1 IN IP4 0.0.0.0\ns=-\nm=audio 5004 RTP/AVP\n');
+    await session.commitDirection();
+    expect(local.enabled).toBe(false);
+
+    const resumed = session.createDirectionalOffer('sendrecv');
+    await completeGathering(pc);
+    await resumed;
+    await session.setRemote('v=0\no=remote 1 1 IN IP4 0.0.0.0\ns=-\nm=audio 5004 RTP/AVP\n');
+    await session.commitDirection();
+
+    expect((session as unknown as { localHoldValue: boolean }).localHoldValue).toBe(false);
+    expect(local.enabled).toBe(true);
+  });
+
+  it('preserves a pre-existing mute across a hold commit', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    const local = activeLocalTrack(session);
+    session.setMuted(true);
+    expect(local.enabled).toBe(false);
+
+    const staged = session.createDirectionalOffer('inactive');
+    await completeGathering(pc);
+    await staged;
+    await session.setRemote('v=0\no=remote 1 1 IN IP4 0.0.0.0\ns=-\nm=audio 5004 RTP/AVP\n');
+    await session.commitDirection();
+
+    // Muted AND held: still disabled; unmuting leaves the track held.
+    expect((session as unknown as { localHoldValue: boolean }).localHoldValue).toBe(true);
+    expect(local.enabled).toBe(false);
+    session.setMuted(false);
+    expect(local.enabled).toBe(false);
   });
 });
 

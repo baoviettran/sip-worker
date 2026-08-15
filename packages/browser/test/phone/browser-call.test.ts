@@ -9,6 +9,14 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  Headers,
+  STUB_SDP,
+  makeResponse,
+  serializeMessage,
+  withTextBody,
+  type SipResponseMessage,
+} from '@sip-worker/core';
+import {
   OutgoingBrowserCall,
   IncomingBrowserCall,
   type BrowserCallEventMap,
@@ -22,8 +30,48 @@ import {
   buildIncomingHeaders,
   emitIncoming,
   emitRemoteBye,
+  emitRemoteReinvite,
+  emitReinviteAck,
+  makeAudioStream,
   sendAck,
+  sentRequests,
+  type PhoneHarness,
 } from '../support/phone-harness.js';
+import type { FakeBrowserWebSocket } from '../support/fake-browser-web-socket.js';
+
+/** Respond to the most recent outbound re-INVITE (echoing its Via/CSeq). */
+function respondToReinvite(
+  socket: FakeBrowserWebSocket,
+  status: number,
+  reason: string,
+  sdp?: string,
+): void {
+  const last = sentRequests('INVITE').at(-1);
+  if (last === undefined) throw new Error('no outbound INVITE to answer');
+  const headers = new Headers();
+  headers.set('Via', last.via);
+  headers.set('From', last.from);
+  headers.set('To', last.to);
+  headers.set('Call-ID', last.callId);
+  headers.set('CSeq', last.cseqLine);
+  headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
+  let response: SipResponseMessage = makeResponse(status, reason, headers);
+  if (sdp !== undefined) response = withTextBody(response, sdp, 'application/sdp') as SipResponseMessage;
+  socket.emitMessage(serializeMessage(response));
+}
+
+/** Establish an outgoing call in the `established` state. */
+async function establishedCall(): Promise<{ h: PhoneHarness; call: OutgoingBrowserCall }> {
+  const h = buildPhone();
+  const { phone } = h;
+  await phone.connect();
+  const call = phone.createCall('sip:bob@example.com') as OutgoingBrowserCall;
+  const start = call.start();
+  await answerInviteAndConnectMedia();
+  await start;
+  expect(call.state).toBe('established');
+  return { h, call };
+}
 
 describe('BrowserCall — per-call lifecycle', () => {
   it('outgoing call stays in establishing until the media session is connected', async () => {
@@ -295,5 +343,163 @@ describe('BrowserCall — setMuted (exact microphone mute ownership)', () => {
     expect(() => call.setMuted(true))
       .toThrowError(expect.objectContaining({ code: 'INVALID_STATE' }));
     await phone.dispose();
+  });
+});
+
+describe('BrowserCall — hold/resume', () => {
+  it('hold(sendonly) sends a re-INVITE and commits hold state only after media applies', async () => {
+    const { h, call } = await establishedCall();
+    const { pc, socket } = h;
+    const holdEvents: BrowserCallEventMap['holdStateChanged'][] = [];
+    call.on('holdStateChanged', (event) => { holdEvents.push(event); });
+    const localTrack = pc.transceivers[0]!.sender.track as unknown as { enabled: boolean };
+    expect(localTrack.enabled).toBe(true);
+
+    const held = call.hold('sendonly');
+    await settle();
+    expect(pc.transceivers[0]!.direction).toBe('sendonly');
+    expect(call.holdState).toEqual({ local: false, remote: false }); // not yet committed
+    const reinvite = sentRequests('INVITE').at(-1)!;
+    expect(reinvite.cseqLine).toMatch(/INVITE$/);
+
+    respondToReinvite(socket, 200, 'OK', STUB_SDP);
+    await settle();
+    await held;
+    expect(call.holdState).toEqual({ local: true, remote: false });
+    expect(localTrack.enabled).toBe(false);
+    expect(holdEvents).toEqual([
+      { type: 'holdStateChanged', previous: { local: false, remote: false }, state: { local: true, remote: false } },
+    ]);
+    await h.phone.dispose();
+  });
+
+  it('resume() restores sendrecv and commits hold state only after media applies', async () => {
+    const { h, call } = await establishedCall();
+    const { pc, socket } = h;
+    const held = call.hold('sendonly');
+    await settle();
+    respondToReinvite(socket, 200, 'OK', STUB_SDP);
+    await settle();
+    await held;
+    expect(call.holdState).toEqual({ local: true, remote: false });
+
+    const resumed = call.resume();
+    await settle();
+    expect(pc.transceivers[0]!.direction).toBe('sendrecv');
+    respondToReinvite(socket, 200, 'OK', STUB_SDP);
+    await settle();
+    await resumed;
+    expect(call.holdState).toEqual({ local: false, remote: false });
+    expect((pc.transceivers[0]!.sender.track as unknown as { enabled: boolean }).enabled).toBe(true);
+    await h.phone.dispose();
+  });
+
+  it('retries exactly once after a 491 with the Call-ID owner window (2100ms default random)', async () => {
+    const { h, call } = await establishedCall();
+    const { pc, socket, clock } = h;
+    const held = call.hold('sendonly');
+    await settle();
+    const first = sentRequests('INVITE').at(-1)!;
+    respondToReinvite(socket, 491, 'Request Pending');
+    await settle();
+
+    expect(clock.nextDelay()).toBe(2100);
+    expect(call.holdState).toEqual({ local: false, remote: false });
+    clock.advance(2100);
+    await settle();
+
+    expect(sentRequests('INVITE')).toHaveLength(3); // initial + attempt 1 + retry
+    const second = sentRequests('INVITE').at(-1)!;
+    expect(second.cseqLine).not.toBe(first.cseqLine);
+    respondToReinvite(socket, 200, 'OK', STUB_SDP);
+    await settle();
+    await held;
+    expect(call.holdState).toEqual({ local: true, remote: false });
+    expect((pc.transceivers[0]!.sender.track as unknown as { enabled: boolean }).enabled).toBe(false);
+    await h.phone.dispose();
+  });
+
+  it('preserves a pre-existing mute across hold', async () => {
+    const { h, call } = await establishedCall();
+    const { pc, socket } = h;
+    const localTrack = pc.transceivers[0]!.sender.track as unknown as { enabled: boolean };
+    call.setMuted(true);
+    expect(localTrack.enabled).toBe(false);
+
+    const held = call.hold();
+    await settle();
+    respondToReinvite(socket, 200, 'OK', STUB_SDP);
+    await settle();
+    await held;
+    expect(call.holdState).toEqual({ local: true, remote: false });
+    expect(localTrack.enabled).toBe(false); // muted AND held
+    await h.phone.dispose();
+  });
+
+  it('rejects INVALID_STATE on hold/resume of a terminal call', async () => {
+    const { h, call } = await establishedCall();
+    emitRemoteBye();
+    await settle();
+    expect(call.state).toBe('terminated');
+    await expect(call.hold()).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    await expect(call.resume()).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    await h.phone.dispose();
+  });
+
+  it('rejects INVALID_STATE for resume of a non-held call and hold of an already-held call', async () => {
+    const { h, call } = await establishedCall();
+    await expect(call.resume()).rejects.toMatchObject({ code: 'INVALID_STATE' });
+
+    const held = call.hold();
+    await settle();
+    respondToReinvite(h.socket, 200, 'OK', STUB_SDP);
+    await settle();
+    await held;
+    expect(call.holdState).toEqual({ local: true, remote: false });
+    await expect(call.hold()).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    await h.phone.dispose();
+  });
+
+  it('freezes hold state at terminal when a remote BYE ends an established held call', async () => {
+    const { h, call } = await establishedCall();
+    const held = call.hold('sendonly');
+    await settle();
+    respondToReinvite(h.socket, 200, 'OK', STUB_SDP);
+    await settle();
+    await held;
+    expect(call.holdState).toEqual({ local: true, remote: false });
+
+    emitRemoteBye();
+    await settle();
+    expect(call.state).toBe('terminated');
+    expect(call.holdState).toEqual({ local: true, remote: false });
+    await h.phone.dispose();
+  });
+
+  it('commits remote hold from a sendonly re-INVITE only after the matching ACK, with exact previous/next events', async () => {
+    const { h, call } = await establishedCall();
+    const holdEvents: BrowserCallEventMap['holdStateChanged'][] = [];
+    call.on('holdStateChanged', (event) => { holdEvents.push(event); });
+    expect(call.holdState).toEqual({ local: false, remote: false });
+
+    // The phone's createAnswer for the remote re-INVITE re-acquires a mic track.
+    h.env.queuedUserMedia.push(makeAudioStream());
+
+    emitRemoteReinvite('sendonly', 2);
+    await settle();
+    // Remote hold is DERIVED from the offer but must NOT commit before the ACK.
+    expect(call.holdState).toEqual({ local: false, remote: false });
+    expect(holdEvents).toEqual([]);
+
+    emitReinviteAck(2);
+    await settle();
+    // The matching ACK commits remote hold: previous {local:false,remote:false}
+    // → next {local:false,remote:true}, emitted exactly once.
+    expect(call.holdState).toEqual({ local: false, remote: true });
+    expect(holdEvents).toEqual([
+      { type: 'holdStateChanged', previous: { local: false, remote: false }, state: { local: false, remote: true } },
+    ]);
+
+    await h.phone.dispose();
   });
 });

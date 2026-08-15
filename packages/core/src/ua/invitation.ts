@@ -34,6 +34,7 @@ export interface InvitationOptions {
   readonly layer: TransactionLayer;
   readonly clock: Clock;
   readonly controller: WorkerMediaController;
+  readonly random?: () => number;
   readonly T1: number;
   readonly T2: number;
   readonly onDialogCreated?: (dialog: Dialog) => void;
@@ -49,6 +50,7 @@ export class Invitation {
   private readonly layer: TransactionLayer;
   private readonly clock: Clock;
   private readonly controller: WorkerMediaController;
+  private readonly random: (() => number) | undefined;
   private readonly T1: number;
   private readonly T2: number;
   private readonly onDialogCreated: ((dialog: Dialog) => void) | undefined;
@@ -80,6 +82,7 @@ export class Invitation {
   }
 
   private activeNegotiator: DialogNegotiator | undefined;
+  private remoteHoldValue = false;
 
   /**
    * Request an ICE restart on the confirmed dialog. Only valid after the call
@@ -96,6 +99,70 @@ export class Invitation {
     return negotiator.restartIce();
   }
 
+  /** Place the confirmed call on local hold (RFC 3264 directional offer). */
+  hold(direction: 'sendonly' | 'inactive'): Promise<void> {
+    if (this.disposed) {
+      return Promise.reject(new SipError(0, 'Invitation has been disposed', 'LIFECYCLE_ABORTED'));
+    }
+    const negotiator = this.ensureNegotiator();
+    if (negotiator === undefined) {
+      return Promise.reject(new SipError(0, 'call not confirmed', 'INVALID_STATE'));
+    }
+    return negotiator.hold(direction);
+  }
+
+  /** Resume the confirmed call from local hold. */
+  resume(): Promise<void> {
+    if (this.disposed) {
+      return Promise.reject(new SipError(0, 'Invitation has been disposed', 'LIFECYCLE_ABORTED'));
+    }
+    const negotiator = this.ensureNegotiator();
+    if (negotiator === undefined) {
+      return Promise.reject(new SipError(0, 'call not confirmed', 'INVALID_STATE'));
+    }
+    return negotiator.resume();
+  }
+
+  /** Probe the confirmed dialog with an in-dialog OPTIONS. */
+  validateDialog(): Promise<void> {
+    if (this.disposed) {
+      return Promise.reject(new SipError(0, 'Invitation has been disposed', 'LIFECYCLE_ABORTED'));
+    }
+    const negotiator = this.ensureNegotiator();
+    if (negotiator === undefined) {
+      return Promise.reject(new SipError(0, 'call not confirmed', 'INVALID_STATE'));
+    }
+    return negotiator.validateDialog();
+  }
+
+  /** Whether the remote peer is holding (committed on the re-INVITE ACK). */
+  get remoteHold(): boolean {
+    return this.remoteHoldValue;
+  }
+
+  private readonly remoteHoldListeners = new Set<(held: boolean) => void>();
+
+  /**
+   * Subscribe to committed remote-hold changes. Each listener fires on an
+   * effective change after the matching re-INVITE ACK commits; the returned
+   * function unsubscribes.
+   */
+  subscribeRemoteHold(listener: (held: boolean) => void): () => void {
+    this.remoteHoldListeners.add(listener);
+    return (): void => { this.remoteHoldListeners.delete(listener); };
+  }
+
+  private setRemoteHold(held: boolean): void {
+    if (this.remoteHoldValue === held) return;
+    this.remoteHoldValue = held;
+    for (const listener of [...this.remoteHoldListeners]) listener(held);
+  }
+
+  /** Forward a stateless ACK completing a remote re-INVITE to the negotiator. */
+  handleIncomingAck(request: SipRequestMessage): void {
+    this.activeNegotiator?.handleIncomingAck(request);
+  }
+
   /** Build the negotiator once (and only once) the confirmed dialog exists. */
   private ensureNegotiator(): DialogNegotiator | undefined {
     if (this.activeNegotiator !== undefined) return this.activeNegotiator;
@@ -109,6 +176,11 @@ export class Invitation {
       idGenerator: this.idGenerator,
       via: this.viaConfig,
       contact: this.contact,
+      random: this.random,
+      isCallIdOwner: false,
+      T1: this.T1,
+      T2: this.T2,
+      onRemoteHoldChanged: (held): void => this.setRemoteHold(held),
     });
     return this.activeNegotiator;
   }
@@ -130,6 +202,7 @@ export class Invitation {
     this.layer = options.layer;
     this.clock = options.clock;
     this.controller = options.controller;
+    this.random = options.random;
     this.T1 = options.T1;
     this.T2 = options.T2;
     this.onDialogCreated = options.onDialogCreated;
@@ -285,6 +358,8 @@ export class Invitation {
   /** Handle an ACK that has no matching transaction. */
   handleStatelessRequest(request: SipRequestMessage): void {
     if (request.method !== 'ACK') return;
+    // A remote re-INVITE's ACK commits the staged remote-hold state (if any).
+    this.activeNegotiator?.handleIncomingAck(request);
     if (this.dialogValue === undefined) return;
 
     const callId = request.headers.get('Call-ID');
@@ -326,6 +401,7 @@ export class Invitation {
     if (this.disposed) return;
     if (request.method === 'ACK') {
       this.onAckRequest(request);
+      this.activeNegotiator?.handleIncomingAck(request);
       return;
     }
     if (request.method === 'CANCEL') {

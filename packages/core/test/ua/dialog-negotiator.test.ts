@@ -19,7 +19,7 @@ import { FakeClock } from '../support/fake-clock.js';
 import { FakeTransport } from '../support/fake-transport.js';
 import { WorkerMediaController } from '../../src/media/worker-controller.js';
 import { STUB_SDP } from '../../src/media/index.js';
-import type { MediaMessage } from '../../src/media/index.js';
+import type { MediaDirection, MediaMessage } from '../../src/media/index.js';
 import { Dialog, type IdGenerator } from '../../src/dialogs/dialog.js';
 import { type ViaConfig } from '../../src/dialogs/header-values.js';
 import { DialogNegotiator } from '../../src/ua/dialog-negotiator.js';
@@ -46,6 +46,18 @@ function drainMicrotasks(): Promise<void> {
 }
 
 function flush(): Promise<void> { return drainMicrotasks(); }
+
+/** A FakeClock that records the most recently armed timer's delay. */
+class NextDelayFakeClock extends FakeClock {
+  private lastDelay = -1;
+  override setTimeout(callback: () => void, delayMs: number): number {
+    this.lastDelay = delayMs;
+    return super.setTimeout(callback, delayMs);
+  }
+  nextDelay(): number {
+    return this.lastDelay;
+  }
+}
 
 /** A single supported active audio section. */
 const AUDIO_SDP = [
@@ -87,6 +99,18 @@ const VIDEO_SDP = [
   '',
 ].join('\r\n');
 
+/** AUDIO_SDP with a sendonly direction (remote hold). */
+const SENDONLY_SDP = AUDIO_SDP.replace('a=sendrecv', 'a=sendonly');
+
+/** AUDIO_SDP with an inactive direction (remote hold). */
+const INACTIVE_SDP = AUDIO_SDP.replace('a=sendrecv', 'a=inactive');
+
+/** STUB_SDP rewritten for the offered direction (undefined/sendrecv = as-is). */
+function directionalSdp(direction: MediaDirection | undefined): string {
+  if (direction === undefined || direction === 'sendrecv') return STUB_SDP;
+  return STUB_SDP.replace('a=sendrecv', `a=${direction}`);
+}
+
 /**
  * A media port that records commands. createOffer auto-replies with STUB_SDP;
  * createAnswer auto-replies with the answer SDP; setRemote is held until the
@@ -104,7 +128,8 @@ class HarnessMediaPort {
     if (message.type === 'closeSession') return;
     this.commands.push(message as { type: string; [k: string]: unknown });
     if (message.type === 'createOffer') {
-      queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId, sdp: STUB_SDP }));
+      const direction = (message as { direction?: MediaDirection }).direction;
+      queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId, sdp: directionalSdp(direction) }));
     } else if (message.type === 'createAnswer') {
       if (this.holdAnswers) {
         this.heldAnswers.push({ requestId: message.requestId, sessionId: message.sessionId });
@@ -118,6 +143,8 @@ class HarnessMediaPort {
       }
     } else if (message.type === 'setRemote') {
       this.heldSetRemote.push({ requestId: message.requestId, sessionId: message.sessionId });
+    } else if (message.type === 'commitDirection' || message.type === 'rollbackDirection') {
+      queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId }));
     }
   }
 
@@ -167,7 +194,7 @@ class HarnessMediaPort {
 }
 
 interface Harness {
-  clock: FakeClock;
+  clock: NextDelayFakeClock;
   transport: FakeTransport;
   layer: TransactionLayer;
   events: TransactionLayerEvent[];
@@ -181,8 +208,14 @@ interface Harness {
 }
 
 /** Build a confirmed UAC dialog and a negotiator bound to it. */
-function setup(options: { mediaPort?: HarnessMediaPort; clock?: boolean } = {}): Harness {
-  const clock = new FakeClock();
+function setup(options: {
+  mediaPort?: HarnessMediaPort;
+  clock?: boolean;
+  random?: () => number;
+  isCallIdOwner?: boolean;
+  onRemoteHoldChanged?: (held: boolean) => void;
+} = {}): Harness {
+  const clock = new NextDelayFakeClock();
   const transport = new FakeTransport({ reliable: true, framing: 'stream' });
   void transport.connect();
   const sentRequests: SipRequestMessage[] = [];
@@ -236,6 +269,11 @@ function setup(options: { mediaPort?: HarnessMediaPort; clock?: boolean } = {}):
     idGenerator,
     via: viaConfig,
     contact: CONTACT,
+    random: options.random ?? (() => 0.5),
+    isCallIdOwner: options.isCallIdOwner ?? true,
+    T1: 500,
+    T2: 4000,
+    onRemoteHoldChanged: options.onRemoteHoldChanged,
   });
 
   return { clock, transport, layer, events, sentRequests, responses, media, controller, idGenerator, dialog, negotiator };
@@ -246,6 +284,11 @@ function setup(options: { mediaPort?: HarnessMediaPort; clock?: boolean } = {}):
  * From carries the remote tag, To carries our local tag.
  */
 function makeReinvite(dialog: Dialog, cseq = 2, branch?: string): SipRequestMessage {
+  return makeReinviteBody(dialog, AUDIO_SDP, cseq, branch);
+}
+
+/** An incoming re-INVITE carrying an arbitrary SDP body (e.g. sendonly). */
+function makeReinviteBody(dialog: Dialog, sdp: string, cseq = 2, branch?: string): SipRequestMessage {
   const headers = new Headers();
   headers.set('Via', `SIP/2.0/TCP 192.0.2.2:5060;branch=z9hG4bK-${branch ?? `reinvite-${cseq}`}`);
   headers.set('Max-Forwards', '70');
@@ -255,8 +298,21 @@ function makeReinvite(dialog: Dialog, cseq = 2, branch?: string): SipRequestMess
   headers.set('CSeq', `${cseq} INVITE`);
   headers.set('Contact', `<${REMOTE_URI}>`);
   headers.set('Content-Type', 'application/sdp');
-  const body = new TextEncoder().encode(AUDIO_SDP);
+  const body = new TextEncoder().encode(sdp);
   return makeRequest('INVITE', AOR, headers, body);
+}
+
+/** An ACK answering our 2xx for a remote re-INVITE (new transaction, stateless). */
+function makeAck(dialog: Dialog, cseq: number, branch = `ack-${cseq}`): SipRequestMessage {
+  const headers = new Headers();
+  headers.set('Via', `SIP/2.0/TCP 192.0.2.2:5060;branch=z9hG4bK-${branch}`);
+  headers.set('Max-Forwards', '70');
+  headers.set('From', `<${REMOTE_URI}>;tag=${dialog.remoteTag}`);
+  headers.set('To', `<${AOR}>;tag=${dialog.localTag}`);
+  headers.set('Call-ID', dialog.callId);
+  headers.set('CSeq', `${cseq} ACK`);
+  headers.set('Contact', `<${REMOTE_URI}>`);
+  return makeRequest('ACK', AOR, headers);
 }
 
 /** Deliver an incoming request; route its server transaction to the negotiator. */
@@ -266,6 +322,17 @@ function deliverIncoming(h: Harness, request: SipRequestMessage): void {
   for (const event of h.events.slice(before)) {
     if (event.type === 'request') {
       h.negotiator.handleIncoming(event.transaction, event.request);
+    }
+  }
+}
+
+/** Deliver an unmatched (stateless) request, e.g. the ACK to our 2xx. */
+function deliverStateless(h: Harness, request: SipRequestMessage): void {
+  const before = h.events.length;
+  h.layer.receive(request);
+  for (const event of h.events.slice(before)) {
+    if (event.type === 'statelessRequest') {
+      h.negotiator.handleIncomingAck(event.request);
     }
   }
 }
@@ -666,6 +733,380 @@ describe('DialogNegotiator', () => {
       await flush();
       expect(lastResponse(h).statusCode).toBe(481);
       expect(h.media.answerCommands).toHaveLength(1);
+      expect(h.negotiator.busy).toBe(false);
+    });
+  });
+
+  describe('local hold and resume (hold/resume)', () => {
+    it('hold(sendonly) posts a directional offer and sends an in-dialog INVITE, resolving only after ACK+setRemote+commit', async () => {
+      const h = setup();
+      const initialCSeq = Number(h.dialog.getLocalCSeq());
+
+      const held = h.negotiator.hold('sendonly');
+      await flush();
+
+      expect(h.media.offerCommands).toEqual([
+        { type: 'createOffer', requestId: expect.any(String), sessionId: SESSION_ID, direction: 'sendonly' },
+      ]);
+      const reinvite = lastOutboundInvite(h);
+      expect(reinvite.method).toBe('INVITE');
+      expect(bodyText(reinvite)).toContain('a=sendonly');
+      const cseqNumber = Number(reinvite.headers.get('CSeq')?.trim().split(/\s+/)[0]);
+      expect(cseqNumber).toBe(initialCSeq + 1);
+      expect(h.negotiator.busy).toBe(true);
+
+      await expectPending(held);
+      respond2xxTo(h, reinvite, STUB_SDP);
+      await flush();
+      expect(h.media.heldSetRemote).toHaveLength(1);
+      expect(h.media.commands.filter((c) => c.type === 'commitDirection')).toHaveLength(0);
+      await expectPending(held);
+
+      const acks = h.sentRequests.filter((r) => r.method === 'ACK');
+      expect(acks).toHaveLength(1);
+      h.media.releaseSetRemote();
+      await held;
+      expect(h.media.commands.filter((c) => c.type === 'commitDirection')).toHaveLength(1);
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it('hold(inactive) sends an inactive directional offer', async () => {
+      const h = setup();
+      const held = h.negotiator.hold('inactive');
+      await flush();
+      expect(h.media.offerCommands[0]).toMatchObject({ direction: 'inactive' });
+      const reinvite = lastOutboundInvite(h);
+      expect(bodyText(reinvite)).toContain('a=inactive');
+      respond2xxTo(h, reinvite, STUB_SDP);
+      await flush();
+      h.media.releaseSetRemote();
+      await held;
+    });
+
+    it('resume() restores a sendrecv direction with a fresh CSeq', async () => {
+      const h = setup();
+      const held = h.negotiator.hold('sendonly');
+      await flush();
+      const holdInvite = lastOutboundInvite(h);
+      respond2xxTo(h, holdInvite, STUB_SDP);
+      await flush();
+      h.media.releaseSetRemote();
+      await held;
+
+      const resumed = h.negotiator.resume();
+      await flush();
+      const resumeInvite = lastOutboundInvite(h);
+      expect(bodyText(resumeInvite)).toContain('a=sendrecv');
+      const holdCSeq = Number(holdInvite.headers.get('CSeq')?.trim().split(/\s+/)[0]);
+      const resumeCSeq = Number(resumeInvite.headers.get('CSeq')?.trim().split(/\s+/)[0]);
+      expect(resumeCSeq).toBe(holdCSeq + 1);
+      respond2xxTo(h, resumeInvite, STUB_SDP);
+      await flush();
+      h.media.releaseSetRemote();
+      await resumed;
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it('rejects INVALID_STATE when already busy (concurrent hold/resume/restart/validate)', async () => {
+      const h = setup();
+      const held = h.negotiator.hold('sendonly');
+      await flush();
+      await expect(h.negotiator.hold('inactive')).rejects.toMatchObject({ code: 'INVALID_STATE' });
+      await expect(h.negotiator.resume()).rejects.toMatchObject({ code: 'INVALID_STATE' });
+      await expect(h.negotiator.restartIce()).rejects.toMatchObject({ code: 'INVALID_STATE' });
+      await expect(h.negotiator.validateDialog()).rejects.toMatchObject({ code: 'INVALID_STATE' });
+      const reinvite = lastOutboundInvite(h);
+      respond2xxTo(h, reinvite, STUB_SDP);
+      await flush();
+      h.media.releaseSetRemote();
+      await held;
+    });
+
+    it('rolls the direction back and rejects HOLD_NEGOTIATION_FAILED on a 488 rejection', async () => {
+      const h = setup();
+      const held = h.negotiator.hold('sendonly');
+      await flush();
+      const reinvite = lastOutboundInvite(h);
+      respondStatusTo(h, reinvite, 488, 'Not Acceptable Here');
+      await expect(held).rejects.toMatchObject({ code: 'HOLD_NEGOTIATION_FAILED' });
+      expect(h.media.commands.filter((c) => c.type === 'rollbackDirection')).toHaveLength(1);
+      expect(h.media.commands.filter((c) => c.type === 'commitDirection')).toHaveLength(0);
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it('rolls the direction back and rejects HOLD_NEGOTIATION_FAILED when the ACK send fails', async () => {
+      const h = setup();
+      const held = h.negotiator.hold('sendonly');
+      await flush();
+      const reinvite = lastOutboundInvite(h);
+      h.transport.sendError = new TransportError('FakeTransport is not connected');
+      respond2xxTo(h, reinvite, STUB_SDP);
+      await expect(held).rejects.toMatchObject({ code: 'HOLD_NEGOTIATION_FAILED' });
+      expect(h.media.setRemoteSdps).toHaveLength(0);
+      expect(h.media.commands.filter((c) => c.type === 'rollbackDirection')).toHaveLength(1);
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it('rejects HOLD_NEGOTIATION_FAILED with a rollback on a transaction timeout', async () => {
+      const h = setup();
+      const held = h.negotiator.hold('sendonly');
+      await flush();
+      await expectPending(held);
+      h.clock.advance(32000); // INVITE timer B = 64*T1
+      await expect(held).rejects.toMatchObject({ code: 'HOLD_NEGOTIATION_FAILED' });
+      expect(h.media.commands.filter((c) => c.type === 'rollbackDirection')).toHaveLength(1);
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it('dispose during a held offer rejects and clears busy', async () => {
+      const h = setup();
+      const held = h.negotiator.hold('sendonly');
+      await flush();
+      const shutdown = new SipError(0, 'shutdown', 'LIFECYCLE_ABORTED');
+      h.negotiator.dispose(shutdown);
+      await expect(held).rejects.toThrow('shutdown');
+      expect(h.negotiator.busy).toBe(false);
+    });
+  });
+
+  describe('491 glare retry (RFC 3261 14.2)', () => {
+    it('retries exactly once after 491 with the Call-ID owner window (2100 + random*1901)', async () => {
+      const h = setup({ random: () => 0.5 }); // 2100 + floor(0.5*1901) = 3050
+      const held = h.negotiator.hold('sendonly');
+      await flush();
+      const first = lastOutboundInvite(h);
+      respondStatusTo(h, first, 491, 'Request Pending');
+      await flush();
+
+      expect(h.clock.nextDelay()).toBe(3050);
+      expect(h.negotiator.busy).toBe(true); // the operation survives the glare
+      h.clock.advance(3050);
+      await flush();
+
+      const invites = h.sentRequests.filter((r) => r.method === 'INVITE');
+      expect(invites).toHaveLength(2);
+      expect(bodyText(invites[1]!)).toContain('a=sendonly');
+      expect(invites[1]!.headers.get('CSeq')).not.toBe(invites[0]!.headers.get('CSeq'));
+
+      respond2xxTo(h, invites[1]!, STUB_SDP);
+      await flush();
+      h.media.releaseSetRemote();
+      await held;
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it('uses the 0-2000ms window for the non-Call-ID owner', async () => {
+      const h = setup({ isCallIdOwner: false, random: () => 0.5 }); // floor(0.5*2001) = 1000
+      const held = h.negotiator.hold('sendonly');
+      await flush();
+      const first = lastOutboundInvite(h);
+      respondStatusTo(h, first, 491, 'Request Pending');
+      await flush();
+      expect(h.clock.nextDelay()).toBe(1000);
+      h.clock.advance(1000);
+      await flush();
+      expect(h.sentRequests.filter((r) => r.method === 'INVITE')).toHaveLength(2);
+      respond2xxTo(h, lastOutboundInvite(h), STUB_SDP);
+      await flush();
+      h.media.releaseSetRemote();
+      await held;
+    });
+
+    it('rejects HOLD_NEGOTIATION_FAILED on a second 491 without a third INVITE', async () => {
+      const h = setup({ random: () => 0.5 });
+      const held = h.negotiator.hold('sendonly');
+      await flush();
+      const first = lastOutboundInvite(h);
+      respondStatusTo(h, first, 491, 'Request Pending');
+      await flush();
+      h.clock.advance(3050);
+      await flush();
+      expect(h.sentRequests.filter((r) => r.method === 'INVITE')).toHaveLength(2);
+      const second = lastOutboundInvite(h);
+      respondStatusTo(h, second, 491, 'Request Pending');
+      await expect(held).rejects.toMatchObject({ code: 'HOLD_NEGOTIATION_FAILED' });
+      expect(h.sentRequests.filter((r) => r.method === 'INVITE')).toHaveLength(2);
+      expect(h.media.commands.filter((c) => c.type === 'rollbackDirection')).toHaveLength(1);
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it('answers an incoming re-INVITE with 491 while a local hold is in-flight (collision)', async () => {
+      const h = setup();
+      const held = h.negotiator.hold('sendonly');
+      await flush();
+      const reinvite = makeReinvite(h.dialog, 2);
+      deliverIncoming(h, reinvite);
+      await flush();
+      expect(lastResponse(h).statusCode).toBe(491);
+      expect(h.media.answerCommands).toHaveLength(0);
+      const outbound = lastOutboundInvite(h);
+      respond2xxTo(h, outbound, STUB_SDP);
+      await flush();
+      h.media.releaseSetRemote();
+      await held;
+    });
+
+    it('dispose cancels a pending 491 retry', async () => {
+      const h = setup({ random: () => 0.5 });
+      const held = h.negotiator.hold('sendonly');
+      await flush();
+      const first = lastOutboundInvite(h);
+      respondStatusTo(h, first, 491, 'Request Pending');
+      await flush();
+      expect(h.clock.nextDelay()).toBe(3050);
+
+      const shutdown = new SipError(0, 'shutdown', 'LIFECYCLE_ABORTED');
+      h.negotiator.dispose(shutdown);
+      await expect(held).rejects.toThrow('shutdown');
+      expect(h.negotiator.busy).toBe(false);
+      h.clock.advance(3050);
+      await flush();
+      expect(h.sentRequests.filter((r) => r.method === 'INVITE')).toHaveLength(1);
+    });
+  });
+
+  describe('incoming remote hold (sendonly/inactive offers)', () => {
+    it('derives remote hold from a sendonly offer and commits it on the matching ACK', async () => {
+      const held: boolean[] = [];
+      const h = setup({ onRemoteHoldChanged: (value) => held.push(value) });
+      const reinvite = makeReinviteBody(h.dialog, SENDONLY_SDP, 2);
+      deliverIncoming(h, reinvite);
+      await flush();
+
+      expect(lastResponse(h).statusCode).toBe(200);
+      expect(h.negotiator.remoteHold).toBe(false); // pending until the ACK
+
+      deliverStateless(h, makeAck(h.dialog, 2));
+      expect(h.negotiator.remoteHold).toBe(true);
+      expect(held).toEqual([true]);
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it('derives remote hold from an inactive offer', async () => {
+      const held: boolean[] = [];
+      const h = setup({ onRemoteHoldChanged: (value) => held.push(value) });
+      const reinvite = makeReinviteBody(h.dialog, INACTIVE_SDP, 2);
+      deliverIncoming(h, reinvite);
+      await flush();
+      expect(lastResponse(h).statusCode).toBe(200);
+      deliverStateless(h, makeAck(h.dialog, 2));
+      expect(h.negotiator.remoteHold).toBe(true);
+      expect(held).toEqual([true]);
+    });
+
+    it('does not commit remote hold for a sendrecv offer', async () => {
+      const held: boolean[] = [];
+      const h = setup({ onRemoteHoldChanged: (value) => held.push(value) });
+      const reinvite = makeReinvite(h.dialog, 2);
+      deliverIncoming(h, reinvite);
+      await flush();
+      deliverStateless(h, makeAck(h.dialog, 2));
+      expect(h.negotiator.remoteHold).toBe(false);
+      expect(held).toEqual([]);
+    });
+
+    it('resets committed remote hold on a later sendrecv (un-hold) re-INVITE', async () => {
+      const held: boolean[] = [];
+      const h = setup({ onRemoteHoldChanged: (value) => held.push(value) });
+      deliverIncoming(h, makeReinviteBody(h.dialog, SENDONLY_SDP, 2));
+      await flush();
+      deliverStateless(h, makeAck(h.dialog, 2));
+      expect(h.negotiator.remoteHold).toBe(true);
+      expect(held).toEqual([true]);
+      deliverIncoming(h, makeReinviteBody(h.dialog, AUDIO_SDP, 3));
+      await flush();
+      deliverStateless(h, makeAck(h.dialog, 3));
+      expect(h.negotiator.remoteHold).toBe(false);
+      expect(held).toEqual([true, false]);
+    });
+
+    it('ignores an ACK with a mismatched CSeq and commits on the matching one', async () => {
+      const held: boolean[] = [];
+      const h = setup({ onRemoteHoldChanged: (value) => held.push(value) });
+      const reinvite = makeReinviteBody(h.dialog, SENDONLY_SDP, 2);
+      deliverIncoming(h, reinvite);
+      await flush();
+      deliverStateless(h, makeAck(h.dialog, 999));
+      expect(h.negotiator.remoteHold).toBe(false);
+      deliverStateless(h, makeAck(h.dialog, 2));
+      expect(h.negotiator.remoteHold).toBe(true);
+      expect(held).toEqual([true]);
+    });
+
+    it('never commits remote hold when no ACK arrives (200 retransmission times out)', async () => {
+      const held: boolean[] = [];
+      const h = setup({ onRemoteHoldChanged: (value) => held.push(value) });
+      const reinvite = makeReinviteBody(h.dialog, SENDONLY_SDP, 2);
+      deliverIncoming(h, reinvite);
+      await flush();
+      expect(lastResponse(h).statusCode).toBe(200);
+      h.clock.advance(32000); // 64*T1: the TU-owned 200 retransmitter times out
+      await flush();
+      expect(h.negotiator.remoteHold).toBe(false);
+      expect(held).toHaveLength(0);
+    });
+  });
+
+  describe('validateDialog', () => {
+    it('sends an in-dialog OPTIONS and resolves on a 2xx', async () => {
+      const h = setup();
+      const validated = h.negotiator.validateDialog();
+      await flush();
+      const options = h.sentRequests.filter((r) => r.method === 'OPTIONS').at(-1)!;
+      expect(options).toBeDefined();
+      expect(options.headers.get('Call-ID')).toBe(h.dialog.callId);
+      expect(h.negotiator.busy).toBe(true);
+
+      const headers = new Headers();
+      headers.set('Via', options.headers.get('Via') ?? '');
+      headers.set('From', options.headers.get('From') ?? '');
+      headers.set('To', options.headers.get('To') ?? '');
+      headers.set('Call-ID', options.headers.get('Call-ID') ?? '');
+      headers.set('CSeq', options.headers.get('CSeq') ?? '');
+      h.layer.receive(makeResponse(200, 'OK', headers));
+      await validated;
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it.each([405, 501])('resolves on a %d final', async (statusCode) => {
+      const h = setup();
+      const validated = h.negotiator.validateDialog();
+      await flush();
+      const options = h.sentRequests.filter((r) => r.method === 'OPTIONS').at(-1)!;
+      const headers = new Headers();
+      headers.set('Via', options.headers.get('Via') ?? '');
+      headers.set('From', options.headers.get('From') ?? '');
+      headers.set('To', options.headers.get('To') ?? '');
+      headers.set('Call-ID', options.headers.get('Call-ID') ?? '');
+      headers.set('CSeq', options.headers.get('CSeq') ?? '');
+      h.layer.receive(makeResponse(statusCode, statusCode === 405 ? 'Method Not Allowed' : 'Not Implemented', headers));
+      await validated;
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it('rejects on a 481 final', async () => {
+      const h = setup();
+      const validated = h.negotiator.validateDialog();
+      await flush();
+      const options = h.sentRequests.filter((r) => r.method === 'OPTIONS').at(-1)!;
+      const headers = new Headers();
+      headers.set('Via', options.headers.get('Via') ?? '');
+      headers.set('From', options.headers.get('From') ?? '');
+      headers.set('To', options.headers.get('To') ?? '');
+      headers.set('Call-ID', options.headers.get('Call-ID') ?? '');
+      headers.set('CSeq', options.headers.get('CSeq') ?? '');
+      h.layer.receive(makeResponse(481, 'Call/Transaction Does Not Exist', headers));
+      await expect(validated).rejects.toMatchObject({ statusCode: 481 });
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it('rejects SIGNALING_RECOVERY_FAILED on a transaction timeout', async () => {
+      const h = setup();
+      const validated = h.negotiator.validateDialog();
+      await flush();
+      await expectPending(validated);
+      h.clock.advance(32000); // non-INVITE client timer F = 64*T1
+      await expect(validated).rejects.toMatchObject({ code: 'SIGNALING_RECOVERY_FAILED' });
       expect(h.negotiator.busy).toBe(false);
     });
   });

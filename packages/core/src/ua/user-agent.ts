@@ -67,6 +67,8 @@ export interface UserAgentOptions {
   readonly authManager?: AuthManager;
   readonly refreshFraction?: number;
   readonly mediaController?: WorkerMediaController;
+  /** Injected uniform random in [0,1) for RFC 3261 14.2 glare-retry timing. */
+  readonly random?: () => number;
   /** Via sent-by host:port. Defaults to '192.0.2.1:5060'. */
   readonly viaAddress?: string;
   /**
@@ -382,6 +384,7 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
       layer: this.layer,
       clock: this.clock,
       controller: mediaController,
+      random: this.options.random,
       authManager: this.authManager,
       credentials: this.options.credentials,
       onDialogCreated: (dialog) => {
@@ -435,6 +438,36 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
       return Promise.reject(new SipError(0, 'no confirmed active call for ICE restart', 'INVALID_STATE'));
     }
     return owner.restartIce();
+  }
+
+  /**
+   * Place the sole confirmed active call on local hold. Valid only when exactly
+   * one confirmed owner exists; otherwise rejects INVALID_STATE.
+   */
+  hold(direction: 'sendonly' | 'inactive'): Promise<void> {
+    const owner = this.singleConfirmedOwner();
+    if (owner === undefined) {
+      return Promise.reject(new SipError(0, 'no confirmed active call for hold', 'INVALID_STATE'));
+    }
+    return owner.hold(direction);
+  }
+
+  /** Resume the sole confirmed active call from local hold. */
+  resume(): Promise<void> {
+    const owner = this.singleConfirmedOwner();
+    if (owner === undefined) {
+      return Promise.reject(new SipError(0, 'no confirmed active call for resume', 'INVALID_STATE'));
+    }
+    return owner.resume();
+  }
+
+  /** Probe the sole confirmed active call's dialog with an in-dialog OPTIONS. */
+  validateDialog(): Promise<void> {
+    const owner = this.singleConfirmedOwner();
+    if (owner === undefined) {
+      return Promise.reject(new SipError(0, 'no confirmed active call for dialog validation', 'INVALID_STATE'));
+    }
+    return owner.validateDialog();
   }
 
   /**
@@ -563,6 +596,9 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
     if (event.type === 'statelessRequest') {
       const ownerId = requestDialogId(event.request);
       const owner = ownerId === undefined ? undefined : this.dialogOwners.get(ownerId);
+      if (owner === undefined) return;
+      // An ACK completing a remote re-INVITE's 2xx commits remote-hold state.
+      if (event.request.method === 'ACK') owner.handleIncomingAck(event.request);
       if (owner instanceof Invitation) owner.handleStatelessRequest(event.request);
       return;
     }
@@ -720,6 +756,7 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
       layer: this.layer!,
       clock: this.clock,
       controller: mediaController,
+      random: this.options.random,
       T1: 500,
       T2: 4000,
       onDialogCreated: (dialog) => {
