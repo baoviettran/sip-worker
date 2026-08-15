@@ -6,6 +6,41 @@ All notable changes to this project are documented in this file, following
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-14
+
+### Added
+
+- **Real WebRTC media foundation.** `sip-worker` (browser) adds a
+  `BrowserUserAgent` composition root that ties the core SIP user agent to a
+  real `RTCPeerConnection` audio session, and exposes a typed `ua.media` facade:
+  `listDevices`, `prepare`, `selectMicrophone`, `attachRemoteAudio`,
+  `setAudioOutput`. One active media call per user agent; a busy UA answers a
+  second incoming INVITE with **486 Busy Here** before any media is acquired.
+- **Coded media errors.** Media failures surface as `MediaError` with a 12-value
+  `MediaErrorCode` union (`MEDIA_ERROR_CODES`), documented in
+  [docs/media-errors.md](docs/media-errors.md). No SDP, device ID, credential,
+  or stack data reaches a public event or error.
+- **`answer()` migration.** `Invitation.answer(localSdp)` becomes `answer()`:
+  the core invitation applies the remote offer and creates the local answer via
+  its media controller. Documented in
+  [docs/migrations/0.3-to-0.5.md](docs/migrations/0.3-to-0.5.md).
+- **ICE restart.** `BrowserUserAgent.restartIce()` forces an ICE restart on the
+  sole confirmed active call.
+- **Real three-engine media gate.** Two-way audio is verified on Chromium,
+  Firefox, and WebKit/Safari against the built and packed tarball with a
+  synthetic in-page peer (`npm run test:browser-media`).
+
+### Security
+
+- 0.5.0 is a **real browser WebRTC media foundation**, not a completed v1
+  production product and not production-ready for general real-audio deployment.
+  Working deployments require HTTPS (secure context for `getUserMedia`), WSS
+  signaling, short-lived TURN credentials, a permissive Permissions Policy, and
+  autoplay-gesture handling — all documented in
+  [docs/browser-media.md](docs/browser-media.md). Interop evidence against
+  production media stacks still gates the 1.0 framing; see
+  [SECURITY.md](SECURITY.md).
+
 ## [0.3.0] - 2026-08-12
 
 ### Added
@@ -95,6 +130,7 @@ All notable changes to this project are documented in this file, following
   observability). A real media adapter plus interop evidence gate the 1.0
   framing.
 
+[0.5.0]: https://github.com/baoviettran/sip-worker/releases/tag/v0.5.0
 [0.3.0]: https://github.com/baoviettran/sip-worker/releases/tag/v0.3.0
 [0.2.0]: https://github.com/baoviettran/sip-worker/releases/tag/v0.2.0
 [0.1.0]: https://github.com/baoviettran/sip-worker/releases/tag/v0.1.0

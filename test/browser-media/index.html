@@ -1,0 +1,425 @@
+<!doctype html>
+<!--
+  Harness document for the v0.5 real-browser WebRTC audio gate. Loads the
+  BUILT/PACKED browser bundle, wires a @sip-worker/core WorkerMediaController to
+  a real WebRtcMediaManager (real RTCPeerConnection per call), and drives a full
+  create -> negotiate -> media -> cleanup cycle against the built code.
+
+  The whole cycle (including the controllable synthetic peer and the fake non-
+  silent microphone) runs inside the page so negotiation, ICE placement, RTP
+  flow, and cleanup share one page context. The Node runner (harness.ts) only
+  invokes `window.__runCallCycle` and asserts on the returned plain-data result.
+
+  server.mjs FAILS (HTTP 503) when packages/browser/dist or packages/core/dist
+  is absent, so this page never silently serves stale/source code.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>sip-worker browser media harness</title>
+  <!--
+    The built browser chunks import the core package by its bare workspace
+    specifier `@sip-worker/core`. Browsers cannot resolve a bare specifier, so
+    we map it onto the served BUILT core bundle. Both sides are built/packed
+    artifacts, never source.
+  -->
+  <script type="importmap">{"imports":{"@sip-worker/core":"/assets/core/index.js"}}</script>
+</head>
+<body>
+  <pre id="status" style="font-family: monospace; color: #eee; background: #111; padding: 1rem;">loading built media bundle…</pre>
+  <script type="module">
+    const harm = document.getElementById('status');
+    const bridge = (window.__webRtcMediaRun = {
+      errors: [],
+      allPcs: [],
+      // Global live-resource tallies shared by every per-cycle clock / device
+      // listener adapter, so "zero after each close" is observable across all
+      // cycles.
+      gTimers: 0,
+      gListeners: 0,
+      lastRemoteAudio: null,
+    });
+    const fail = (msg, error) => {
+      harm.textContent = 'HARNESS_FATAL ' + msg + (error?.message ? ': ' + error.message : '');
+      throw error || new Error(msg);
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    // Synthetic peer + audio tools (plain JS, served at /synthetic-peer.js).
+    const { SyntheticPeer, makeSyntheticSource, measureEnergy } = await import('/synthetic-peer.js');
+
+    // Import built module singletons (shared across cycles — only the
+    // constructor-state is per-cycle).
+    let mediaMod, coreMod;
+    try {
+      mediaMod = await import('/assets/browser/media/index.js');
+      coreMod = await import('/assets/core/index.js');
+      harm.textContent = 'harness loaded: built bundle modules available';
+      bridge.booted = true;
+    } catch (error) {
+      fail('bundle-or-gate-error', error);
+    }
+
+    // Per-cycle state: a fresh manager + port pair + controller, whose
+    // dispose() fully reclaims PC, timers, device listeners, and ports.
+    async function createFreshController(iceServers, relay) {
+      bridge.diagnosticStage = 'controller-start';
+      bridge.diagnosticCauseName = undefined;
+      bridge.diagnosticConfigShape = undefined;
+      const pcs = [];
+      const ports = mediaMod.createMediaPortPair();
+      let liveTimers = 0;
+      let deviceListeners = 0;
+      let micStream = null; // set per-cycle by makeFakeMicStream
+      // Raw candidate types EMITTED via the onicecandidate event, per role. This
+      // is the faithful "gathered" signal: Firefox emits the server-reflexive
+      // (srflx) candidate during gathering but prunes it from the final
+      // checkable set (its IP equals the host candidate's reachable interface),
+      // so a post-call getStats local-candidate read misses it. The raw capture
+      // records srflx exactly when the STUN binding exchange produced it.
+      const gathered = { library: new Set(), peer: new Set() };
+      const captureCandidates = (pc, side) => {
+        try {
+          pc.addEventListener('icecandidate', (e) => {
+            const m = e.candidate && e.candidate.candidate && e.candidate.candidate.match(/typ ([a-z]+)/);
+            if (m && m[1]) gathered[side].add(m[1]);
+          });
+        } catch {}
+      };
+
+      const env = {
+        mediaDevices: {
+          getUserMedia: async () => {
+            bridge.diagnosticStage = 'get-user-media';
+            if (!micStream) throw new Error('no fake mic configured');
+            return micStream.stream;
+          },
+          enumerateDevices: async () => [
+            { deviceId: 'fake-mic', label: 'Synthetic Oscillator', groupId: 'g0', kind: 'audioinput' },
+            { deviceId: 'out-0', label: 'Output', groupId: 'g0', kind: 'audiooutput' },
+          ],
+          addEventListener: () => { bridge.gListeners += 1; deviceListeners += 1; },
+          removeEventListener: () => { bridge.gListeners -= 1; deviceListeners -= 1; },
+        },
+        createPeerConnection: (cfg) => {
+          bridge.diagnosticStage = 'peer-connection-constructor';
+          // True relay mode flows iceTransportPolicy:'relay' THROUGH the library
+          // (WebRtcMediaManager options -> session -> env.createPeerConnection),
+          // so a relay gate proves the production option really forces the
+          // transport policy, not merely that the stub wires a config.
+          const finalCfg = relay ? { ...cfg, iceTransportPolicy: 'relay' } : cfg;
+          const firstServer = finalCfg.iceServers?.[0];
+          bridge.diagnosticConfigShape = JSON.stringify({ serverCount: finalCfg.iceServers?.length ?? 0, urls: Array.isArray(firstServer?.urls) ? 'array' : typeof firstServer?.urls, username: typeof firstServer?.username, credential: typeof firstServer?.credential, policy: finalCfg.iceTransportPolicy });
+          let pc;
+          try { pc = new RTCPeerConnection(finalCfg); }
+          catch (error) { bridge.diagnosticCauseName = error?.name ?? 'unknown'; throw error; }
+          bridge.diagnosticStage = 'peer-connection-created';
+          pcs.push(pc);
+          bridge.allPcs.push(pc);
+          captureCandidates(pc, 'library');
+          return pc;
+        },
+        createMediaStream: (t) => (t ? new MediaStream(t) : new MediaStream()),
+        getAudioCapabilities: () => {
+          try { return (RTCRtpSender.getCapabilities && RTCRtpSender.getCapabilities('audio')) || null; }
+          catch { return null; }
+        },
+      };
+      const clock = {
+        now: () => Date.now(),
+        setTimeout: (cb, ms) => { bridge.gTimers += 1; return setTimeout(() => { bridge.gTimers -= 1; cb(); }, ms); },
+        clearTimeout: (id) => { bridge.gTimers -= 1; clearTimeout(id); },
+      };
+      const emitter = { emit: function(type, value) { if (type === 'remoteAudio') { this.lastRemoteAudio = value; bridge.lastRemoteAudio = value; } if (type === 'mediaStateChanged') (this.states ||= []).push(value.state); } };
+      emitter.lastRemoteAudio = null;
+      emitter.states = [];
+
+      const manager = new mediaMod.WebRtcMediaManager({
+        env,
+        // Forced-relay mode flows iceTransportPolicy:'relay' through the production
+        // options channel (WebRtcMediaManagerOptions -> WebRtcMediaSession ->
+        // env.createPeerConnection), so the selected-candidate assertions below
+        // prove the real library option forces relay — not a stub shortcut.
+        options: iceServers
+          ? (relay ? { iceServers, iceTransportPolicy: 'relay' } : { iceServers })
+          : {},
+        clock,
+        emitter: { emit: (t, v) => emitter.emit(t, v) },
+      });
+      ports.browser.subscribe((m) => manager.postMessage(m));
+      manager.subscribeReplies((r) => ports.browser.postMessage(r));
+      const controller = new coreMod.WorkerMediaController(ports.core);
+
+      return {
+        controller, manager, ports, pcs, env, emitter, clock,
+        gathered, captureCandidates,
+        liveTimers: () => liveTimers,
+        deviceListeners: () => deviceListeners,
+        globals: () => ({ gTimers: bridge.gTimers, gListeners: bridge.gListeners }),
+        micStreamRef: { get: () => micStream, set: (s) => { micStream = s; } },
+        dispose() {
+          try { controller.close(); } catch {}
+          try { manager.dispose(); } catch {}
+          ports.close();
+          // Late timers from setTimeout callback wrappers may still decrement;
+          // we force them to zero after dispose since the underlying real timer
+          // is now detached.
+          if (micStream) micStream.stop?.();
+          micStream = null;
+        },
+      };
+    }
+
+    // ---- per-cycle driver ----
+    async function runCallCycle({ scenario = 'direct', freqA = 440, freqB = 880, cycleIndex = 0, relay = null } = {}) {
+      const result = { cycleIndex, scenario };
+      let ctx = null, peer = null, micSrc = null, libPc = null;
+      const sessionId = 'cycle-' + cycleIndex;
+      try {
+        // STUN, direct, or forced TURN relay. STUN uses a real RFC-5389 binding
+        // server started by the gate's own webServer on loopback. Forced relay
+        // hands each peer a relay-only RTCPeerConnection config (iceServers +
+        // iceTransportPolicy:'relay') so BOTH endpoints may only select relay
+        // candidates. No credentials, SDP, or candidate data are ever placed in
+        // the returned plain-data result.
+        const iceServers = scenario === 'stun'
+          ? [{ urls: 'stun:127.0.0.1:4101' }]
+          : scenario === 'relay'
+            ? [{ urls: 'turn:' + (relay?.host ?? '127.0.0.1') + ':' + (relay?.port ?? 3478), username: relay?.username ?? '', credential: relay?.credential ?? '' }]
+            : [];
+        // Baseline of the STUN server's served-binding counter BEFORE this
+        // cycle, so the per-cycle delta (bindings served while THIS call was
+        // setting up) is asserted rather than the cumulative total.
+        const stunBaseline = Number(await (await fetch('/stun-count')).text());
+        ctx = await createFreshController(iceServers, relay);
+
+        // The library sends freqB (library -> peer); peer sends freqA.
+        // We supply an oscillator stream as the library's mic via the
+        // per-cycle micStreamRef.
+        micSrc = makeSyntheticSource(freqB);
+        ctx.micStreamRef.set(micSrc);
+
+        if (scenario === 'stun' || scenario === 'direct' || scenario === 'relay') {
+          // OUTGOING: library offers, peer answers. STUN vs direct vs relay
+          // affects candidate types but not the peer's config shape (the
+          // library's config flows through env.createPeerConnection). A relay
+          // peer applies forced-relay transport policy on its own PC.
+          const offerSdp = await ctx.controller.createOffer(sessionId);
+          if (typeof offerSdp !== 'string' || !offerSdp.includes('m=audio')) {
+            throw new Error('offer lacks m=audio');
+          }
+          if (!/^a=candidate:/m.test(offerSdp)) {
+            throw new Error('library offer lacks gathered ICE candidates');
+          }
+          libPc = ctx.pcs[ctx.pcs.length - 1] ?? null;
+
+          // In relay mode the peer may address the SAME TURN host as the library
+          // (default, single relay) or a DISTINCT host (`relay.peerHost`). On CI
+          // the peer points at a second loopback alias (127.0.0.2) so coturn hands
+          // the two allocations distinct relay IPs — required for coturn to relay
+          // between two same-server clients. Credentials are never exposed.
+          let turnCfg = { iceServers: [] };
+          if (scenario === 'relay') {
+            const peerTurnUrl = 'turn:' + (relay?.peerHost ?? relay?.host ?? '127.0.0.1') + ':' + (relay?.port ?? 3478);
+            turnCfg = { iceServers: [{ urls: peerTurnUrl, username: relay?.username ?? '', credential: relay?.credential ?? '' }], iceTransportPolicy: 'relay' };
+          }
+          peer = new SyntheticPeer({ ...turnCfg, freqHz: freqA, register: (pc) => { bridge.allPcs.push(pc); ctx.pcs.push(pc); ctx.captureCandidates(pc, 'peer'); } });
+          const answerSdp = await peer.answerOffer(offerSdp);
+          await ctx.controller.setRemote(sessionId, answerSdp);
+        }
+
+        if (!peer || !libPc) throw new Error('peer or library PC not created');
+
+        // Connection + ICE gathering
+        await waitFor(() => libPc.connectionState === 'connected', 'library pc connected', ctx, 20000);
+        await waitFor(() => libPc.iceGatheringState === 'complete', 'library gathering', ctx, 20000);
+        await waitFor(() => peer.pc.connectionState === 'connected', 'peer pc connected', ctx, 20000);
+        await waitFor(() => peer.pc.iceGatheringState === 'complete', 'peer gathering', ctx, 20000);
+
+        // Let media flow, then measure RTP growth both ways.
+        await sleep(1000);
+        const libGrowth = await waitForRtpGrowth(libPc, 15000);
+        const peerGrowth = await waitForRtpGrowth(peer.pc, 15000);
+        result.libraryMedia = { ok: libGrowth.ok, inbound: libGrowth.inbound, outbound: libGrowth.outbound };
+        result.peerMedia = { ok: peerGrowth.ok, inbound: peerGrowth.inbound, outbound: peerGrowth.outbound };
+
+        // Remote tracks both ways
+        result.peerRemoteTracks = peer.remoteAudioTracks();
+        result.libraryRemoteTracks = ctx.emitter.lastRemoteAudio ? ctx.emitter.lastRemoteAudio.stream?.getAudioTracks()?.length || 0 : 0;
+
+        // Audio energy
+        result.libraryEnergy = ctx.emitter.lastRemoteAudio?.stream
+          ? await measureEnergy(ctx.emitter.lastRemoteAudio.stream) : { ok: false, peak: 0, reason: 'no-remote-stream' };
+        result.peerEnergy = await measureEnergy(peer.remoteAudioStream());
+
+        // Selected candidate types
+        result.librarySelectedTypes = await collectSelectedTypes(libPc);
+        result.peerSelectedTypes = await collectSelectedTypes(peer.pc);
+        // Gathered local candidates (raw onicecandidate, both roles) so the
+        // STUN scenario can prove a real server-reflexive exchange rather than
+        // collapsing to host-host. Raw capture is used (not the post-call
+        // getStats local-candidate list) because Firefox prunes a same-realm
+        // srflx from the final checkable set — the exchange still happened and
+        // the raw event recorded it.
+        result.gatheredCandidateTypes = {
+          library: [...ctx.gathered.library].sort(),
+          peer: [...ctx.gathered.peer].sort(),
+        };
+        // Engine-agnostic STUN proof: the number of RFC-5389 Binding Requests OUR STUN
+        // server served WHILE THIS CALL was setting up (current counter minus the
+        // per-cycle baseline read before the PC was built; same-origin readbacks
+        // are not possible against the UDP server, so the HTTP server mirrors the
+        // counter). This is the load-bearing hardening — Firefox prunes a
+        // same-realm srflx from its final candidate set, so no per-engine
+        // candidate-type assertion is truthful on every engine, whereas a
+        // served-binding count is identical everywhere. 0 for direct, N>0 for the
+        // STUN scenario.
+        try { result.stunBindingsServed = Number(await (await fetch('/stun-count')).text()) - stunBaseline; }
+        catch { result.stunBindingsServed = 0; }
+
+        // ICE / connection states
+        result.libraryIceState = libPc.iceConnectionState;
+        result.libraryConnState = libPc.connectionState;
+        result.peerIceState = peer.pc.iceConnectionState;
+        result.peerConnState = peer.pc.connectionState;
+
+        return result;
+      } catch (error) {
+        bridge.errors.push(error);
+        result.error = { name: error.name, message: error.message, code: error.code, operation: error.operation, diagnosticStage: bridge.diagnosticStage, causeName: bridge.diagnosticCauseName, configShape: bridge.diagnosticConfigShape };
+        return result;
+      } finally {
+        // Cleanup
+        try { peer?.close(); } catch {}
+        try { ctx?.controller.closeSession(sessionId); } catch {}
+        await sleep(300);
+        if (ctx) {
+          result.timersBefore = ctx.liveTimers();
+          result.listenersBefore = ctx.deviceListeners();
+          // Dispose the manager to fully reclaim.
+          ctx.dispose();
+          await sleep(100);
+          result.timersAfter = ctx.liveTimers();
+          result.listenersAfter = ctx.deviceListeners();
+          result.pcsAfter = ctx.pcs.filter((p) => p.connectionState !== 'closed').length;
+        }
+        if (micSrc) micSrc.stop?.();
+      }
+    }
+
+    async function waitFor(func, desc, ctx, timeoutMs) {
+      const start = Date.now();
+      for (;;) {
+        const v = func();
+        if (v) return v;
+        if (Date.now() - start > timeoutMs) {
+          const lastErr = bridge.errors[bridge.errors.length - 1];
+          throw new Error('waitFor(' + desc + ') timed out' + (lastErr ? ': ' + lastErr.message : ''));
+        }
+        await sleep(100);
+      }
+    }
+
+    async function waitForRtpGrowth(pc, timeoutMs = 15000) {
+      // Capture a genuine baseline first, then require BOTH packet AND byte
+      // counters to strictly INCREASE from that baseline in BOTH directions
+      // over a real window. A PC that counts once and then freezes (equal
+      // counters in the follow-up snapshot) never satisfies the strict `>`
+      // and must time out -> ok:false. This is a real measured increase, not a
+      // first-snapshot-nonzero check.
+      const baseline = await snapshot(pc);
+      const start = Date.now();
+      for (;;) {
+        await sleep(400);
+        const s = await snapshot(pc);
+        const grew =
+          s.inbound.packets > baseline.inbound.packets &&
+          s.inbound.bytes > baseline.inbound.bytes &&
+          s.outbound.packets > baseline.outbound.packets &&
+          s.outbound.bytes > baseline.outbound.bytes;
+        if (grew) return { ok: true, baseline, inbound: s.inbound, outbound: s.outbound };
+        if (Date.now() - start > timeoutMs) return { ok: false, baseline, inbound: s.inbound, outbound: s.outbound };
+      }
+    }
+
+    async function snapshot(pc) {
+      const stats = await pc.getStats();
+      const out = { inbound: { packets: 0, bytes: 0 }, outbound: { packets: 0, bytes: 0 } };
+      stats.forEach((s) => {
+        if (s.type === 'inbound-rtp' && s.kind === 'audio') {
+          out.inbound.packets = Math.max(out.inbound.packets, s.packetsReceived ?? 0);
+          out.inbound.bytes = Math.max(out.inbound.bytes, s.bytesReceived ?? 0);
+        } else if (s.type === 'outbound-rtp' && s.kind === 'audio') {
+          out.outbound.packets = Math.max(out.outbound.packets, s.packetsSent ?? 0);
+          out.outbound.bytes = Math.max(out.outbound.bytes, s.bytesSent ?? 0);
+        }
+      });
+      return out;
+    }
+
+    function collectSelectedTypes(pc) {
+      return new Promise((resolve) => {
+        pc.getStats().then((stats) => {
+          let pair = null;
+          stats.forEach((s) => { if (s.type === 'candidate-pair' && s.state === 'succeeded' && (!pair || s.priority > pair.priority)) pair = s; });
+          if (!pair) return resolve({ local: null, remote: null });
+          let local = null, remote = null;
+          stats.forEach((s) => {
+            if (s.type === 'local-candidate' && s.id === pair.localCandidateId) local = s.candidateType;
+            if (s.type === 'remote-candidate' && s.id === pair.remoteCandidateId) remote = s.candidateType;
+          });
+          resolve({ local, remote });
+        });
+      });
+    }
+
+    bridge.runCallCycle = runCallCycle;
+    bridge.measureEnergy = measureEnergy;
+    bridge.createSyntheticSource = makeSyntheticSource;
+
+    bridge.resourceState = () => ({
+      openPcs: bridge.allPcs.filter((p) => p.connectionState !== 'closed').length,
+      timers: bridge.gTimers,
+      listeners: bridge.gListeners,
+    });
+
+    // The Node runner drives through this single entry.
+    window.__runCallCycle = (opts) => runCallCycle(opts);
+
+    // Shipping-Safari media acceptance gate. Runs ONE real create->negotiate->
+    // media->cleanup cycle of the BUILT library against the synthetic peer on a
+    // direct host path (no STUN/TURN infra needed in the macOS job), then returns
+    // ONLY plain, non-sensitive data: assertions-passed/failed with the observable
+    // evidence a WebDriver runner can assert over HTTP. No credentials, device
+    // ids, SDP, or candidate strings leave the page.
+    window.runMediaAcceptance = async () => {
+      try {
+        const r = await runCallCycle({ scenario: 'direct', freqA: 523, freqB: 220, cycleIndex: 0, relay: null });
+        const checks = {
+          offerAnswer: !r.error && r.libraryIceState && r.peerIceState != null,
+          connected: r.libraryConnState === 'connected' && r.peerConnState === 'connected',
+          rtpBothWays: r.libraryMedia?.ok === true && r.peerMedia?.ok === true,
+          selectedCandidates: !!(r.librarySelectedTypes?.local && r.librarySelectedTypes?.remote),
+          remoteTracks: (r.libraryRemoteTracks ?? 0) > 0 && (r.peerRemoteTracks ?? 0) > 0,
+          cleanup: (r.pcsAfter ?? -1) === 0,
+        };
+        const passed = Object.values(checks).every(Boolean);
+        return {
+          passed,
+          checks,
+          error: r.error ? { name: r.error.name, message: r.error.message } : null,
+          libraryIceState: r.libraryIceState ?? null,
+          conn: { library: r.libraryConnState ?? null, peer: r.peerConnState ?? null },
+          rtp: {
+            library: r.libraryMedia ? { in: r.libraryMedia.inbound.packets, out: r.libraryMedia.outbound.packets } : null,
+            peer: r.peerMedia ? { in: r.peerMedia.inbound.packets, out: r.peerMedia.outbound.packets } : null,
+          },
+        };
+      } catch (error) {
+        return { passed: false, checks: {}, error: { name: error.name || 'Error', message: error.message || String(error) }, libraryIceState: null, conn: null, rtp: null };
+      }
+    };
+  </script>
+</body>
+</html>

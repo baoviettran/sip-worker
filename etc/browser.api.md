@@ -4,9 +4,157 @@
 
 ```ts
 
+import { MediaError as MediaError_2 } from '@sip-worker/core';
+import { MediaErrorCode } from '@sip-worker/core';
+import { MediaMessage } from '@sip-worker/core';
+import { MediaReply } from '@sip-worker/core';
+import { RegisterState } from '@sip-worker/core';
+import { RegistrationIdentity } from '@sip-worker/core';
 import { Transport } from '@sip-worker/core/transport';
 import { TransportCapabilities } from '@sip-worker/core/transport';
 import { TransportEvent } from '@sip-worker/core/transport';
+import { TypedEventEmitter } from '@sip-worker/core';
+import { UserAgentEventMap } from '@sip-worker/core';
+import { UserAgentOptions } from '@sip-worker/core';
+
+// Warning: (ae-missing-release-tag) "BrowserAudioDevice" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface BrowserAudioDevice {
+    // (undocumented)
+    readonly deviceId: string;
+    // (undocumented)
+    readonly groupId: string;
+    // (undocumented)
+    readonly kind: 'audioinput' | 'audiooutput';
+    // (undocumented)
+    readonly label: string;
+}
+
+// Warning: (ae-missing-release-tag) "BrowserMedia" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+// Warning: (ae-missing-release-tag) "BrowserMedia" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+interface BrowserMedia {
+    // (undocumented)
+    attachRemoteAudio(element: HTMLMediaElement, options?: {
+        readonly outputDeviceId?: string;
+        readonly play?: boolean;
+    }): Promise<() => void>;
+    // (undocumented)
+    listDevices(): Promise<readonly BrowserAudioDevice[]>;
+    // (undocumented)
+    prepare(options?: PrepareMediaOptions): Promise<void>;
+    // (undocumented)
+    selectMicrophone(deviceId: string | undefined): Promise<void>;
+    // (undocumented)
+    setAudioOutput(element: HTMLMediaElement, deviceId: string): Promise<void>;
+}
+
+// @public
+class BrowserMedia {
+    // Warning: (ae-forgotten-export) The symbol "WebRtcMediaManager" needs to be exported by the entry point index.d.ts
+    constructor(manager: WebRtcMediaManager);
+    dispose(): void;
+}
+export { BrowserMedia }
+export { BrowserMedia as BrowserMediaInterface }
+
+// Warning: (ae-missing-release-tag) "BrowserMediaEnvironment" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface BrowserMediaEnvironment {
+    // (undocumented)
+    createMediaStream(tracks?: MediaStreamTrack[]): MediaStream;
+    // (undocumented)
+    createPeerConnection(configuration: RTCConfiguration): RTCPeerConnection;
+    // (undocumented)
+    getAudioCapabilities(): RTCRtpCapabilities | null;
+    // (undocumented)
+    readonly mediaDevices: Pick<MediaDevices, 'getUserMedia' | 'enumerateDevices' | 'addEventListener' | 'removeEventListener'>;
+}
+
+// Warning: (ae-missing-release-tag) "BrowserMediaEventMap" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface BrowserMediaEventMap {
+    // (undocumented)
+    readonly deviceChanged: {
+        readonly type: 'deviceChanged';
+    };
+    // (undocumented)
+    readonly mediaFailed: {
+        readonly type: 'mediaFailed';
+        readonly sessionId: string;
+        readonly error: MediaError_2;
+    };
+    // (undocumented)
+    readonly mediaStateChanged: {
+        readonly type: 'mediaStateChanged';
+        readonly sessionId: string;
+        readonly previous: MediaSessionState;
+        readonly state: MediaSessionState;
+        readonly reason?: MediaErrorCode;
+    };
+    // (undocumented)
+    readonly remoteAudio: {
+        readonly type: 'remoteAudio';
+        readonly sessionId: string;
+        readonly stream: MediaStream;
+    };
+}
+
+// Warning: (ae-missing-release-tag) "BrowserMediaOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface BrowserMediaOptions {
+    // (undocumented)
+    readonly audioConstraints?: MediaTrackConstraints;
+    // (undocumented)
+    readonly codecPreference?: readonly MediaCodec[];
+    // (undocumented)
+    readonly iceGatheringTimeoutMs?: number;
+    // (undocumented)
+    readonly iceServers?: readonly RTCIceServer[];
+    // (undocumented)
+    readonly iceTransportPolicy?: RTCIceTransportPolicy;
+    // (undocumented)
+    readonly mediaOperationTimeoutMs?: number;
+    // (undocumented)
+    readonly microphoneDeviceId?: string;
+}
+
+// Warning: (ae-missing-release-tag) "BrowserUserAgent" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export class BrowserUserAgent extends TypedEventEmitter<BrowserUserAgentEventMap> {
+    constructor(options: BrowserUserAgentOptions);
+    bye(): Promise<void>;
+    get callState(): string;
+    connect(): Promise<void>;
+    dispose(): Promise<void>;
+    get identity(): RegistrationIdentity | undefined;
+    invite(target: string): Promise<void>;
+    get media(): BrowserMedia;
+    register(): Promise<void>;
+    get registerState(): RegisterState;
+    restartIce(): Promise<void>;
+    unregister(): Promise<void>;
+}
+
+// Warning: (ae-missing-release-tag) "BrowserUserAgentEventMap" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface BrowserUserAgentEventMap extends UserAgentEventMap, BrowserMediaEventMap {
+}
+
+// Warning: (ae-missing-release-tag) "BrowserUserAgentOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type BrowserUserAgentOptions = Omit<UserAgentOptions, 'mediaController'> & {
+    readonly media?: BrowserMediaOptions;
+    readonly mediaEnvironment?: BrowserMediaEnvironment;
+};
 
 // Warning: (ae-missing-release-tag) "BrowserWebSocketFactory" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
@@ -51,6 +199,69 @@ export class BrowserWebSocketTransport implements Transport {
     // (undocumented)
     subscribe(listener: (event: TransportEvent) => void): () => void;
 }
+
+// Warning: (ae-missing-release-tag) "createBrowserMediaEnvironment" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export function createBrowserMediaEnvironment(_options?: BrowserMediaOptions): BrowserMediaEnvironment;
+
+// Warning: (ae-missing-release-tag) "DEFAULT_ICE_GATHERING_TIMEOUT_MS" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export const DEFAULT_ICE_GATHERING_TIMEOUT_MS = 8000;
+
+// Warning: (ae-missing-release-tag) "DEFAULT_MEDIA_OPERATION_TIMEOUT_MS" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export const DEFAULT_MEDIA_OPERATION_TIMEOUT_MS = 30000;
+
+// Warning: (ae-missing-release-tag) "MAX_MEDIA_TIMEOUT_MS" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export const MAX_MEDIA_TIMEOUT_MS = 120000;
+
+// Warning: (ae-missing-release-tag) "MEDIA_CODECS" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export const MEDIA_CODECS: readonly MediaCodec[];
+
+// Warning: (ae-missing-release-tag) "MediaCodec" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type MediaCodec = 'opus' | 'PCMU' | 'PCMA';
+
+// Warning: (ae-missing-release-tag) "MediaSessionState" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type MediaSessionState = 'new' | 'acquiring' | 'negotiating' | 'connecting' | 'connected' | 'failed' | 'closed';
+
+// Warning: (ae-missing-release-tag) "NormalizedMediaOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type NormalizedMediaOptions = {
+    readonly iceServers?: readonly RTCIceServer[];
+    readonly iceTransportPolicy?: RTCIceTransportPolicy;
+    readonly iceGatheringTimeoutMs: number;
+    readonly mediaOperationTimeoutMs: number;
+    readonly microphoneDeviceId?: string;
+    readonly audioConstraints?: MediaTrackConstraints;
+    readonly codecPreference?: readonly MediaCodec[];
+};
+
+// Warning: (ae-missing-release-tag) "PrepareMediaOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface PrepareMediaOptions {
+    // (undocumented)
+    readonly microphoneDeviceId?: string;
+    // (undocumented)
+    readonly signal?: AbortSignal;
+}
+
+// Warning: (ae-missing-release-tag) "validateBrowserMediaOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export function validateBrowserMediaOptions(options: BrowserMediaOptions): Readonly<NormalizedMediaOptions>;
 
 
 export * from "@sip-worker/core";

@@ -318,7 +318,7 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
       throw new Error('UserAgent not connected');
     }
     if (this.activeInviter !== undefined) {
-      throw new Error('Call already in progress');
+      throw new SipError(0, 'Call already in progress', 'INVALID_STATE');
     }
 
     const mediaController = this.options.mediaController;
@@ -371,6 +371,33 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
 
     this.activeInviter = inviter;
     await inviter.invite();
+  }
+
+  /**
+ * Request an ICE restart on the sole confirmed active call. Valid only when
+ * exactly one confirmed owner exists (the active inviter or a single active
+ * invitation that is confirmed); otherwise rejects INVALID_STATE.
+ */
+  restartIce(): Promise<void> {
+    const owner = this.singleConfirmedOwner();
+    if (owner === undefined) {
+      return Promise.reject(new SipError(0, 'no confirmed active call for ICE restart', 'INVALID_STATE'));
+    }
+    return owner.restartIce();
+  }
+
+  /**
+   * The single confirmed call owner, or undefined when there is not exactly one
+   * confirmed active call. An unconfirmed activeInviter or more than one active
+   * invitation disqualify.
+   */
+  private singleConfirmedOwner(): DialogOwner | undefined {
+    let candidates: DialogOwner[] = [];
+    if (this.activeInviter !== undefined) candidates.push(this.activeInviter);
+    for (const invitation of this.activeInvitations.values()) candidates.push(invitation);
+    candidates = candidates.filter((owner) => owner.session.state === 'confirmed');
+    if (candidates.length !== 1) return undefined;
+    return candidates[0];
   }
 
   /** Terminate the active call with BYE. */
@@ -506,6 +533,21 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
       return;
     }
 
+    // An in-dialog (To-tag present) INVITE routes to the owner's negotiator.
+    if (event.request.method === 'INVITE' && extractTag(event.request.headers.get('To')) !== undefined) {
+      const ownerId = requestDialogId(event.request);
+      const owner = ownerId === undefined ? undefined : this.dialogOwners.get(ownerId);
+      if (owner !== undefined) {
+        owner.handleIncomingRequest(event.transaction, event.request);
+        return;
+      }
+      this.layer?.sendResponse(
+        event.transaction.key,
+        this.requestResponse(event.request, 481, 'Call/Transaction Does Not Exist'),
+      );
+      return;
+    }
+
     const ownerId = requestDialogId(event.request);
     const owner = ownerId === undefined ? undefined : this.dialogOwners.get(ownerId);
     if (owner !== undefined) {
@@ -542,6 +584,20 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
   }
 
   /**
+   * An invitation is in a "nonterminal" conversation when its session is not
+   * terminated or failed — the same predicate core uses to decide session
+   * cleanup. Such an invitation still owns a live/or negotiating call and so
+   * counts toward the one-call busy limit.
+   */
+  private hasNonterminalInvitation(): boolean {
+    for (const invitation of this.activeInvitations.values()) {
+      const state = invitation.session.state;
+      if (state !== 'terminated' && state !== 'failed') return true;
+    }
+    return false;
+  }
+
+  /**
    * Tell the media controller the session is done. Guarded for an absent
    * `mediaController` (UA may run without one) and for an absent
    * `closeSession` method (callers may inject a minimal controller that only
@@ -553,7 +609,10 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
     const close = (controller as { closeSession?: (sessionId: string) => void }).closeSession;
     if (typeof close !== 'function') return;
     try {
-      close(owner.mediaSessionId);
+      // Bind to the controller: the method's `this` reads the controller's
+      // `closed`/`port` state, so an unbound bare reference would throw under
+      // strict mode and silently skip the media teardown notification.
+      close.call(controller, owner.mediaSessionId);
     } catch {
       // A teardown notification must never throw into the session state machine.
     }
@@ -572,6 +631,21 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
     const existing = this.activeInvitations.get(inviteId);
     if (existing !== undefined) {
       existing.handleDuplicateInvite(transaction, request);
+      return;
+    }
+    // One-call limit (v0.5): a busy UA rejects a NEW incoming INVITE at the SIP
+    // level with 486 Busy Here BEFORE any media acquisition or Invitation
+    // construction, so a second call can never contend for the single media
+    // session. Busy means an outgoing inviter exists OR any existing invitation
+    // is still in a nonterminal conversation state. A duplicate retransmission
+    // of the SAME inviteId is exempted above (it takes the duplicate path).
+    const busy = this.activeInviter !== undefined
+      || this.hasNonterminalInvitation();
+    if (busy) {
+      this.layer?.sendResponse(
+        transaction.key,
+        this.requestResponse(request, 486, 'Busy Here'),
+      );
       return;
     }
     const mediaController = this.options.mediaController;

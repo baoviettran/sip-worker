@@ -1,0 +1,81 @@
+name: Browser Media (three-engine) + forced TURN relay
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Mandatory real-browser + forced-TURN evidence for the v0.5 media release gate.
+# Both jobs FAIL on absent infrastructure (missing TURN vars, an engine that
+# cannot meet the contract, or a relay that does not relay). There is NO
+# continue-on-error and NO successful skip path — required capabilities cannot be
+# skipped. A failing gate blocks the release prerequisite.
+concurrency:
+  group: browser-media-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  three-engine:
+    name: Chromium / Firefox / WebKit real audio
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install browser engines
+        run: npm run test:browser-media:install
+      - name: Build / pack the browser package (built artifacts only)
+        run: npm run build
+      - name: Three-engine real RTP audio suite
+        # run the full three-engine suite, EXCLUDING the forced-turn-relay spec
+        # (that spec requires provisioned TURN and runs in its own job with coturn).
+        run: npx playwright test --test-project=chromium --test-project=firefox --test-project=webkit --grep-invert "forced TURN relay"
+      - name: Upload Playwright traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces-${{ github.run_id }}
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  forced-turn-relay:
+    name: Forced TURN relay audio
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install browser engines for the relay gate
+        run: npm run test:browser-media:install
+      - name: Build / pack the browser package (built artifacts only)
+        run: npm run build
+      - name: Generate ephemeral TURN credentials
+        shell: bash
+        run: |
+          turn_password="$(openssl rand -hex 24)"
+          echo "::add-mask::$turn_password"
+          echo "TURN_USERNAME=ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+          echo "TURN_PASSWORD=$turn_password" >> "$GITHUB_ENV"
+      - name: Provision pinned coturn relay
+        id: coturn
+        env:
+          TURN_PORT: "3478"
+        run: bash test/turn/coturn.bootstrap.sh
+      - name: Forced TURN relay gate (relay candidates + two-way audio)
+        env:
+          TURN_URL: "turn:127.0.0.1"
+          TURN_PEER_URL: "turn:127.0.0.2"
+          TURN_PORT: "3478"
+        run: npx playwright test turn-relay.spec.ts
+      - name: Clean up coturn
+        if: always()
+        run: docker rm -f sip-worker-relay >/dev/null 2>&1 || true

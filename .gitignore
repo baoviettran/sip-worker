@@ -6,3 +6,7 @@ dist/
 *.tsbuildinfo
 *.tgz
 packages/*/temp/
+# Playwright test artifacts (test/browser-media gate)
+test-results/
+playwright-report/
+blob-report/

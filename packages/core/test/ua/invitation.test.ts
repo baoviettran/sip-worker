@@ -21,6 +21,12 @@ const REMOTE_URI = 'sip:alice@example.com';
 const LOCAL_URI = 'sip:bob@example.com';
 const CONTACT = `<${LOCAL_URI}>`;
 
+/** Remote SDP offer carried by the incoming INVITE. */
+const REMOTE_SDP = 'v=0\r\no=alice 1 1 IN IP4 192.0.2.1\r\ns=-\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n';
+
+/** Local answer SDP the media port returns for createAnswer. */
+const ANSWER_SDP = STUB_SDP;
+
 /** Id generator producing distinct branch seeds per call. */
 function makeIdGenerator(): { branch: () => string } {
   let n = 0;
@@ -28,13 +34,12 @@ function makeIdGenerator(): { branch: () => string } {
 }
 
 /**
- * A two-sided in-memory media port. Captures outbound commands and
- * auto-replies over a microtask with STUB_SDP (offer/answer) or void
- * (setRemote), keyed by the requestId the controller awaits.
+ * A two-sided in-memory media port. Captures outbound commands and keeps each
+ * createAnswer pending until the test explicitly delivers a mediaResult or
+ * mediaError reply keyed by the requestId the controller awaits.
  */
 class FakeMediaPort {
   commands: MediaCommand[] = [];
-  autoReplySetRemote = true;
   private listeners = new Set<(message: MediaMessage) => void>();
 
   postMessage(message: MediaMessage): void {
@@ -42,11 +47,6 @@ class FakeMediaPort {
       return;
     }
     this.commands.push(message);
-    if (message.type === 'setRemote') {
-      if (this.autoReplySetRemote) queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId }));
-      return;
-    }
-    queueMicrotask(() => this.deliver({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId, sdp: STUB_SDP }));
   }
 
   subscribe(listener: (message: MediaMessage) => void): () => void {
@@ -56,17 +56,29 @@ class FakeMediaPort {
     };
   }
 
+  get createAnswerCommands(): Array<{ type: 'createAnswer'; requestId: string; sessionId: string; remoteSdp: string }> {
+    return this.commands.filter((c) => c.type === 'createAnswer') as Array<{ type: 'createAnswer'; requestId: string; sessionId: string; remoteSdp: string }>;
+  }
+
   get setRemoteSdps(): string[] {
     return this.commands
       .filter((c) => c.type === 'setRemote')
       .map((c) => (c.type === 'setRemote' ? c.remoteSdp : ''));
   }
 
-  rejectPendingSetRemote(message: string): void {
-    const command = [...this.commands].reverse().find((candidate) => candidate.type === 'setRemote');
-    if (command?.type !== 'setRemote') throw new Error('no pending setRemote command');
+  /** Resolve the most recent pending createAnswer with the given answer SDP. */
+  answerCreateAnswer(sdp = ANSWER_SDP): void {
+    const command = [...this.commands].reverse().find((candidate) => candidate.type === 'createAnswer');
+    if (command?.type !== 'createAnswer') throw new Error('no pending createAnswer command');
+    this.deliver({ type: 'mediaResult', requestId: command.requestId, sessionId: command.sessionId, sdp });
+  }
+
+  /** Reject the most recent pending createAnswer with a typed media failure. */
+  rejectPendingCreateAnswer(message: string): void {
+    const command = [...this.commands].reverse().find((candidate) => candidate.type === 'createAnswer');
+    if (command?.type !== 'createAnswer') throw new Error('no pending createAnswer command');
     this.deliver({
-      type: 'mediaError', requestId: command.requestId, sessionId: command.sessionId, message,
+      type: 'mediaError', requestId: command.requestId, sessionId: command.sessionId, message, code: 'NEGOTIATION_FAILED',
     });
   }
 
@@ -118,8 +130,7 @@ function setup(): Harness {
   inviteHeaders.set('Content-Type', 'application/sdp');
 
   const encoder = new TextEncoder();
-  const remoteSdp = 'v=0\r\no=alice 1 1 IN IP4 192.0.2.1\r\ns=-\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n';
-  const body = encoder.encode(remoteSdp);
+  const body = encoder.encode(REMOTE_SDP);
 
   const invite = makeRequest('INVITE', LOCAL_URI, inviteHeaders, body);
 
@@ -179,24 +190,34 @@ function okResponses(sent: Uint8Array[]): Array<{ msg: any; bytes: Uint8Array }>
 }
 
 describe('Invitation (incoming SIP call session)', () => {
-  it('receives INVITE, answers with 200 OK, receives ACK → confirmed', async () => {
+  it('receives INVITE, answers with locally-created SDP, receives ACK → confirmed', async () => {
     const h = setup();
 
-    // Answer the INVITE
-    const answerPromise = h.invitation.answer(STUB_SDP);
+    // Answer the INVITE: no application-supplied SDP.
+    const answerPromise = h.invitation.answer();
     await flush();
 
-    // Remote SDP was set
-    expect(h.media.setRemoteSdps.length).toBe(1);
-    expect(h.media.setRemoteSdps[0]).toContain('o=alice');
+    // A createAnswer command is issued carrying the remote offer, and no 200 OK
+    // is emitted until the answer SDP is delivered.
+    expect(h.media.createAnswerCommands).toEqual([
+      {
+        type: 'createAnswer',
+        requestId: expect.any(String),
+        sessionId: h.invitation.mediaSessionId,
+        remoteSdp: REMOTE_SDP,
+      },
+    ]);
+    expect(okResponses(h.sent)).toHaveLength(0);
 
-    // 200 OK was sent (transaction layer sends it, plus automatic 100 Trying)
+    // Deliver the local answer; only now is the 200 OK sent with that SDP.
+    h.media.answerCreateAnswer(ANSWER_SDP);
+    await flush();
+
     const okList = okResponses(h.sent);
-    // Debug: log all sent messages
     expect(okList.length).toBe(1);
     const ok = okList[0]!.msg;
     expect(ok.statusCode).toBe(200);
-    expect(bodyText(ok)).toBe(STUB_SDP);
+    expect(bodyText(ok)).toBe(ANSWER_SDP);
 
     // Session is not yet confirmed (waiting for ACK)
     expect(h.invitation.session.state).not.toBe('confirmed');
@@ -223,10 +244,11 @@ describe('Invitation (incoming SIP call session)', () => {
   it('settles a valid ACK once before throwing and re-entrant confirmed observers', async () => {
     const h = setup();
     let settlements = 0;
-    const answer = h.invitation.answer(STUB_SDP).then(
+    const answer = h.invitation.answer().then(
       () => { settlements += 1; return 'resolved'; },
       (error: Error) => { settlements += 1; return error.message; },
     );
+    h.media.answerCreateAnswer();
     await flush();
 
     h.invitation.session.on((event) => {
@@ -251,9 +273,8 @@ describe('Invitation (incoming SIP call session)', () => {
 
   it('settles a valid CANCEL once before throwing and re-entrant terminated observers', async () => {
     const h = setup();
-    h.media.autoReplySetRemote = false;
     let settlements = 0;
-    const answer = h.invitation.answer(STUB_SDP).then(
+    const answer = h.invitation.answer().then(
       () => { settlements += 1; return undefined; },
       (error: unknown) => { settlements += 1; return error; },
     );
@@ -281,10 +302,11 @@ describe('Invitation (incoming SIP call session)', () => {
   it('settles an ACK-timeout failure once before throwing and re-entrant failed observers', async () => {
     const h = setup();
     let settlements = 0;
-    const answer = h.invitation.answer(STUB_SDP).then(
+    const answer = h.invitation.answer().then(
       () => { settlements += 1; return 'resolved'; },
       (error: Error) => { settlements += 1; return error.message; },
     );
+    h.media.answerCreateAnswer();
     await flush();
 
     h.invitation.session.on((event) => {
@@ -301,7 +323,8 @@ describe('Invitation (incoming SIP call session)', () => {
 
   it('ignores an ACK whose numeric CSeq differs from the accepted INVITE', async () => {
     const h = setup();
-    const answer = h.invitation.answer(STUB_SDP);
+    const answer = h.invitation.answer();
+    h.media.answerCreateAnswer();
     await flush();
 
     const ackHeaders = new Headers();
@@ -330,7 +353,8 @@ describe('Invitation (incoming SIP call session)', () => {
   it('retransmits 200 OK at T1, 2*T1, 4*T1 intervals', async () => {
     const h = setup();
 
-    void h.invitation.answer(STUB_SDP);
+    void h.invitation.answer();
+    h.media.answerCreateAnswer();
     await flush();
 
     // Initial send
@@ -359,7 +383,8 @@ describe('Invitation (incoming SIP call session)', () => {
   it('stops retransmission when ACK arrives', async () => {
     const h = setup();
 
-    void h.invitation.answer(STUB_SDP);
+    void h.invitation.answer();
+    h.media.answerCreateAnswer();
     await flush();
 
     let okList = okResponses(h.sent);
@@ -394,7 +419,8 @@ describe('Invitation (incoming SIP call session)', () => {
   it('times out after 64*T1 if no ACK', async () => {
     const h = setup();
 
-    const answerPromise = h.invitation.answer(STUB_SDP);
+    const answerPromise = h.invitation.answer();
+    h.media.answerCreateAnswer();
     await flush();
 
     // Advance to 64*T1 (32000ms)
@@ -411,7 +437,8 @@ describe('Invitation (incoming SIP call session)', () => {
       throw new TransportError('initial 200 send failed');
     };
     let outcome: unknown = 'pending';
-    const answer = h.invitation.answer(STUB_SDP);
+    const answer = h.invitation.answer();
+    h.media.answerCreateAnswer();
     void answer.then(
       () => { outcome = 'resolved'; },
       (error: unknown) => { outcome = error; },
@@ -440,7 +467,8 @@ describe('Invitation (incoming SIP call session)', () => {
       return send(bytes);
     };
     let outcome: unknown = 'pending';
-    const answer = h.invitation.answer(STUB_SDP);
+    const answer = h.invitation.answer();
+    h.media.answerCreateAnswer();
     void answer.then(
       () => { outcome = 'resolved'; },
       (error: unknown) => { outcome = error; },
@@ -492,7 +520,7 @@ describe('Invitation (incoming SIP call session)', () => {
       .map((parsed) => parsed.ok && parsed.value.kind === 'response' ? parsed.value.statusCode : 0);
     expect(finalStatuses).toEqual([486]);
     expect(h.recorded.filter((event) => event.state === 'failed')).toHaveLength(1);
-    const lateAnswer = h.invitation.answer(STUB_SDP);
+    const lateAnswer = h.invitation.answer();
     const outcome = await Promise.race([
       lateAnswer.then(() => 'resolved', (error: Error) => error.message),
       flush().then(() => 'pending'),
@@ -504,10 +532,11 @@ describe('Invitation (incoming SIP call session)', () => {
 
   it('rejects a second answer while the first answer is pending', async () => {
     const h = setup();
-    const first = h.invitation.answer(STUB_SDP);
+    const first = h.invitation.answer();
 
-    await expect(h.invitation.answer(STUB_SDP)).rejects.toThrow('answer() already called');
-    await expect(h.invitation.answer(STUB_SDP)).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    await expect(h.invitation.answer()).rejects.toThrow('answer() already called');
+    await expect(h.invitation.answer()).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    h.media.answerCreateAnswer();
     await flush();
 
     expect(okResponses(h.sent)).toHaveLength(1);
@@ -516,8 +545,7 @@ describe('Invitation (incoming SIP call session)', () => {
 
   it('keeps cancellation first-wins when pending media setup later rejects', async () => {
     const h = setup();
-    h.media.autoReplySetRemote = false;
-    const answer = h.invitation.answer(STUB_SDP);
+    const answer = h.invitation.answer();
 
     const cancelHeaders = new Headers();
     cancelHeaders.set('Via', 'SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-inv-1');
@@ -531,7 +559,7 @@ describe('Invitation (incoming SIP call session)', () => {
     await expect(answer).rejects.toMatchObject({ statusCode: 487 });
     expect(h.invitation.session.state).toBe('terminated');
 
-    h.media.rejectPendingSetRemote('late media failure');
+    h.media.rejectPendingCreateAnswer('late media failure');
     await flush();
 
     expect(h.invitation.session.state).toBe('terminated');
@@ -539,9 +567,53 @@ describe('Invitation (incoming SIP call session)', () => {
     expect(h.recorded.some((event) => event.state === 'failed')).toBe(false);
   });
 
+  it('rejects answer with a typed MediaError when createAnswer fails', async () => {
+    const h = setup();
+    const answer = h.invitation.answer();
+    await flush();
+
+    // No 200 OK before the media failure is known.
+    expect(okResponses(h.sent)).toHaveLength(0);
+
+    let error: unknown;
+    const settled = answer.then(
+      () => { error = undefined; },
+      (err: unknown) => { error = err; },
+    );
+    h.media.rejectPendingCreateAnswer('ICE negotiation failed');
+    await settled;
+
+    const mediaError = error as Error & { code?: string; name?: string };
+    expect(mediaError.name).toBe('MediaError');
+    expect(mediaError.code).toBe('NEGOTIATION_FAILED');
+    expect(mediaError.message).toBe('ICE negotiation failed');
+    expect(h.invitation.session.state).toBe('failed');
+  });
+
+  it('disposes a pending answer without sending 200 or leaking media', async () => {
+    const h = setup();
+    const answer = h.invitation.answer();
+    await flush();
+
+    expect(okResponses(h.sent)).toHaveLength(0);
+
+    h.invitation.dispose(new Error('user hung up'));
+    await expect(answer).rejects.toThrow('user hung up');
+    await flush();
+
+    // No 200 OK was ever sent; the session ended without a confirmed transition
+    // and the invitation released its resources (no retransmitter, no deferred).
+    expect(okResponses(h.sent)).toHaveLength(0);
+    expect(h.invitation.session.state).toBe('failed');
+    expect(h.recorded.some((event) => event.state === 'confirmed')).toBe(false);
+    expect((h.invitation as any).answerDeferred).toBeUndefined();
+    expect((h.invitation as any).retransmitter).toBeUndefined();
+  });
+
   it('rejects answer once when a valid BYE arrives before ACK', async () => {
     const h = setup();
-    const answer = h.invitation.answer(STUB_SDP);
+    const answer = h.invitation.answer();
+    h.media.answerCreateAnswer();
     await flush();
 
     const byeHeaders = new Headers();
@@ -563,7 +635,8 @@ describe('Invitation (incoming SIP call session)', () => {
 
   it('keeps BYE first-wins when its 200 send re-entrantly delivers the matching ACK', async () => {
     const h = setup();
-    const answer = h.invitation.answer(STUB_SDP);
+    const answer = h.invitation.answer();
+    h.media.answerCreateAnswer();
     await flush();
 
     const captureSend = h.transport.onSend;
@@ -633,7 +706,8 @@ describe('Invitation (incoming SIP call session)', () => {
       routeRequest(h, makeRequest('BYE', LOCAL_URI, byeHeaders));
     };
 
-    const answer = h.invitation.answer(STUB_SDP);
+    const answer = h.invitation.answer();
+    h.media.answerCreateAnswer();
     await expect(answer).rejects.toThrow('BYE received before ACK');
     expect(h.invitation.session.state).toBe('terminated');
 
@@ -675,7 +749,9 @@ describe('Invitation (incoming SIP call session)', () => {
       routeRequest(h, makeRequest('ACK', REMOTE_URI, ackHeaders));
     };
 
-    await h.invitation.answer(STUB_SDP);
+    const answer = h.invitation.answer();
+    h.media.answerCreateAnswer();
+    await answer;
     expect(h.invitation.session.state).toBe('confirmed');
 
     h.clock.advance(32000);
@@ -689,7 +765,8 @@ describe('Invitation (incoming SIP call session)', () => {
   it('after confirmed, receives BYE, sends 200 OK → terminated', async () => {
     const h = setup();
 
-    void h.invitation.answer(STUB_SDP);
+    void h.invitation.answer();
+    h.media.answerCreateAnswer();
     await flush();
 
     // Send ACK

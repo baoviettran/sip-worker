@@ -4,6 +4,7 @@ import { STUB_SDP } from '../../src/media/protocol.js';
 import { WorkerMediaController } from '../../src/media/worker-controller.js';
 import { StubMainMediaHandler } from '../../src/media/stub-main-handler.js';
 import { MediaTimeoutError } from '../../src/media/worker-controller.js';
+import { MediaError } from '../../src/media/errors.js';
 import { FakeClock } from '../support/fake-clock.js';
 
 /** Asserts a promise has not settled yet. */
@@ -93,6 +94,32 @@ describe('WorkerMediaController serialization', () => {
     expect(() => structuredClone(sent)).not.toThrow();
   });
 
+  it('leaves iceRestart absent on a plain createOffer', () => {
+    const { controller, port } = makeBridge();
+    controller.createOffer('session-1');
+    const sent = firstDelivered(port);
+    expect(sent.type).toBe('createOffer');
+    expect('iceRestart' in sent ? sent.iceRestart : undefined).toBeUndefined();
+  });
+
+  it('posts iceRestart: true on a restarting createOffer', () => {
+    const { controller, port } = makeBridge();
+    controller.createOffer('session-1', { iceRestart: true });
+    const sent = firstDelivered(port);
+    expect(sent.type).toBe('createOffer');
+    expect('iceRestart' in sent ? sent.iceRestart : undefined).toBe(true);
+    // Restart intent stays plain data and structured-clone safe.
+    expect(() => structuredClone(sent)).not.toThrow();
+  });
+
+  it('posts no iceRestart when the option is explicitly false', () => {
+    const { controller, port } = makeBridge();
+    controller.createOffer('session-1', { iceRestart: false });
+    const sent = firstDelivered(port);
+    expect(sent.type).toBe('createOffer');
+    expect('iceRestart' in sent ? sent.iceRestart : undefined).toBeUndefined();
+  });
+
   it('resolves createOffer to STUB_SDP when the matching result arrives', async () => {
     const { controller, port } = makeBridge();
     const offer = controller.createOffer('session-1');
@@ -147,8 +174,144 @@ describe('WorkerMediaController serialization', () => {
     const { controller, port } = makeBridge();
     const offer = controller.createOffer('session-1');
     const sent = firstDelivered(port);
-    port.deliver({ type: 'mediaError', requestId: sent.requestId, sessionId: 'session-1', message: 'no codecs' });
+    port.deliver({
+      type: 'mediaError',
+      requestId: sent.requestId,
+      sessionId: 'session-1',
+      message: 'no codecs',
+      code: 'NEGOTIATION_FAILED',
+    });
     await expect(offer).rejects.toThrow('no codecs');
+    const err = await offer.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MediaError);
+    const mediaErr = err as MediaError;
+    expect(mediaErr.code).toBe('NEGOTIATION_FAILED');
+    expect(mediaErr.sessionId).toBe('session-1');
+    expect(mediaErr.operation).toBe('createOffer');
+  });
+
+  it('reconstructs a MediaError carrying code, session, and operation', async () => {
+    const { controller, port } = makeBridge();
+    const offer = controller.createOffer('session-9');
+    const sent = firstDelivered(port);
+    port.deliver({
+      type: 'mediaError',
+      requestId: sent.requestId,
+      sessionId: 'session-9',
+      message: 'mic blocked',
+      code: 'PERMISSION_DENIED',
+    });
+    await expect(offer).rejects.toBeInstanceOf(MediaError);
+    const err = await offer.catch((e: unknown) => e) as MediaError;
+    expect(err.code).toBe('PERMISSION_DENIED');
+    expect(err.sessionId).toBe('session-9');
+    expect(err.operation).toBe('createOffer');
+    expect(err.name).toBe('MediaError');
+  });
+
+  for (const code of ['INVALID_STATE', 'MEDIA_OPERATION_TIMEOUT'] as const) {
+    it(`reconstructs ${code} without flattening it`, async () => {
+      const { controller, port } = makeBridge();
+      const offer = controller.createOffer('session-coded');
+      const sent = firstDelivered(port);
+      port.deliver({
+        type: 'mediaError',
+        requestId: sent.requestId,
+        sessionId: 'session-coded',
+        message: 'safe media failure',
+        code,
+      });
+
+      await expect(offer).rejects.toMatchObject({
+        name: 'MediaError',
+        code,
+        sessionId: 'session-coded',
+      });
+    });
+  }
+  it('maps an unknown reply code to INTERNAL_ERROR', async () => {
+    const { controller, port } = makeBridge();
+    const offer = controller.createOffer('session-3');
+    const sent = firstDelivered(port);
+    port.deliver({
+      type: 'mediaError',
+      requestId: sent.requestId,
+      sessionId: 'session-3',
+      message: 'bogus code',
+      code: 'NOT_A_REAL_CODE',
+    } as unknown as MediaReply);
+    await expect(offer).rejects.toBeInstanceOf(MediaError);
+    const err = await offer.catch((e: unknown) => e) as MediaError;
+    expect(err.code).toBe('INTERNAL_ERROR');
+  });
+
+  it('keeps a coded mediaError distinct from MediaTimeoutError', async () => {
+    const { controller, port } = makeBridge();
+    const offer = controller.createOffer('session-1');
+    const sent = firstDelivered(port);
+    port.deliver({
+      type: 'mediaError',
+      requestId: sent.requestId,
+      sessionId: 'session-1',
+      message: 'no codecs',
+      code: 'NEGOTIATION_FAILED',
+    });
+    const err = await offer.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MediaError);
+    expect(err).not.toBeInstanceOf(MediaTimeoutError);
+  });
+
+  it('keeps MediaTimeoutError distinct from a coded MediaError class', async () => {
+    const clock = new FakeClock();
+    const { controller, port } = makeBridge({ clock, deadlineMs: 1000 });
+    const offer = controller.createOffer('session-t');
+    const sent = firstDelivered(port);
+    port.deliver({
+      type: 'mediaError',
+      requestId: sent.requestId,
+      sessionId: 'session-t',
+      message: 'negotiation rejected',
+      code: 'NEGOTIATION_FAILED',
+    });
+    // A coded reply rejects with MediaError, not the timeout error.
+    await expect(offer).rejects.toBeInstanceOf(MediaError);
+    await expect(offer).rejects.not.toBeInstanceOf(MediaTimeoutError);
+    // And a genuinely missing reply still rejects with MediaTimeoutError.
+    const stale = controller.createOffer('session-u');
+    firstDelivered(port);
+    await expectPending(stale);
+    clock.advance(1001);
+    await expect(stale).rejects.toBeInstanceOf(MediaTimeoutError);
+    await expect(stale).rejects.not.toBeInstanceOf(MediaError);
+  });
+
+  it('serializes mediaError replies carrying only message and code', async () => {
+    const { controller, port } = makeBridge();
+    const offer = controller.createOffer('session-1');
+    const sent = firstDelivered(port);
+    port.deliver({
+      type: 'mediaError',
+      requestId: sent.requestId,
+      sessionId: 'session-1',
+      message: 'no codecs',
+      code: 'NEGOTIATION_FAILED',
+    });
+    await expect(offer).rejects.toThrow('no codecs');
+    // Serialized reply must be clone-safe and carry only message + code (no
+    // SDP, device, stack, or ICE data).
+    expect(() => structuredClone(sent)).not.toThrow();
+    const reply: Record<string, unknown> = {
+      type: 'mediaError',
+      requestId: sent.requestId,
+      sessionId: 'session-1',
+      message: 'no codecs',
+      code: 'NEGOTIATION_FAILED',
+    };
+    const cloned = structuredClone(reply);
+    expect(cloned).toMatchObject({ type: 'mediaError', message: 'no codecs', code: 'NEGOTIATION_FAILED' });
+    for (const key of ['sdp', 'deviceId', 'ice', 'stack']) {
+      expect(key in cloned).toBe(false);
+    }
   });
 
   it('preserves the thrown cause when postMessage fails on send', async () => {
@@ -206,6 +369,19 @@ describe('StubMainMediaHandler', () => {
     expect(reply.requestId).toBe('req-1');
     expect(reply).toStrictEqual({ type: 'mediaResult', requestId: 'req-1', sessionId: 'session-1', sdp: STUB_SDP });
     expect(handler.offers('session-1')).toBe(STUB_SDP);
+  });
+
+  it('records those offers that carry restart intent', () => {
+    const port = new FakePort();
+    const handler = new StubMainMediaHandler(port);
+    port.deliver({ type: 'createOffer', requestId: 'req-a', sessionId: 'sess-plain' });
+    port.deliver({ type: 'createOffer', requestId: 'req-b', sessionId: 'sess-restart', iceRestart: true });
+    port.deliver({ type: 'createOffer', requestId: 'req-c', sessionId: 'sess-plain' });
+    expect(handler.offersRestarted('sess-restart')).toBe(true);
+    expect(handler.offersRestarted('sess-plain')).toBe(false);
+    // Replied with SDP for both.
+    expect(handler.offers('sess-restart')).toBe(STUB_SDP);
+    expect(handler.offers('sess-plain')).toBe(STUB_SDP);
   });
 
   it('records remote SDP for createAnswer and setRemote', () => {

@@ -7,7 +7,7 @@
 // and runs deterministic browser/node signaling smoke flows driven by core
 // UserAgent/codec fakes — proving package composition, not external-server
 // interoperability. The local core tarball is supplied in the same npm install
-// so npm never fetches the registry 0.3.0.
+// so npm never fetches the registry 0.5.0.
 //
 // Run via `npm run test:compatibility`.
 import assert from 'node:assert/strict';
@@ -45,7 +45,7 @@ try {
     await cp(join(fixturesRoot, kind), fresh, { recursive: true });
 
     // Same-command install: the local core tarball answers @sip-worker/core so
-    // npm never resolves the registry 0.3.0 for the adapter dependencies.
+    // npm never resolves the registry 0.5.0 for the adapter dependencies.
     await execFileAsync(
       'npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund',
         '--no-package-lock', ...toInstall],

@@ -3,3 +3,5 @@ export type { MediaCommand, MediaMessage, MediaPort, MediaReply, MediaRequestMes
 export { WorkerMediaController, MediaTimeoutError } from './worker-controller.js';
 export type { WorkerMediaControllerOptions } from './worker-controller.js';
 export { StubMainMediaHandler } from './stub-main-handler.js';
+export { MediaError, MEDIA_ERROR_CODES } from './errors.js';
+export type { MediaErrorCode } from './errors.js';

@@ -22,9 +22,11 @@ import { sendOwnedRequest } from '../transactions/request-ownership.js';
 import type { Clock, TransportToken } from '../transport/index.js';
 import type { AuthManager, AuthFailure } from '../auth/manager.js';
 import type { WorkerMediaController } from '../media/worker-controller.js';
+import { MediaError } from '../media/errors.js';
 import { Session } from './session.js';
 import { DialogSet, type DialogSuccessResult } from './dialog-set.js';
 import { responseMatchesRequestIdentity } from './response-identity.js';
+import { DialogNegotiator } from './dialog-negotiator.js';
 
 export interface InviterOptions {
   readonly to: string;
@@ -64,6 +66,7 @@ export class Inviter {
   private readonly viaConfig: ViaConfig;
   private readonly idGenerator: IdGenerator;
   private readonly layer: TransactionLayer;
+  private readonly clock: Clock;
   private readonly controller: WorkerMediaController;
   private readonly authManager?: AuthManager;
   private readonly credentials?: { readonly username: string; readonly password: string };
@@ -88,6 +91,12 @@ export class Inviter {
   private requestVersion = 0;
   private hangupVersion = 0;
   private readonly cleanupOperations = new Set<CleanupOperation>();
+  /**
+   * The single in-flight negotiation (selected 2xx → setRemote) promise. While
+   * it is pending, later repeated/forked 2xx must NOT start a second negotiation
+   * or re-settle. Set to undefined once the selected negotiation settles.
+   */
+  private selectedNegotiation: Promise<void> | undefined;
 
   constructor(options: InviterOptions) {
     this.session = new Session();
@@ -97,6 +106,7 @@ export class Inviter {
     this.viaConfig = { token: options.viaToken, sentBy: options.viaAddress };
     this.idGenerator = options.idGenerator;
     this.layer = options.layer;
+    this.clock = options.clock;
     this.controller = options.controller;
     this.authManager = options.authManager;
     this.credentials = options.credentials;
@@ -181,6 +191,44 @@ export class Inviter {
   /** The media session id used for offer/answer on this call. */
   get mediaSessionId(): string {
     return this.sessionId;
+  }
+
+  private activeNegotiator: DialogNegotiator | undefined;
+
+  /** Request an ICE restart on the confirmed dialog. */
+  restartIce(): Promise<void> {
+    if (this.disposed) {
+      return Promise.reject(new SipError(0, 'Inviter has been disposed', 'LIFECYCLE_ABORTED'));
+    }
+    const negotiator = this.ensureNegotiator();
+    if (negotiator === undefined) {
+      return Promise.reject(new SipError(0, 'call not confirmed', 'INVALID_STATE'));
+    }
+    return negotiator.restartIce();
+  }
+
+  /** Build the negotiator once (and only once) the selected dialog exists. */
+  private ensureNegotiator(): DialogNegotiator | undefined {
+    if (this.activeNegotiator !== undefined) return this.activeNegotiator;
+    const dialog = this.dialog;
+    if (dialog === undefined) return undefined;
+    this.activeNegotiator = new DialogNegotiator({
+      owner: { dialog, mediaSessionId: this.sessionId },
+      layer: this.layer,
+      controller: this.controller,
+      clock: this.clock,
+      idGenerator: this.idGenerator,
+      via: this.viaConfig,
+      contact: this.contact,
+    });
+    return this.activeNegotiator;
+  }
+
+  /** Dispose the negotiator before media closes so late re-INVITEs can't fire. */
+  private disposeNegotiator(reason: unknown): void {
+    const negotiator = this.activeNegotiator;
+    this.activeNegotiator = undefined;
+    negotiator?.dispose(reason);
   }
 
   private async startInvite(): Promise<void> {
@@ -338,16 +386,77 @@ export class Inviter {
     }
     if (this.disposed) return;
 
-    // Only the selected dialog owns the application media answer.
-    const sdp = DialogSet.sdpFromBody(response);
-    if (result.selected && result.created && sdp.length > 0) {
-      void this.controller.setRemote(this.sessionId, sdp);
+    // Only the selected created dialog owns the application media answer. Require
+    // a non-empty SDP and settle invite ONLY after the remote description has
+    // been successfully applied to the media layer. A single selected-negotiation
+    // promise guards against asynchronous repeated/forked 2xx (same or different
+    // To tag) re-negotiating or re-settling while a setRemote is still pending.
+    if (result.selected) {
+      if (result.created && this.selectedNegotiation === undefined) {
+        this.ensureSelectedNegotiation(response);
+      }
+      // While a selected negotiation is in flight (or just settled), every
+      // subsequent selected-tag 2xx awaits the SAME promise so the invite settles
+      // exactly once and never re-negotiates.
+      if (this.selectedNegotiation !== undefined) {
+        await this.selectedNegotiation;
+        return;
+      }
+      this.confirmInvite();
     }
+  }
 
-    // Transition to confirmed and resolve the invite promise once, on the
-    // first (selected) dialog. Repeated/forked 2xx produce no state change.
+  /**
+   * Start the single selected-negotiation for the first (created) 2xx: require a
+   * non-empty SDP, apply it to the media layer, then settle exactly once. Sets
+   * `selectedNegotiation` to the in-flight promise and clears it on completion so
+   * a late repeated 2xx no longer awaits (or rejects) a stale negotiation.
+   */
+  private ensureSelectedNegotiation(response: SipResponseMessage): void {
+    const sdp = DialogSet.sdpFromBody(response);
+    const dialog = this.dialogSet?.selectedDialog;
+    if (sdp.length === 0) {
+      const error = new MediaError('NEGOTIATION_FAILED', '2xx response carried no SDP', this.sessionId, 'setRemote');
+      this.selectedNegotiation = undefined;
+      // The dialog has already been created and ACKed by handleSuccess. Close it
+      // with a BYE when possible (unless the hangup path owns it) so the remote
+      // does not hold a dangling established dialog after we fail and close media.
+      if (dialog !== undefined && !this.hangingUp) {
+        void this.sendByeForDialog(dialog).catch(() => {});
+      }
+      if (this.inviteDeferred !== undefined) this.fail(error);
+      return;
+    }
+    const negotiation = this.controller
+      .setRemote(this.sessionId, sdp)
+      .then(
+        () => {
+          this.selectedNegotiation = undefined;
+          if (this.disposed) return;
+          // The selected call is confirmed only once the remote description has
+          // been applied and the invite promise settles.
+          this.confirmInvite();
+        },
+        (reason: unknown) => {
+          this.selectedNegotiation = undefined;
+          if (this.disposed) return;
+          // On a rejected remote description for the created dialog, send a BYE
+          // when possible (unless the hangup path already owns it), then fail the
+          // call. Media closure is left to UA terminal ownership so it happens
+          // exactly once.
+          if (dialog !== undefined && !this.hangingUp) {
+            void this.sendByeForDialog(dialog).catch(() => {});
+          }
+          this.fail(reason);
+        },
+      );
+    this.selectedNegotiation = negotiation;
+  }
+
+  /** Settle the invite promise and transition to confirmed, exactly once. */
+  private confirmInvite(): void {
     const deferred = this.inviteDeferred;
-    if (deferred !== undefined && result.selected) {
+    if (deferred !== undefined) {
       this.inviteDeferred = undefined;
       this.settleAuthExchange();
       deferred.resolve();
@@ -484,6 +593,16 @@ export class Inviter {
   /** Handle a request addressed to the confirmed dialog. */
   handleIncomingRequest(transaction: ServerTransaction, request: SipRequestMessage): void {
     if (this.disposed) return;
+    // An in-dialog re-INVITE is answered through the serialized negotiator.
+    if (request.method === 'INVITE') {
+      const negotiator = this.ensureNegotiator();
+      if (negotiator === undefined) {
+        this.layer.sendResponse(transaction.key, this.requestResponse(request, 481, 'Call/Transaction Does Not Exist'));
+        return;
+      }
+      negotiator.handleIncoming(transaction, request);
+      return;
+    }
     if (request.method !== 'BYE') {
       this.layer.sendResponse(transaction.key, this.requestResponse(request, 481, 'Call/Transaction Does Not Exist'));
       return;
@@ -521,6 +640,7 @@ export class Inviter {
   dispose(error: unknown): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.disposeNegotiator(error);
     this.teardown();
     this.settleAuthExchange();
 
@@ -540,6 +660,7 @@ export class Inviter {
   }
 
   private fail(reason: unknown): void {
+    this.disposeNegotiator(reason);
     this.teardown();
     this.settleAuthExchange();
     const deferred = this.inviteDeferred;
@@ -553,6 +674,7 @@ export class Inviter {
   }
 
   private settleHangup(): void {
+    this.disposeNegotiator(new SipError(0, 'call terminated', 'LIFECYCLE_ABORTED'));
     this.teardownHangup();
     const deferred = this.hangupDeferred;
     this.hangupDeferred = undefined;

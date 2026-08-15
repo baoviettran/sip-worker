@@ -1,7 +1,7 @@
 {
   "name": "sip-worker",
-  "version": "0.3.0",
-  "description": "Signaling-only SIP stack (RFC 3261) browser entry point as a TypeScript library.",
+  "version": "0.5.0",
+  "description": "Browser SIP user agent (RFC 3261) with real WebRTC audio, as a TypeScript library.",
   "license": "MIT",
   "type": "module",
   "sideEffects": false,
@@ -32,10 +32,15 @@
       "types": "./dist/transport/index.d.ts",
       "import": "./dist/transport/index.js",
       "require": "./dist/transport/index.cjs"
+    },
+    "./media": {
+      "types": "./dist/media/index.d.ts",
+      "import": "./dist/media/index.js",
+      "require": "./dist/media/index.cjs"
     }
   },
   "dependencies": {
-    "@sip-worker/core": "0.3.0"
+    "@sip-worker/core": "0.5.0"
   },
   "scripts": {
     "build": "tsup",

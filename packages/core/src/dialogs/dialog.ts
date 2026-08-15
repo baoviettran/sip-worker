@@ -186,13 +186,13 @@ export class Dialog {
    * numeric CSeq with method ACK and a fresh Via branch; does not mutate the
    * local CSeq.
    */
-  createAck(response: SipResponseMessage): SipRequestMessage {
+  createAck(response: SipResponseMessage, cseq?: number): SipRequestMessage {
     const headers = new Headers();
     headers.set('Via', makeTopVia(this.viaConfig, makeBranch(this.idGenerator.branch())));
     headers.set('To', response.headers.get('To') ?? this.toValue);
     headers.set('From', this.fromValue);
     headers.set('Call-ID', this.callIdValue);
-    headers.set('CSeq', `${this.invCSeq} ACK`);
+    headers.set('CSeq', `${cseq ?? this.invCSeq} ACK`);
     headers.set('Max-Forwards', this.maxForwards);
     this.setRoute(headers);
     return makeRequest('ACK', this.requestTarget(), headers, new Uint8Array());

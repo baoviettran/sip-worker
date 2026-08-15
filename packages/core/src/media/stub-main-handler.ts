@@ -10,6 +10,7 @@ export class StubMainMediaHandler {
   private readonly offersBySession = new Map<string, string>();
   private readonly remoteBySession = new Map<string, string>();
   private readonly closedSessionsSet = new Set<string>();
+  private readonly restartRequests = new Set<string>();
   private readonly detach: () => void;
   private closed = false;
 
@@ -34,6 +35,11 @@ export class StubMainMediaHandler {
     return [...this.closedSessionsSet];
   }
 
+  /** Whether any createOffer for the session carried restart intent. */
+  offersRestarted(sessionId: string): boolean {
+    return this.restartRequests.has(sessionId);
+  }
+
   /** Stop listening; further commands are ignored. */
   unsubscribe(): void {
     this.closed = true;
@@ -44,6 +50,7 @@ export class StubMainMediaHandler {
     if (this.closed) return;
     if (message.type === 'createOffer') {
       this.offersBySession.set(message.sessionId, STUB_SDP);
+      if (message.iceRestart) this.restartRequests.add(message.sessionId);
       this.reply({ type: 'mediaResult', requestId: message.requestId, sessionId: message.sessionId, sdp: STUB_SDP });
       return;
     }
@@ -62,6 +69,7 @@ export class StubMainMediaHandler {
       this.closedSessionsSet.add(message.sessionId);
       this.offersBySession.delete(message.sessionId);
       this.remoteBySession.delete(message.sessionId);
+      this.restartRequests.delete(message.sessionId);
       return;
     }
   }

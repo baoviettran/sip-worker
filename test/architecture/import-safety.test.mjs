@@ -28,6 +28,7 @@ const TARGETS = [
   // browser
   { pkg: 'sip-worker', subpath: '.' },
   { pkg: 'sip-worker', subpath: './transport' },
+  { pkg: 'sip-worker', subpath: './media' },
   // node
   { pkg: '@sip-worker/node', subpath: '.' },
   { pkg: '@sip-worker/node', subpath: './transport' },

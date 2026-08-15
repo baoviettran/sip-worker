@@ -162,7 +162,7 @@ export interface DerivedTimers extends TimerConfig {
 export class Dialog {
     // (undocumented)
     get callId(): string;
-    createAck(response: SipResponseMessage): SipRequestMessage;
+    createAck(response: SipResponseMessage, cseq?: number): SipRequestMessage;
     createRequest(method: string): SipRequestMessage;
     static fromUac(request: SipRequestMessage, response: SipResponseMessage, idGenerator: IdGenerator, viaConfig: ViaConfig): Dialog;
     static fromUas(request: SipRequestMessage, response: SipResponseMessage, idGenerator: IdGenerator, viaConfig: ViaConfig): Dialog;
@@ -280,7 +280,7 @@ export interface IncomingCallEvent {
 // @public (undocumented)
 export class Invitation {
     constructor(options: InvitationOptions);
-    answer(localSdp: string): Promise<void>;
+    answer(): Promise<void>;
     // (undocumented)
     get dialog(): Dialog | undefined;
     dispose(error: unknown): void;
@@ -291,6 +291,7 @@ export class Invitation {
     matchesInvite(request: SipRequestMessage): boolean;
     get mediaSessionId(): string;
     reject(statusCode: number, reason?: string): void;
+    restartIce(): Promise<void>;
     // (undocumented)
     readonly session: Session;
     // (undocumented)
@@ -405,13 +406,25 @@ export function makeRequest(method: string, uri: string, headers?: Headers_2, bo
 // @public (undocumented)
 export function makeResponse(statusCode: number, reasonPhrase: string, headers?: Headers_2, body?: Uint8Array): SipResponseMessage;
 
+// Warning: (ae-missing-release-tag) "MEDIA_ERROR_CODES" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export const MEDIA_ERROR_CODES: readonly ["PERMISSION_DENIED", "DEVICE_NOT_FOUND", "DEVICE_UNAVAILABLE", "CONSTRAINT_UNSATISFIED", "NEGOTIATION_FAILED", "REMOTE_DESCRIPTION_REJECTED", "ICE_GATHERING_TIMEOUT", "ICE_CONNECTION_FAILED", "OUTPUT_SELECTION_UNSUPPORTED", "PLAYBACK_FAILED", "ABORTED", "INVALID_STATE", "MEDIA_OPERATION_TIMEOUT", "INTERNAL_ERROR"];
+
 // Warning: (ae-missing-release-tag) "MediaCommand" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public (undocumented)
-export type MediaCommand = {
+export type MediaCommand =
+/**
+* Request a local SDP offer. `iceRestart`, when true, asks the media layer to
+* force an ICE restart on the next negotiation; omitted/false keeps the
+* current transport. Plain-data and structured-clone safe.
+*/
+    {
     type: 'createOffer';
     requestId: string;
     sessionId: string;
+    iceRestart?: boolean;
 } | {
     type: 'createAnswer';
     requestId: string;
@@ -432,6 +445,25 @@ export type MediaCommand = {
     type: 'closeSession';
     sessionId: string;
 };
+
+// Warning: (ae-missing-release-tag) "MediaError" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+class MediaError_2 extends Error {
+    constructor(code: MediaErrorCode, message: string, sessionId?: string | undefined, operation?: string | undefined, options?: ErrorOptions);
+    // (undocumented)
+    readonly code: MediaErrorCode;
+    // (undocumented)
+    readonly operation?: string | undefined;
+    // (undocumented)
+    readonly sessionId?: string | undefined;
+}
+export { MediaError_2 as MediaError }
+
+// Warning: (ae-missing-release-tag) "MediaErrorCode" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export type MediaErrorCode = typeof MEDIA_ERROR_CODES[number];
 
 // Warning: (ae-missing-release-tag) "MediaMessage" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
@@ -456,11 +488,18 @@ export type MediaReply = {
     requestId: string;
     sessionId: string;
     sdp?: string;
-} | {
+}
+/**
+* A typed failure reply. `code` is required and must be one of
+* `MEDIA_ERROR_CODES`; `message` is the only free-form text. No SDP, device,
+* ICE, or stack data crosses the boundary.
+*/
+| {
     type: 'mediaError';
     requestId: string;
     sessionId: string;
     message: string;
+    code: MediaErrorCode;
 };
 
 // Warning: (ae-missing-release-tag) "MediaTimeoutError" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
@@ -878,6 +917,7 @@ export class StubMainMediaHandler {
     constructor(port: MediaPort);
     closedSessions(): readonly string[];
     offers(sessionId: string): string | undefined;
+    offersRestarted(sessionId: string): boolean;
     remoteSdp(sessionId: string): string | undefined;
     unsubscribe(): void;
 }
@@ -1091,6 +1131,7 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
     invite(target: string): Promise<void>;
     register(): Promise<void>;
     get registerState(): RegisterState;
+    restartIce(): Promise<void>;
     unregister(): Promise<void>;
 }
 
@@ -1202,7 +1243,9 @@ export class WorkerMediaController {
     close(): void;
     closeSession(sessionId: string): void;
     createAnswer(sessionId: string, remoteSdp: string): Promise<string>;
-    createOffer(sessionId: string): Promise<string>;
+    createOffer(sessionId: string, options?: {
+        iceRestart?: boolean;
+    }): Promise<string>;
     get pendingRequestCount(): number;
     setRemote(sessionId: string, remoteSdp: string): Promise<void>;
     unsubscribe(): void;

@@ -194,7 +194,7 @@ describe('Full Call Integration', () => {
     expect(incomingCalls.length).toBe(1);
 
     const invitation = incomingCalls[0].invitation ?? incomingCalls[0];
-    const answerPromise = invitation.answer('v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n');
+    const answerPromise = invitation.answer();
 
     // Wait for 200 OK to be sent (answer() is async)
     await waitForSentResponse(transport, 200);
@@ -225,7 +225,12 @@ describe('Full Call Integration', () => {
     expect(invitation.session.state).toBe('terminated');
   });
 
-  it('routes a BYE to its incoming dialog while an outgoing dialog remains active', async () => {
+  it('answers a fresh incoming INVITE with 486 Busy Here while an outgoing call is confirmed active (v0.5 one-call rule)', async () => {
+    // v0.5 one-call rule: a UA with an active outgoing dialog rejects a NEW
+    // incoming INVITE on a distinct dialog at the SIP level with 486 Busy Here
+    // BEFORE constructing an Invitation or acquiring media, so the single media
+    // session can never contend. The incoming call must NOT surface as
+    // `incomingCall`, and no Invitation/answer/BYE routing occurs.
     const incomingCalls: any[] = [];
     ua.on('incomingCall', (event: any) => {
       incomingCalls.push(event);
@@ -237,27 +242,25 @@ describe('Full Call Integration', () => {
     await waitForSentMessage(transport, 'INVITE');
     await send200Ok(transport);
     await outgoing;
+    expect(ua.callState).toBe('confirmed');
 
+    // A new-dialog incoming INVITE while the outgoing call is confirmed active.
     transport.emitData(serializeMessage(createInviteRequest()));
     await flush();
-    expect(incomingCalls).toHaveLength(1);
 
-    const invitation = incomingCalls[0]!.invitation ?? incomingCalls[0]!;
-    const answer = invitation.answer('v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n');
-    await flush();
-    transport.emitData(serializeMessage(createAckRequest(invitation.dialog.localTag)));
-    await answer;
-
-    const bye = createByeRequest(invitation.dialog);
-    transport.emitData(serializeMessage(bye));
-    await flush();
-
-    const statuses = transport.sent
+    // The distinct dialog is rejected with 486, never surfaced, never answered.
+    expect(incomingCalls).toHaveLength(0);
+    const busyResponse = transport.sent
       .map((bytes) => parseMessage(bytes))
-      .filter((parsed) => parsed.ok && parsed.value.kind === 'response' && parsed.value.headers.get('CSeq') === '2 BYE')
-      .map((parsed) => parsed.ok && parsed.value.kind === 'response' ? parsed.value.statusCode : 0);
-    expect(statuses).toEqual([200]);
-    expect(invitation.session.state).toBe('terminated');
+      .find((parsed) => parsed.ok
+        && parsed.value.kind === 'response'
+        && parsed.value.statusCode === 486);
+    if (busyResponse === undefined || !busyResponse.ok || busyResponse.value.kind !== 'response') {
+      throw new Error('Expected 486 Busy Here response');
+    }
+    expect(busyResponse.value.headers.get('CSeq')?.includes('INVITE')).toBe(true);
+
+    // The outgoing call stays confirmed and uninfluenced by the rejected invite.
     expect(ua.callState).toBe('confirmed');
   });
 
@@ -327,7 +330,7 @@ describe('Full Call Integration', () => {
     transport.emitData(serializeMessage(createInviteRequest()));
     await flush();
     const invitation = incomingCalls[0]!.invitation ?? incomingCalls[0]!;
-    const answer = invitation.answer('v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n');
+    const answer = invitation.answer();
     await flush();
 
     transport.emitData(serializeMessage(createInviteRequest('incoming-duplicate')));
@@ -474,8 +477,8 @@ describe('Full Call Integration', () => {
     let mediaSession: string | undefined;
     const mediaController = {
       createOffer: async () => 'v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n',
-      createAnswer: async () => 'v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n',
-      setRemote: async (sessionId: string) => { mediaSession = sessionId; },
+      createAnswer: async (sessionId: string) => { mediaSession = sessionId; return 'v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n'; },
+      setRemote: async () => {},
       closeSession: (sessionId: string) => { closedSessions.push(sessionId); },
     } as any;
     const authManager = new AuthManager(idGenerator);
@@ -502,7 +505,7 @@ describe('Full Call Integration', () => {
     expect(incomingCalls).toHaveLength(1);
 
     const invitation = incomingCalls[0]!.invitation ?? incomingCalls[0]!;
-    const answerPromise = invitation.answer('v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n');
+    const answerPromise = invitation.answer();
     await waitForSentResponse(transport, 200);
     transport.emitData(serializeMessage(createAckRequest(invitation.dialog.localTag)));
     await answerPromise;

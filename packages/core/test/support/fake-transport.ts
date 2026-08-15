@@ -18,6 +18,8 @@ export class FakeTransport implements Transport {
   readonly sent: Uint8Array[] = [];
   /** Optional hook invoked synchronously on every send (before the bytes are pushed). */
   onSend?: (bytes: Uint8Array) => void;
+  /** If set, every send() rejects with this error (simulates a closing/closed socket). */
+  sendError?: Error;
   private connected = false;
   private closed = false;
   private disconnectedEmitted = false;
@@ -49,6 +51,9 @@ export class FakeTransport implements Transport {
   }
 
   async send(data: Uint8Array): Promise<void> {
+    if (this.sendError !== undefined) {
+      throw this.sendError;
+    }
     if (!this.connected || this.closed) {
       throw new TransportError('FakeTransport is not connected');
     }

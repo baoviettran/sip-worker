@@ -1,6 +1,6 @@
 {
   "name": "sip-worker-workspace",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -24,6 +24,8 @@
     "typecheck": "tsc -b && npm run typecheck:test --workspaces --if-present",
     "test": "vitest run",
     "test:architecture": "node --test test/architecture/*.test.mjs",
+    "test:browser-media": "playwright test",
+    "test:browser-media:install": "playwright install --with-deps chromium firefox webkit",
     "test:api": "npm run api:check --workspaces --if-present",
     "test:bundle": "node test/browser-bundle/browser-bundle.test.mjs",
     "test:package": "node test/package/workspace-pack.test.mjs",
@@ -33,10 +35,15 @@
   },
   "devDependencies": {
     "@microsoft/api-extractor": "7.58.12",
+    "@playwright/test": "1.62.0",
     "@types/node": "^26.1.2",
     "esbuild": "0.27.7",
     "tsup": "^8.0.0",
     "typescript": "^5.5.0",
     "vitest": "^2.0.0"
+  },
+  "allowScripts": {
+    "esbuild@0.27.7": true,
+    "esbuild@0.21.5": true
   }
 }
