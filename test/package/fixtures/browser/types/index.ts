@@ -88,7 +88,6 @@ const browserOptions: BrowserUserAgentOptions = {
   aor: 'sip:alice@example.test',
   contact: 'sip:alice@example.test',
   idGenerator,
-  authManager: new AuthManager(idGenerator),
   media: {
     iceServers: [
       { urls: 'turns:turn.example.test', username: 'user', credential: 'placeholder' },

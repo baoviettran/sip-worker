@@ -130,7 +130,6 @@ assert.equal(transport.isConnected(), false);
     aor: 'sip:alice@example.test',
     contact: 'sip:alice@example.test',
     idGenerator: idGen,
-    authManager: new AuthManager(idGen),
     mediaEnvironment: fakeMediaEnvironment,
     media: {
       iceServers: [{ urls: 'turns:turn.example.test', username: 'user', credential: 'placeholder' }],
