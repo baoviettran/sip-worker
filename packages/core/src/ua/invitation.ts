@@ -20,6 +20,7 @@ import type { WorkerMediaController } from '../media/worker-controller.js';
 import { Session } from './session.js';
 import { InviteResponseRetransmitter } from './invite-response-retransmitter.js';
 import { DialogNegotiator } from './dialog-negotiator.js';
+import { parseRemoteIdentity, type RemoteIdentity } from './remote-identity.js';
 
 export interface InvitationOptions {
   readonly request: SipRequestMessage;
@@ -66,6 +67,11 @@ export class Invitation {
 
   get dialog(): Dialog | undefined {
     return this.dialogValue;
+  }
+
+  /** Immutable remote participant identity parsed from the INVITE From header. */
+  get remoteIdentity(): RemoteIdentity | undefined {
+    return parseRemoteIdentity(this.request.headers.get('From'));
   }
 
   /** The media session id used for offer/answer on this call. */
@@ -189,18 +195,27 @@ export class Invitation {
   }
 
   /**
-   * Reject the INVITE with a 4xx/5xx/6xx response. No retransmission.
+   * Reject the INVITE with a 4xx/5xx/6xx response. No retransmission. The
+   * returned promise settles after the rejection response is handed to the
+   * transport (state commits before the send), resolving on a successful send
+   * and rejecting on a transport error.
    */
-  reject(statusCode: number, reason?: string): void {
-    if (this.state !== 'pending') return;
+  reject(statusCode: number, reason?: string): Promise<void> {
+    if (this.state !== 'pending') return Promise.resolve();
     this.state = 'rejected';
     const error = new SipError(statusCode, `INVITE rejected with ${statusCode}`, 'CALL_FAILED');
     const response = this.buildErrorResponse(statusCode, reason ?? 'Rejected');
-    try {
-      this.layer.sendResponse(this.transaction.key, response);
-    } finally {
-      this.fail(error);
-    }
+    return this.layer
+      .sendResponseAwait(this.transaction.key, response)
+      .then(
+        () => {
+          this.fail(error);
+        },
+        (sendError: unknown) => {
+          this.fail(sendError instanceof Error ? sendError : new SipError(statusCode, String(sendError), 'TRANSPORT_FAILED'));
+          throw sendError;
+        },
+      );
   }
 
   private build200Ok(localSdp: string): SipResponseMessage {

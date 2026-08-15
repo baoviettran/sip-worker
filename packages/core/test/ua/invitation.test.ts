@@ -488,8 +488,8 @@ describe('Invitation (incoming SIP call session)', () => {
   it('rejects INVITE with 486 → no retransmission', async () => {
     const h = setup();
 
-    h.invitation.reject(486, 'Busy Here');
-    await flush();
+    const rejection = h.invitation.reject(486, 'Busy Here');
+    await expect(rejection).resolves.toBeUndefined();
 
     // 486 response was sent
     const responses = h.sent.map((bytes) => parseMessage(bytes)).filter((p) => p.ok && p.value.kind === 'response');
@@ -505,6 +505,38 @@ describe('Invitation (incoming SIP call session)', () => {
     // Transaction-level retransmissions are OK (handled by the transaction layer)
     // Check that the invitation's retransmitter is undefined
     expect((h.invitation as any).retransmitter).toBeUndefined();
+  });
+
+  it('resolves reject() after the rejection response handoff; a rejected send still rejects the promise', async () => {
+    const h = setup();
+
+    // First: the response is handed to the transport before the promise settles.
+    const rejection = h.invitation.reject(486, 'Busy Here');
+    await expect(rejection).resolves.toBeUndefined();
+    expect(h.invitation.session.state).toBe('failed');
+
+    // Second: a send failure rejects the returned promise AND fails the session.
+    const h2 = setup();
+    h2.transport.send = async () => {
+      throw new TransportError('rejection send failed');
+    };
+    await expect(h2.invitation.reject(603, 'Decline')).rejects.toThrow('rejection send failed');
+    expect(h2.invitation.session.state).toBe('failed');
+  });
+
+  it('exposes a size-bounded immutable remoteIdentity parsed from the From header', async () => {
+    const h = setup();
+    const remote = h.invitation.remoteIdentity;
+    expect(remote?.uri).toMatch(/sip:alice@example.com/);
+    expect(remote?.tag).toBe('alice-1');
+    expect(Object.isFrozen(remote)).toBe(true);
+
+    // The identity is NOT copied into the reject error object.
+    const error = await h.invitation.reject(486, 'Busy Here').then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(error).toBeUndefined();
   });
 
   it('sends only the first rejection when reject is called twice', async () => {

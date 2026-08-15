@@ -41,11 +41,13 @@ export type {
   NonInviteClientOptions,
   NonInviteState,
 } from './transactions/index.js';
-export { UserAgent, Registrar, Invitation } from './ua/index.js';
+export { UserAgent, Registrar, Invitation, Inviter, parseRemoteIdentity } from './ua/index.js';
 export type {
   RegistrationIdentity,
   RegisterState,
   InvitationOptions,
+  InviterOptions,
+  RemoteIdentity,
   RegistrarOptions,
   RegistrarStatus,
 } from './ua/index.js';

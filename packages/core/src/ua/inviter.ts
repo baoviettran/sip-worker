@@ -26,6 +26,7 @@ import { MediaError } from '../media/errors.js';
 import { Session } from './session.js';
 import { DialogSet, type DialogSuccessResult } from './dialog-set.js';
 import { responseMatchesRequestIdentity } from './response-identity.js';
+import { parseRemoteIdentity, type RemoteIdentity } from './remote-identity.js';
 import { DialogNegotiator } from './dialog-negotiator.js';
 
 export interface InviterOptions {
@@ -90,6 +91,12 @@ export class Inviter {
   private disposed = false;
   private requestVersion = 0;
   private hangupVersion = 0;
+  /** Outgoing CANCEL ownership: one owned non-INVITE transaction + retained INVITE listener. */
+  private cancelling = false;
+  private cancelPromise: Promise<void> | undefined;
+  private cancelDeferred: { resolve: () => void; reject: (reason: unknown) => void } | undefined;
+  private unsubscribeCancel: (() => void) | undefined;
+  private readonly cancelSettlement = { cancelFinalSeen: false, inviteReconciled: false };
   private readonly cleanupOperations = new Set<CleanupOperation>();
   /**
    * The single in-flight negotiation (selected 2xx → setRemote) promise. While
@@ -142,6 +149,213 @@ export class Inviter {
   }
 
   /**
+   * Cancel an in-flight outgoing INVITE (RFC 3261 9.1). Valid only before the
+   * call is confirmed. A duplicate call shares the same promise. The returned
+   * promise settles only after BOTH the CANCEL final response and the INVITE
+   * final reconciliation (the ACK'd 487, or the ACK+BYE of a late 2xx). It
+   * NEVER synthesizes success on transport loss — a lost CANCEL/INVITE settles
+   * the invite with OPERATION_ABORTED and rejects cancel() with the transport
+   * error. The pending `call.invite()` promise rejects with `OPERATION_ABORTED`
+   * when the CANCEL wins.
+   */
+  cancel(): Promise<void> {
+    if (this.disposed) {
+      return Promise.reject(new SipError(0, 'Inviter has been disposed', 'LIFECYCLE_ABORTED'));
+    }
+    if (this.cancelPromise !== undefined) return this.cancelPromise;
+    if (this.cancelling || this.session.state === 'confirmed' || this.session.state === 'terminating') {
+      return Promise.reject(new SipError(0, 'cancel() after the call was confirmed', 'INVALID_STATE'));
+    }
+    if (this.currentRequest === undefined) {
+      return Promise.reject(new SipError(0, 'cancel() before INVITE was initiated', 'INVALID_STATE'));
+    }
+
+    this.cancelling = true;
+    const promise = new Promise<void>((resolve, reject) => {
+      this.cancelDeferred = { resolve, reject };
+      this.startCancel();
+    });
+    this.cancelPromise = promise;
+    return promise;
+  }
+
+  /**
+   * Send the CANCEL as one owned non-INVITE transaction, building its message
+   * from the sent INVITE. Per RFC 3261 9.1 the CANCEL reuses the INVITE's
+   * Request-URI, Call-ID, From/To, CSeq NUMBER, and top Via branch, differing
+   * only in the CSeq method (CANCEL). The original INVITE listener is retained
+   * until the INVITE's final response is reconciled.
+   */
+  private startCancel(): void {
+    const invite = this.currentRequest;
+    if (invite === undefined) {
+      this.disposeCancel(new SipError(0, 'cancel() before INVITE was initiated', 'INVALID_STATE'));
+      return;
+    }
+    const headers = new Headers();
+    headers.set('Via', invite.headers.get('Via') ?? '');
+    headers.set('Max-Forwards', '70');
+    headers.set('From', invite.headers.get('From') ?? '');
+    headers.set('To', invite.headers.get('To') ?? '');
+    headers.set('Call-ID', invite.headers.get('Call-ID') ?? '');
+    const inviteCSeq = cseqNumber(invite);
+    headers.set('CSeq', `${inviteCSeq} CANCEL`);
+    const cancel = makeRequest('CANCEL', invite.uri, headers);
+
+    try {
+      this.attachCancelListener(cancel, invite);
+    } catch (err) {
+      this.disposeCancel(err);
+    }
+  }
+
+  /**
+   * Own the CANCEL client transaction and keep a listener on the retained
+   * INVITE transaction until its final response reconciles the cancel.
+   */
+  private attachCancelListener(cancel: SipRequestMessage, _invite: SipRequestMessage): void {
+    this.teardownCancel();
+    sendOwnedRequest(
+      this.layer,
+      cancel,
+      (disposeRequest) => {
+        if (this.disposed) {
+          disposeRequest();
+          return;
+        }
+        this.unsubscribeCancel = disposeRequest;
+      },
+      (event: TransactionLayerEvent) => {
+        if (this.disposed) return;
+        if (event.type === 'response') {
+          if (!responseMatchesRequestIdentity(cancel, event.response)) return;
+          const code = event.response.statusCode;
+          if (code >= 200 && code < 300) {
+            this.cancelSettlement.cancelFinalSeen = true;
+            this.trySettleCancel();
+          } else if (code >= 300) {
+            this.abortPendingInvite(new SipError(0, 'INVITE cancelled', 'OPERATION_ABORTED'));
+            this.disposeCancel(new SipError(code, `CANCEL rejected with ${code}`, 'CALL_FAILED'));
+          }
+        } else if (event.type === 'timeout' || event.type === 'transportError') {
+          const error = new SipError(
+            0,
+            `CANCEL ${event.type}`,
+            event.type === 'transportError' ? 'TRANSPORT_FAILED' : 'TIMEOUT',
+          );
+          // The CANCEL branch failed. We never synthesize a 487/ACK that did not
+          // happen: the local call is aborted (OPERATION_ABORTED) and cancel()
+          // rejects with the transport error.
+          this.abortPendingInvite(new SipError(0, 'INVITE cancelled', 'OPERATION_ABORTED'));
+          this.disposeCancel(error);
+        }
+      },
+    );
+    // The original INVITE listener (attachListener -> onResponse/onSuccess) is
+    // RETAINED here; cancel() does not teardown the INVITE. It reconciles the
+    // INVITE final through that same listener via the cancelling flags below.
+  }
+
+  /** The INVITE's non-2xx final (e.g. 487) arrived while a CANCEL was in flight. */
+  private onInviteFinalAborted(response: SipResponseMessage): void {
+    const error = new SipError(response.statusCode, 'INVITE cancelled', 'OPERATION_ABORTED');
+    this.reconcileCancelledInvite(error);
+  }
+
+  /** A late 2xx arrived while a CANCEL was in flight: ACK, BYE-clean, abort. */
+  private onCancelLate2xx(response: SipResponseMessage): void {
+    // Run the normal dialog-formation path so the ACK is emitted and the dialog
+    // is established, then immediately terminate it with a BYE (RFC semantics
+    // for a 2xx that races a CANCEL: ACK it, then BYE). A media-negotiation
+    // (or any) failure of the 2xx settlement still reconciles the cancelled
+    // invite with OPERATION_ABORTED and ends the session 'terminated'.
+    void this.onSuccess(response).then(
+      () => {
+        const dialog = this.dialog;
+        if (dialog === undefined) {
+          this.reconcileCancelledInvite(new SipError(0, 'INVITE cancelled', 'OPERATION_ABORTED'));
+          return;
+        }
+        void this.sendByeForDialog(dialog)
+          .then(() => {
+            this.reconcileCancelledInvite(new SipError(0, 'INVITE cancelled', 'OPERATION_ABORTED'));
+          })
+          .catch(() => {
+            // If the cleanup BYE fails, still abort the cancelled invite.
+            this.reconcileCancelledInvite(new SipError(0, 'INVITE cancelled', 'OPERATION_ABORTED'));
+          });
+      },
+      () => {
+        // onSuccess failed (e.g. media negotiation rejected the late 2xx). The
+        // invite must still reconcile with OPERATION_ABORTED and cancel() settle.
+        this.reconcileCancelledInvite(new SipError(0, 'INVITE cancelled', 'OPERATION_ABORTED'));
+      },
+    );
+  }
+
+  /**
+   * Mark the INVITE reconciled, settle the pending invite with OPERATION_ABORTED,
+   * transition the session to terminated (never failed), and detach cancel state.
+   */
+  private reconcileCancelledInvite(error: SipError): void {
+    if (this.cancelSettlement.inviteReconciled) return;
+    this.cancelSettlement.inviteReconciled = true;
+    const deferred = this.inviteDeferred;
+    this.inviteDeferred = undefined;
+    // The INVITE listener remains owned; dismiss it now that the final is handled.
+    this.teardownInvite();
+    this.settleAuthExchange();
+    if (deferred !== undefined) deferred.reject(error);
+    if (this.session.state !== 'terminated') this.session.transition('terminated');
+    this.trySettleCancel();
+  }
+
+  /** Abort the still-pending invite when the CANCEL branch itself fails. */
+  private abortPendingInvite(error: SipError): void {
+    if (this.cancelSettlement.inviteReconciled) return;
+    this.cancelSettlement.inviteReconciled = true;
+    const deferred = this.inviteDeferred;
+    this.inviteDeferred = undefined;
+    this.teardownInvite();
+    this.settleAuthExchange();
+    if (deferred !== undefined) deferred.reject(error);
+    if (this.session.state !== 'terminated') this.session.transition('terminated');
+    this.trySettleCancel();
+  }
+
+  /** Settle cancel() exactly once once the CANCEL final AND the INVITE reconcile are both seen. */
+  private trySettleCancel(): void {
+    if (!this.cancelSettlement.cancelFinalSeen || !this.cancelSettlement.inviteReconciled) return;
+    const deferred = this.cancelDeferred;
+    this.cancelDeferred = undefined;
+    this.teardownCancel();
+    this.cancelling = false;
+    deferred?.resolve();
+  }
+
+  /** Fail cancel() exactly once and detach its owned branch. Invite settlement is NOT
+   *  performed here: callers must reconcile the INVITE (via abortPendingInvite)
+   *  so the session ends in 'terminated' and the listener is torn down. */
+  private disposeCancel(reason: unknown): void {
+    if (this.cancelDeferred === undefined) return;
+    const deferred = this.cancelDeferred;
+    this.cancelDeferred = undefined;
+    this.cancelSettlement.cancelFinalSeen = true;
+    this.teardownCancel();
+    this.cancelling = false;
+    deferred.reject(reason);
+  }
+
+  /** Detach the owned CANCEL transaction. The INVITE listener is separate. */
+  private teardownCancel(): void {
+    if (this.unsubscribeCancel !== undefined) {
+      const dispose = this.unsubscribeCancel;
+      this.unsubscribeCancel = undefined;
+      dispose();
+    }
+  }
+
+  /**
    * Terminate the confirmed call with a BYE. Only valid after invite() resolves.
    * Resolves when the BYE 2xx is received.
    */
@@ -181,6 +395,12 @@ export class Inviter {
   /** The selected (application) dialog from the first 2xx response. */
   get dialog(): Dialog | undefined {
     return this.dialogSet?.selectedDialog;
+  }
+
+  /** Immutable remote target identity parsed from the addressed To URI. */
+  get remoteIdentity(): RemoteIdentity | undefined {
+    const parsed = parseRemoteIdentity(`<${this.to}>`);
+    return parsed;
   }
 
   /** Every dialog currently owned by this forked INVITE. */
@@ -317,6 +537,9 @@ export class Inviter {
         } else if (event.type === 'terminated') {
           this.dialogSet?.expireExtraOwners();
           this.teardownInvite();
+          // The INVITE client branch reached its final reconciliation while a
+          // CANCEL was in flight; settle cancel().
+          if (this.cancelling) this.trySettleCancel();
         }
       },
     );
@@ -342,6 +565,22 @@ export class Inviter {
       if (sdp.length > 0) {
         void this.controller.setRemote(this.sessionId, sdp);
         this.session.transition('early');
+      }
+      return;
+    }
+
+    // A CANCEL was in flight: reconcile the INVITE final before normal handling.
+    if (this.cancelling) {
+      if (code >= 200 && code < 300) {
+        // Late 2xx after CANCEL: ACK (via normal dialog handling), then BYE-clean.
+        const result = this.onCancelLate2xx(response);
+        if (result === undefined) return;
+        return;
+      }
+      if (code >= 300) {
+        // Non-2xx final (our 487): reconcile the cancelled invite.
+        this.onInviteFinalAborted(response);
+        return;
       }
       return;
     }
@@ -424,6 +663,11 @@ export class Inviter {
       if (dialog !== undefined && !this.hangingUp) {
         void this.sendByeForDialog(dialog).catch(() => {});
       }
+      if (this.cancelling) {
+        // A late 2xx racing a CANCEL carried no SDP: reconcile the cancelled invite.
+        this.reconcileCancelledInvite(new SipError(0, 'INVITE cancelled', 'OPERATION_ABORTED'));
+        return;
+      }
       if (this.inviteDeferred !== undefined) this.fail(error);
       return;
     }
@@ -440,6 +684,13 @@ export class Inviter {
         (reason: unknown) => {
           this.selectedNegotiation = undefined;
           if (this.disposed) return;
+          // A media-negotiation failure of a late 2xx racing a CANCEL must reconcile
+          // the cancelled invite (OPERATION_ABORTED, 'terminated') rather than fail
+          // the call, so cancel() still settles and no listener/timer leaks.
+          if (this.cancelling) {
+            this.reconcileCancelledInvite(new SipError(0, 'INVITE cancelled', 'OPERATION_ABORTED'));
+            return;
+          }
           // On a rejected remote description for the created dialog, send a BYE
           // when possible (unless the hangup path already owns it), then fail the
           // call. Media closure is left to UA terminal ownership so it happens
@@ -455,6 +706,10 @@ export class Inviter {
 
   /** Settle the invite promise and transition to confirmed, exactly once. */
   private confirmInvite(): void {
+    // A late 2xx racing a CANCEL (RFC 3261 9.2) must NOT confirm or settle the
+    // call: the negative-response and operation settlement are owned by the
+    // cancel path. It still ACKs and BYE-cleans via onSuccess's dialog handling.
+    if (this.cancelling) return;
     const deferred = this.inviteDeferred;
     if (deferred !== undefined) {
       this.inviteDeferred = undefined;
@@ -648,6 +903,10 @@ export class Inviter {
     this.inviteDeferred = undefined;
     const hangupDeferred = this.hangupDeferred;
     this.hangupDeferred = undefined;
+    const cancelDeferred = this.cancelDeferred;
+    this.cancelDeferred = undefined;
+    this.cancelSettlement.cancelFinalSeen = true;
+    this.cancelSettlement.inviteReconciled = true;
 
     for (const operation of [...this.cleanupOperations]) operation.reject(error);
     this.cleanupOperations.clear();
@@ -657,6 +916,7 @@ export class Inviter {
     }
     inviteDeferred?.reject(error);
     hangupDeferred?.reject(error);
+    cancelDeferred?.reject(error);
   }
 
   private fail(reason: unknown): void {
@@ -694,6 +954,7 @@ export class Inviter {
   private teardown(): void {
     this.teardownInvite();
     this.teardownHangup();
+    this.teardownCancel();
   }
 
   private teardownInvite(): void {

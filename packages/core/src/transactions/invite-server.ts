@@ -93,37 +93,60 @@ export class InviteServerTransaction {
     // Confirmed: ignore duplicates and ACKs.
   }
 
-  /** Send a response from the user-agent server. */
-  sendResponse(response: SipResponseMessage): void {
-    if (this.currentState === 'Terminated') return;
+  /**
+   * Send a response from the user-agent server.
+   *
+   * The transaction state commits BEFORE the transport send, and the returned
+   * promise settles with THAT exact send (rejecting when the send rejects).
+   * Callers that only observe state (retransmissions, cached resends) use
+   * `sendBytes` internally, which stays fire-and-forget.
+   */
+  sendResponseAwait(response: SipResponseMessage): Promise<void> {
+    if (this.currentState === 'Terminated') return Promise.resolve();
     this.cancelTimer100();
     const code = response.statusCode;
-    if (code < 100 || code > 699) return;
+    if (code < 100 || code > 699) return Promise.resolve();
     if (code <= 199) {
       if (this.currentState === 'Proceeding') {
         this.cachedResponse = serializeMessage(response);
-        this.sendBytes(this.cachedResponse);
+        return this.sendAwait(this.cachedResponse);
       }
+      return Promise.resolve();
     } else if (code <= 299) {
       if (this.currentState === 'Proceeding') {
         this.currentState = 'Accepted';
-        this.sendBytes(serializeMessage(response));
-        if (this.currentState !== 'Accepted') return;
+        const send = this.sendAwait(serializeMessage(response));
+        if (this.currentState !== 'Accepted') return send;
         this.armTimerL();
+        return send;
       } else if (this.currentState === 'Accepted') {
-        this.sendBytes(serializeMessage(response));
+        return this.sendAwait(serializeMessage(response));
       }
+      return Promise.resolve();
     } else {
       if (this.currentState === 'Proceeding') {
         this.currentState = 'Completed';
         this.cachedResponse = serializeMessage(response);
-        this.sendBytes(this.cachedResponse);
-        if (this.currentState !== 'Completed') return;
+        const send = this.sendAwait(this.cachedResponse);
+        if (this.currentState !== 'Completed') return send;
         if (!this.reliable) this.startG();
-        if (this.currentState !== 'Completed') return;
+        if (this.currentState !== 'Completed') return send;
         this.armTimerH();
+        return send;
       }
+      return Promise.resolve();
     }
+  }
+
+  /**
+   * Fire-and-forget compatibility wrapper over `sendResponseAwait`. The state
+   * commits and the bytes go on the wire exactly as in the awaited form; only
+   * the returned promise (carrying the exact send) is dropped here. The send's
+   * rejection is consumed (never an unhandled rejection) because the awaited
+   * form already surfaced the transportError.
+   */
+  sendResponse(response: SipResponseMessage): void {
+    void this.sendResponseAwait(response).catch(() => {});
   }
 
   terminate(error?: TransportError): void {
@@ -161,6 +184,21 @@ export class InviteServerTransaction {
       void this.transport.send(bytes).catch(onError);
     } catch (error) {
       onError(error);
+    }
+  }
+
+  /** Await a transport send while preserving the fire-and-forget error surface. */
+  private sendAwait(bytes: Uint8Array): Promise<void> {
+    try {
+      return this.transport.send(bytes).catch((err: unknown) => {
+        const error = err instanceof TransportError ? err : new TransportError(String(err));
+        this.emit({ type: 'transportError', key: this.key, error });
+        throw error;
+      });
+    } catch (error) {
+      const wrapped = error instanceof TransportError ? error : new TransportError(String(error));
+      this.emit({ type: 'transportError', key: this.key, error: wrapped });
+      return Promise.reject(wrapped);
     }
   }
 

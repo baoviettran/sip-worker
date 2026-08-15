@@ -1470,3 +1470,300 @@ describe('UserAgent awaitable registration recovery', () => {
     await ua.disconnect();
   });
 });
+
+describe('UserAgent createOutgoingCall + cancellable invites', () => {
+  /** Deliver a 180 Ringing to the last outbound INVITE. */
+  function sendRinging(transport: FakeTransport): void {
+    const invite = sentRequests(transport, 'INVITE').at(-1)!;
+    const headers = new Headers();
+    headers.set('Via', invite.headers.get('Via') ?? '');
+    headers.set('From', invite.headers.get('From') ?? '');
+    headers.set('To', `${invite.headers.get('To') ?? 'sip:bob@example.com'};tag=ringing`);
+    headers.set('Call-ID', invite.headers.get('Call-ID') ?? '');
+    headers.set('CSeq', invite.headers.get('CSeq') ?? '');
+    const response = makeResponse(180, 'Ringing', headers);
+    transport.emitData(serializeMessage(response));
+  }
+
+  /** Deliver a 200 OK (with the requested To tag) to the last outbound INVITE. */
+  function send200ToTag(transport: FakeTransport, toTag: string, sdp = STUB_SDP): void {
+    const invite = sentRequests(transport, 'INVITE').at(-1)!;
+    const headers = new Headers();
+    headers.set('Via', invite.headers.get('Via') ?? '');
+    headers.set('From', invite.headers.get('From') ?? '');
+    headers.set('To', `${invite.headers.get('To') ?? 'sip:bob@example.com'};tag=${toTag}`);
+    headers.set('Call-ID', invite.headers.get('Call-ID') ?? '');
+    headers.set('CSeq', invite.headers.get('CSeq') ?? '');
+    headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
+    const response = withTextBody(makeResponse(200, 'OK', headers), sdp, 'application/sdp') as SipResponseMessage;
+    transport.emitData(serializeMessage(response));
+  }
+
+  /** Deliver a 200 OK to the last outbound request (any method, echo its CSeq+tags). */
+  function sendOkToLastRequest(transport: FakeTransport): void {
+    const last = [...transport.sent].map((b) => parseMessage(b))
+      .filter((p): p is { ok: true; value: SipRequestMessage } => p.ok && p.value.kind === 'request').at(-1)!;
+    const req = last.value;
+    const headers = new Headers();
+    headers.set('Via', req.headers.get('Via') ?? '');
+    headers.set('From', req.headers.get('From') ?? '');
+    headers.set('To', `${req.headers.get('To') ?? ''};tag=server`);
+    headers.set('Call-ID', req.headers.get('Call-ID') ?? '');
+    headers.set('CSeq', req.headers.get('CSeq') ?? '');
+    transport.emitData(serializeMessage(makeResponse(200, 'OK', headers)));
+  }
+
+  /** Deliver a 487 to the INVITE (echoing the INVITE CSeq and the ringing To tag), then its ACK is sent. */
+  function send487ToInvite(transport: FakeTransport): void {
+    const invite = sentRequests(transport, 'INVITE').at(-1)!;
+    const headers = new Headers();
+    headers.set('Via', invite.headers.get('Via') ?? '');
+    headers.set('From', invite.headers.get('From') ?? '');
+    // The remote tags its first response (180 set tag=ringing); a real UAS never
+    // sends a final answer without a tag, and response identity requires it.
+    headers.set('To', `${invite.headers.get('To') ?? '<sip:bob@example.com>'};tag=ringing`);
+    headers.set('Call-ID', invite.headers.get('Call-ID') ?? '');
+    headers.set('CSeq', invite.headers.get('CSeq') ?? '');
+    const response = makeResponse(487, 'Request Terminated', headers);
+    transport.emitData(serializeMessage(response));
+  }
+
+  /** Deliver a 200 to the last sent CANCEL. */
+  function sendCancelOk(transport: FakeTransport): void {
+    const cancel = sentRequests(transport, 'CANCEL').at(-1)!;
+    const headers = new Headers();
+    headers.set('Via', cancel.headers.get('Via') ?? '');
+    headers.set('From', cancel.headers.get('From') ?? '');
+    headers.set('To', `${cancel.headers.get('To') ?? ''};tag=server`);
+    headers.set('Call-ID', cancel.headers.get('Call-ID') ?? '');
+    headers.set('CSeq', cancel.headers.get('CSeq') ?? '');
+    transport.emitData(serializeMessage(makeResponse(200, 'OK', headers)));
+  }
+
+  it('createOutgoingCall returns an owner without sending; invite+cancel drives CANCEL→487→ACK→terminated', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+
+    const call = ua.createOutgoingCall('sip:bob@example.com');
+    expect(call.session.state).toBe('initial');
+    expect(transport.sent).toHaveLength(0);
+
+    const started = call.invite();
+    // Attach the rejection handler immediately so it is never left pending
+    // (the 487 settlement below rejects it before the test's other awaits).
+    const aborted = expect(started).rejects.toMatchObject({ code: 'OPERATION_ABORTED' });
+    await flush();
+    sendRinging(transport);
+    await flush();
+
+    const cancelled = call.cancel();
+    expect(lastRequest(transport, 'CANCEL').method).toBe('CANCEL');
+    sendCancelOk(transport);
+    await flush();
+    send487ToInvite(transport);
+    await flush();
+    // The non-2xx ACK for the 487 is the last outbound request.
+    expect(lastRequest(transport, 'ACK').method).toBe('ACK');
+
+    await cancelled;
+    await aborted;
+    expect(call.session.state).toBe('terminated');
+    expect(ua.callState).toBe('idle');
+    await ua.disconnect();
+  });
+
+  it('CANCEL reuses the INVITE Request-URI, Call-ID, From/To, CSeq number, and top Via branch (RFC 3261 9.1)', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    const call = ua.createOutgoingCall('sip:bob@example.com');
+    const started = call.invite();
+    await flush();
+    const invite = sentRequests(transport, 'INVITE')[0]!;
+
+    const cancelled = call.cancel();
+    await flush();
+    const cancel = sentRequests(transport, 'CANCEL')[0]!;
+
+    expect(cancel.uri).toBe(invite.uri);
+    expect(cancel.headers.get('Call-ID')).toBe(invite.headers.get('Call-ID'));
+    expect(cancel.headers.get('From')).toBe(invite.headers.get('From'));
+    expect(cancel.headers.get('To')).toBe(invite.headers.get('To'));
+    // CSeq number identical, method differs.
+    const inviteCSeq = invite.headers.get('CSeq')!;
+    const cancelCSeq = cancel.headers.get('CSeq')!;
+    expect(cancelCSeq).toBe(`${inviteCSeq.split(' ')[0]} CANCEL`);
+    // Top Via branch identical.
+    expect(cancel.headers.get('Via')).toBe(invite.headers.get('Via'));
+    await ua.disconnect().then(() => {}, () => {});
+    await started.catch(() => {});
+    await cancelled.catch(() => {});
+  });
+
+  it('ACKs and BYE-cleans a late 2xx that races a cancel', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    const call = ua.createOutgoingCall('sip:bob@example.com');
+    const started = call.invite();
+    await flush();
+    sendRinging(transport);
+    await flush();
+
+    const cancelled = call.cancel();
+    sendCancelOk(transport);
+    await flush();
+    // A 2xx arrives after the CANCEL: must be ACKed, then BYE-cleaned.
+    send200ToTag(transport, 'bob-late');
+    await flush();
+    await flush();
+
+    // A 2xx ACK for the late tag was sent.
+    const ack = sentRequests(transport, 'ACK').find((a) => (a.headers.get('To') ?? '').includes('tag=bob-late'));
+    expect(ack).toBeDefined();
+    // A BYE for the late tag was sent.
+    const bye = sentRequests(transport, 'BYE').find((b) => (b.headers.get('To') ?? '').includes('tag=bob-late'));
+    expect(bye).toBeDefined();
+    // Complete the cleanup BYE so the call terminates.
+    sendOkToLastRequest(transport);
+    await cancelled;
+    await expect(started).rejects.toMatchObject({ code: 'OPERATION_ABORTED' });
+    expect(call.session.state).toBe('terminated');
+    await ua.disconnect();
+  });
+
+  it('rejects the invite when the CANCEL transaction fails on the wire', async () => {
+    const { clock, ua, transport } = setup();
+    await ua.connect();
+    const call = ua.createOutgoingCall('sip:bob@example.com');
+    const started = call.invite();
+    const aborted = expect(started).rejects.toMatchObject({ code: 'OPERATION_ABORTED' });
+    await flush();
+    sendRinging(transport);
+    await flush();
+
+    // From here the transport send fails: the CANCEL branch is lost on the wire.
+    transport.sendError = new Error('transport lost during cancel');
+    const cancelled = call.cancel();
+    const cancelRejected = expect(cancelled).rejects.toBeDefined();
+
+    await flush();
+    await cancelRejected;
+    await aborted;
+    // Never synthesize success: cancel() rejects (transport error) and the invite
+    // rejects (OPERATION_ABORTED), with the session ending terminated.
+    expect(call.session.state).toBe('terminated');
+    // After disconnect (which stops the always-on OPTIONS liveness probe), no
+    // transaction timer may remain — the cancelled INVITE and CANCEL branches
+    // must both have been torn down.
+    await ua.disconnect().then(() => {}, () => {});
+    expect(clock.pending()).toBe(0);
+  });
+
+  it('settles cancel() and rejects the invite when a late 2xx fails media negotiation', async () => {
+    const port = new UaControllableMediaPort();
+    port.holdSetRemote = true;
+    const { ua, transport } = setup({ media: port });
+    await ua.connect();
+    const call = ua.createOutgoingCall('sip:bob@example.com');
+    const started = call.invite();
+    const aborted = expect(started).rejects.toMatchObject({ code: 'OPERATION_ABORTED' });
+    await flush();
+    sendRinging(transport);
+    await flush();
+
+    const cancelled = call.cancel();
+    const cancelSettled = expect(cancelled).resolves.toBeUndefined();
+    sendCancelOk(transport);
+    await flush();
+    // A late 2xx arrives after the CANCEL final; its media negotiation fails.
+    send200ToTag(transport, 'bob-media-fail');
+    await flush();
+    port.rejectHeldSetRemote('SET_REMOTE_FAILED');
+    await flush();
+    await flush();
+
+    await cancelSettled;
+    await aborted;
+    expect(call.session.state).toBe('terminated');
+    await ua.disconnect().then(() => {}, () => {});
+  });
+
+  it('shares one promise across duplicate cancel() calls', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    const call = ua.createOutgoingCall('sip:bob@example.com');
+    const started = call.invite();
+    const aborted = expect(started).rejects.toMatchObject({ code: 'OPERATION_ABORTED' });
+    await flush();
+
+    const first = call.cancel();
+    const second = call.cancel();
+    expect(second).toBe(first);
+    sendCancelOk(transport);
+    await flush();
+    send487ToInvite(transport);
+    await flush();
+    await first;
+    await aborted;
+    await ua.disconnect();
+  });
+
+  it('rejects cancel() with INVALID_STATE after the call is confirmed', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    const call = ua.createOutgoingCall('sip:bob@example.com');
+    const started = call.invite();
+    await flush();
+    send200ToTag(transport, 'bob-confirmed');
+    await started;
+
+    expect(call.session.state).toBe('confirmed');
+    await expect(call.cancel()).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    await ua.disconnect();
+  });
+
+  it('rejects a second outgoing call before media (INVALID_STATE)', async () => {
+    const { ua } = setup();
+    await ua.connect();
+    ua.createOutgoingCall('sip:bob@example.com');
+    expect(() => ua.createOutgoingCall('sip:carol@example.com'))
+      .toThrowError(/already in progress/);
+    await ua.disconnect();
+  });
+
+  it('async Invitation.reject() resolves after the rejection response is handed off', async () => {
+    const { ua, transport } = setup();
+    await ua.connect();
+    const invitation = receiveIncomingCall(ua, transport);
+
+    const rejection = invitation.reject(486, 'Busy Here');
+    await expect(rejection).resolves.toBeUndefined();
+    expect(sentResponses(transport, 486)).toBe(1);
+    expect(invitation.session.state).toBe('failed');
+    // Error objects do not carry a copied remote identity.
+    await expect(rejection).resolves.toBeUndefined();
+    await ua.disconnect();
+  });
+
+  it('exposes an immutable remoteIdentity on the inviter and invitation', async () => {
+    // An outgoing inviter occupies the one-call slot (UA is busy), so the inviter
+    // and invitation are exercised against separate UAs.
+    const { ua: outgoingUa } = setup();
+    await outgoingUa.connect();
+
+    const call = outgoingUa.createOutgoingCall('sip:bob@example.com');
+    const addr = call.remoteIdentity;
+    expect(addr?.uri).toBe('sip:bob@example.com');
+    expect(Object.isFrozen(addr)).toBe(true);
+
+    const { ua, transport } = setup();
+    await ua.connect();
+    const invitation = receiveIncomingCall(ua, transport);
+    const remote = invitation.remoteIdentity;
+    expect(remote?.uri).toMatch(/sip:bob@example.com/);
+    expect(remote?.tag).toBeDefined();
+    expect(Object.isFrozen(remote)).toBe(true);
+
+    await ua.disconnect();
+    await outgoingUa.disconnect().then(() => {}, () => {});
+  });
+});

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { TransactionLayer } from '../../src/transactions/index.js';
 import { deriveTimers } from '../../src/transactions/timers.js';
-import type { TransactionLayerEvent } from '../../src/transactions/types.js';
+import type { TransactionLayerEvent, TransactionKey } from '../../src/transactions/types.js';
 import type { SipRequestMessage, SipResponseMessage } from '../../src/messages/message.js';
 import { Headers, makeRequest, makeResponse, parseMessage } from '../../src/messages/index.js';
 import { TransportError } from '../../src/errors.js';
@@ -212,6 +212,51 @@ describe('TransactionLayer', () => {
     const invite = makeInvite();
     layer.receive(invite);
     expect(events).toContainEqual(expect.objectContaining({ type: 'request' }));
+  });
+
+  it('sendResponseAwait resolves with the exact send and commits server state before it', async () => {
+    const { events, layer } = setup();
+    layer.receive(makeInvite());
+    const requestEvent = events.find((e) => e.type === 'request')! as { type: 'request'; transaction: { key: TransactionKey; state: string } };
+    expect(requestEvent.transaction.state).toBe('Proceeding');
+
+    await expect(
+      layer.sendResponseAwait(requestEvent.transaction.key, responseFor('z9hG4bK-abc', 486)),
+    ).resolves.toBeUndefined();
+
+    // The matching server transaction moved to Completed after the send.
+    expect(events.some((e) => e.type === 'request')).toBe(true);
+  });
+
+  it('sendResponseAwait rejects when the transport send rejects; the void wrapper never leaks', async () => {
+    // Rejecting-send path.
+    const clock = new FakeClock();
+    const transport = new FakeTransport({ reliable: false, framing: 'datagram' });
+    void transport.connect();
+    const events: TransactionLayerEvent[] = [];
+    const layer = new TransactionLayer({
+      transport,
+      clock,
+      timers: deriveTimers({ T1: 500, T2: 4000, T4: 5000 }, false),
+      reliable: false,
+      emit: (e) => events.push(e),
+    });
+    layer.receive(makeInvite());
+    const requestEvent = events.find((e) => e.type === 'request')! as { type: 'request'; transaction: { key: TransactionKey } };
+    transport.send = async () => {
+      throw new TransportError('send failed');
+    };
+
+    await expect(
+      layer.sendResponseAwait(requestEvent.transaction.key, responseFor('z9hG4bK-abc', 486)),
+    ).rejects.toThrow('send failed');
+    expect(events.some((e) => e.type === 'transportError')).toBe(true);
+
+    // The void compatibility wrapper consumes the rejection without throwing.
+    transport.send = async () => {
+      throw new TransportError('send failed again');
+    };
+    expect(() => layer.sendResponse(requestEvent.transaction.key, responseFor('z9hG4bK-abc', 486))).not.toThrow();
   });
 
   it('routes an ACK for a non-2xx to the existing INVITE server transaction', () => {

@@ -351,12 +351,18 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
     return observed;
   }
 
-  /** Initiate an outgoing call to the specified target URI. */
-  async invite(target: string): Promise<void> {
+  /**
+   * Create an outgoing call owner WITHOUT sending. Synchronously claims the
+   * active inviter (rejecting a second outgoing call before media acquisition)
+   * and attaches the single session listener, then returns the owner so the
+   * caller can drive and cancel it. No INVITE is sent until `.invite()`.
+   */
+  createOutgoingCall(target: string): Inviter {
     this.assertOperational();
     if (this.layer === undefined) {
       throw new Error('UserAgent not connected');
     }
+    // A second in-flight outgoing call is rejected before any media is touched.
     if (this.activeInviter !== undefined) {
       throw new SipError(0, 'Call already in progress', 'INVALID_STATE');
     }
@@ -410,7 +416,12 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
     this.ownerSessionUnsubscribers.set(inviter, () => inviter.session.off(sessionListener));
 
     this.activeInviter = inviter;
-    await inviter.invite();
+    return inviter;
+  }
+
+  /** Initiate an outgoing call to the specified target URI. */
+  async invite(target: string): Promise<void> {
+    return this.createOutgoingCall(target).invite();
   }
 
   /**

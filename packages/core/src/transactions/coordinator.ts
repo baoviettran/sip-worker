@@ -394,16 +394,37 @@ export class TransactionLayer implements MessageSink {
     return tx;
   }
 
-  /** Send a response via an existing server transaction. */
-  sendResponse(key: TransactionKey, response: SipResponseMessage): void {
+  /**
+   * Send a response via an existing server transaction, settling with THAT exact
+   * send. The server transaction commits its state before the transport send, so
+   * a rejected promise reflects a failed wire send while the transaction state is
+   * authoritative. Use this for application-level settlement (e.g. an
+   * awaitable `Invitation.reject()`).
+   */
+  sendResponseAwait(key: TransactionKey, response: SipResponseMessage): Promise<void> {
     if (this.disposed) {
-      throw new TransportError('transaction layer has been disposed');
+      return Promise.reject(new TransportError('transaction layer has been disposed'));
     }
     const tx = this.servers.get(key);
     if (tx === undefined) {
-      throw new TransportError(`no server transaction found for key: ${key}`);
+      return Promise.reject(new TransportError(`no server transaction found for key: ${key}`));
     }
-    tx.sendResponse(response);
+    return tx.sendResponseAwait(response);
+  }
+
+  /**
+   * Compatibility wrapper over `sendResponseAwait` (void return). Consumes any
+   * rejection so callers that only observe state never see an unhandled
+   * rejection, while still emitting the canonical transport error through the
+   * server transaction. Never double-emits: a single send produces a single
+   * transportError.
+   */
+  sendResponse(key: TransactionKey, response: SipResponseMessage): void {
+    void this.sendResponseAwait(key, response).catch((error: unknown) => {
+      if (error instanceof TransportError) return;
+      // Any non-TransportError rejection (e.g. a synchronous throw) is already
+      // surfaced as a transportError by the transaction; swallow the rest.
+    });
   }
 
   /** Route an incoming message to the correct client or server transaction. */
