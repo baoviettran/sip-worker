@@ -33,3 +33,36 @@ export type {
   NormalizedMediaOptions,
   PrepareMediaOptions,
 } from './media/index.js';
+export { normalizeBrowserPhoneOptions } from './phone/index.js';
+export { DiagnosticRecorder, MAX_CONTEXT_LENGTH } from './phone/index.js';
+export type { DiagnosticRecorderOptions } from './phone/index.js';
+export {
+  DEFAULT_RECONNECT_OPTIONS,
+  MAX_RECONNECT_ATTEMPTS,
+  MAX_RECONNECT_DELAY_MS,
+  MAX_RECOVERY_TIMEOUT_MS,
+  MIN_RECONNECT_ATTEMPTS,
+} from './phone/index.js';
+export type { OperationOptions } from './phone/index.js';
+export type {
+  BrowserCallEventMap,
+  BrowserPhoneEventMap,
+  BrowserPhoneOptions,
+  CallId,
+  CallSignalingState,
+  CallState,
+  ConnectionState,
+  DiagnosticCode,
+  DiagnosticLogger,
+  DiagnosticRecord,
+  DiagnosticSeverity,
+  DiagnosticSubsystem,
+  HoldState,
+  IceServerProvider,
+  NormalizedBrowserPhoneOptions,
+  NormalizedMediaPhoneOptions,
+  ReconnectOptions,
+  RegistrationState,
+  RemoteIdentity,
+  ResourceSnapshot,
+} from './phone/index.js';
