@@ -172,6 +172,32 @@ export class WebRtcMediaManager {
     return this.reservedId;
   }
 
+  // ------------------------------------------------------------------
+  // Internal diagnostic hooks (owner-read, never public).
+  // ------------------------------------------------------------------
+
+  /** @internal owner hook: 1 when the active session owns a peer connection. */
+  peerConnectionCount(): number {
+    return this.owned !== null && this.owned.hasPeerConnection ? 1 : 0;
+  }
+
+  /** @internal owner hook: 1 when the active session owns a local mic track. */
+  localTrackCount(): number {
+    return this.owned !== null && this.owned.hasLocalTrack ? 1 : 0;
+  }
+
+  /** @internal owner hook: attached browser device-change listeners. */
+  deviceListenerCount(): number {
+    return this.devices.activeListenerCount;
+  }
+
+  /** @internal owner hook: armed timers across this manager and its session. */
+  activeTimerCount(): number {
+    let total = this.boundedCancels.size + this.connectedWaiters.size;
+    if (this.owned !== null) total += this.owned.activeTimerCount;
+    return total;
+  }
+
   /**
    * Register a listener for outgoing {@link MediaReply}s. Returns an idempotent
    * unsubscribe. The Task-10 facade subscribes here to hand replies to core.

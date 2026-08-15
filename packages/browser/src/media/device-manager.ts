@@ -163,6 +163,13 @@ export class MediaDeviceManager {
   }
 
   /**
+   * @internal owner hook: whether the environment devicechange listener is attached.
+   */
+  get activeListenerCount(): number {
+    return this.deviceChangeListener === null ? 0 : 1;
+  }
+
+  /**
    * Release every resource and make the manager terminal. Removes the single
    * devicechange listener; all in-flight operations are invalidated (generation
    * bump) and any late-delivered probe stream is stopped before the operation

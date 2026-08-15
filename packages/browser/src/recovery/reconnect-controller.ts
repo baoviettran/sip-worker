@@ -35,6 +35,16 @@ export interface ConnectMonitor {
   onFailure(reason: unknown): void;
 }
 
+/**
+ * Structured, safe diagnostic emitted by the reconnect controller at each
+ * attempt terminal. `attempt` is the 1-based attempt number; the event carries
+ * no socket, address, credential, or transport detail.
+ */
+export type ReconnectDiagnostic = {
+  readonly type: 'attempt' | 'attempt_failed' | 'attempt_success';
+  readonly attempt: number;
+};
+
 /** Injected environment dependencies for deterministic control and testing. */
 export interface ReconnectControllerDeps {
   readonly clock: Clock;
@@ -46,8 +56,8 @@ export interface ReconnectControllerDeps {
    * socket by invoking the monitors when the socket opens or fails.
    */
   readonly connect: (monitor: ConnectMonitor) => () => void;
-  /** Sink for safe diagnostics; a throwing sink must never break recovery. */
-  readonly diagnostics: (message: string) => void;
+  /** Sink for safe structured diagnostics; a throwing sink must never break recovery. */
+  readonly diagnostics: (event: ReconnectDiagnostic) => void;
 }
 
 const EXHAUSTED_CODE = 'CONNECTION_RECOVERY_EXHAUSTED' as const;
@@ -58,7 +68,7 @@ export class ReconnectController {
   private readonly random: () => number;
   private readonly lifecycle: ReconnectLifecycle;
   private readonly connectAttempt: (monitor: ConnectMonitor) => () => void;
-  private readonly diagnostics: (message: string) => void;
+  private readonly diagnostics: (event: ReconnectDiagnostic) => void;
   private readonly options: Readonly<ReconnectOptions>;
 
   private deferred: { promise: Promise<void>; resolve: () => void; reject: (error: SipError) => void } | undefined;
@@ -143,7 +153,7 @@ export class ReconnectController {
     const currentAttempt = this.attempt;
     const maxAttempts = this.options.maxAttempts;
 
-    this.emitDiagnostics(`connection recovery attempt ${String(currentAttempt)}`);
+    this.emitDiagnostics({ type: 'attempt', attempt: currentAttempt });
 
     const monitor: ConnectMonitor = {
       onSuccess: () => {
@@ -151,6 +161,7 @@ export class ReconnectController {
         this.attemptInFlight = false;
         this.stopAttempt = undefined;
         if (!this.active) return;
+        this.emitDiagnostics({ type: 'attempt_success', attempt: currentAttempt });
         this.succeed();
       },
       onFailure: () => {
@@ -158,6 +169,7 @@ export class ReconnectController {
         this.attemptInFlight = false;
         this.stopAttempt = undefined;
         if (!this.active) return;
+        this.emitDiagnostics({ type: 'attempt_failed', attempt: currentAttempt });
         if (currentAttempt >= maxAttempts) {
           this.fail(new SipError(0, `Connection recovery exhausted after ${String(maxAttempts)} attempts`, EXHAUSTED_CODE));
           return;
@@ -287,9 +299,34 @@ export class ReconnectController {
     }
   }
 
-  private emitDiagnostics(message: string): void {
+  // ------------------------------------------------------------------
+  // Internal diagnostic hooks (owner-read, never public).
+  // ------------------------------------------------------------------
+
+  /** @internal owner hook: live socket generations (1 while an attempt is in flight). */
+  activeSocketGenerations(): number {
+    return this.attemptInFlight ? 1 : 0;
+  }
+
+  /** @internal owner hook: armed timers (retry backoff + total deadline). */
+  activeReconnectTimers(): number {
+    return (this.retryTimerId !== undefined ? 1 : 0)
+      + (this.deadlineTimerId !== undefined ? 1 : 0);
+  }
+
+  /** @internal owner hook: attached online/offline lifecycle listeners. */
+  activeLifecycleListeners(): number {
+    return this.unsubscribes?.length ?? 0;
+  }
+
+  /** @internal owner hook: the current attempt number (0 when idle). */
+  currentAttempt(): number {
+    return this.attempt;
+  }
+
+  private emitDiagnostics(event: ReconnectDiagnostic): void {
     try {
-      this.diagnostics(message);
+      this.diagnostics(event);
     } catch {
       // A throwing diagnostics sink must never break recovery.
     }

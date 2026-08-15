@@ -40,6 +40,15 @@ const CODE_SPECS: Readonly<Record<DiagnosticCode, CodeSpec>> = {
   'connection.connected': {
     subsystem: 'connection', severity: 'info', allowed: ['connectionId'],
   },
+  'connection.reconnect_attempt': {
+    subsystem: 'connection', severity: 'info', allowed: ['connectionId', 'attempt'],
+  },
+  'connection.reconnect_attempt_failed': {
+    subsystem: 'connection', severity: 'warn', allowed: ['connectionId', 'attempt'],
+  },
+  'connection.reconnected': {
+    subsystem: 'connection', severity: 'info', allowed: ['connectionId'],
+  },
   'connection.recovery_failed': {
     subsystem: 'connection', severity: 'warn', allowed: ['attempt', 'reason'],
   },
@@ -52,6 +61,9 @@ const CODE_SPECS: Readonly<Record<DiagnosticCode, CodeSpec>> = {
   'registration.registered': {
     subsystem: 'registration', severity: 'info', allowed: [],
   },
+  'registration.recovering': {
+    subsystem: 'registration', severity: 'info', allowed: ['connectionId', 'attempt'],
+  },
   'registration.recovery_failed': {
     subsystem: 'registration', severity: 'warn', allowed: ['attempt'],
   },
@@ -60,6 +72,18 @@ const CODE_SPECS: Readonly<Record<DiagnosticCode, CodeSpec>> = {
   },
   'call.established': {
     subsystem: 'call', severity: 'info', allowed: ['callId', 'attempt'],
+  },
+  'call.recovering': {
+    subsystem: 'call', severity: 'info', allowed: ['callId'],
+  },
+  'call.hold': {
+    subsystem: 'call', severity: 'info', allowed: ['callId'],
+  },
+  'call.resume': {
+    subsystem: 'call', severity: 'info', allowed: ['callId'],
+  },
+  'call.dtmf_failed': {
+    subsystem: 'call', severity: 'error', allowed: ['callId'],
   },
   'call.terminated': {
     subsystem: 'call', severity: 'info', allowed: ['callId'],
@@ -94,9 +118,20 @@ export class DiagnosticRecorder {
     this.records = this._records;
   }
 
+  /**
+   * Record one closed diagnostic event. `connectionId`/`callId` are opaque
+   * local identifiers emitted as TOP-LEVEL fields (per the public schema),
+   * never inside `context`. Both are bounded to {@link MAX_CONTEXT_LENGTH} and
+   * only included when the code's allowlist admits them. `context` values are
+   * bounded and the keys are allowlisted per code; unknown keys are dropped.
+   */
   record(
     code: DiagnosticCode,
-    context?: Readonly<Record<string, string | number | boolean>>,
+    options?: {
+      readonly connectionId?: string;
+      readonly callId?: string;
+      readonly context?: Readonly<Record<string, string | number | boolean>>;
+    },
   ): void {
     const spec = CODE_SPECS[code];
 
@@ -110,14 +145,22 @@ export class DiagnosticRecorder {
       allowed = spec.allowed;
     }
 
-    const safeContext = sanitizeContext(context, allowed);
+    const connectionId = allowed.includes('connectionId')
+      ? sanitizeId(options?.connectionId)
+      : undefined;
+    const callId = allowed.includes('callId')
+      ? sanitizeId(options?.callId)
+      : undefined;
+    const safeContext = sanitizeContext(options?.context, allowed);
 
     const record: DiagnosticRecord = {
       timestamp: this.now(),
       severity,
       subsystem: sub,
       code,
-      ...(safeContext ? { context: safeContext } : {}),
+      ...(connectionId === undefined ? {} : { connectionId }),
+      ...(callId === undefined ? {} : { callId }),
+      ...(safeContext === undefined ? {} : { context: safeContext }),
     };
 
     if (this.collect) this._records.push(record);
@@ -137,8 +180,16 @@ function sanitizeContext(
   const allowedSet = new Set(allowed);
   const out: Record<string, string | number | boolean> = {};
   for (const [key, value] of Object.entries(context)) {
+    // connectionId/callId are top-level record fields, never context keys.
+    if (key === 'connectionId' || key === 'callId') continue;
     if (!allowedSet.has(key)) continue;
     out[key] = typeof value === 'string' ? value.slice(0, MAX_CONTEXT_LENGTH) : value;
   }
   return Object.keys(out).length === 0 ? undefined : Object.freeze(out);
+}
+
+/** Bound an opaque top-level identifier; drop non-strings and empty values. */
+function sanitizeId(value: string | undefined): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  return value.slice(0, MAX_CONTEXT_LENGTH);
 }

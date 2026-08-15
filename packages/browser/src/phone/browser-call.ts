@@ -46,16 +46,35 @@ const DEFAULT_CALL_ESTABLISH_TIMEOUT_MS = 120_000;
 /** The default local-hold direction (RFC 3264) when `hold()` omits one. */
 const DEFAULT_HOLD_DIRECTION = 'sendonly';
 
+/** Opaque local call identifier generator (never the SIP Call-ID). */
+let nextCallSeq = 0;
+function nextCallId(): string {
+  nextCallSeq += 1;
+  return `call-${nextCallSeq}`;
+}
+
 export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
   /** The owning runtime; supplies core/media/call facts and detach on terminal. */
   protected readonly runtime: PhoneRuntime;
 
   private readonly mediaSessionId: string;
 
+  /** Opaque local diagnostic call id (never the SIP Call-ID). */
+  private readonly diagnosticCallIdValue: string;
+
   private stateValue: CallState = 'new';
   private signalingStateValue: CallSignalingState = 'stable';
   private holdValue: HoldState = Object.freeze({ local: false, remote: false });
   private mutedValue = false;
+
+  /** In-flight public operations on this call (diagnostic count). */
+  private pendingOps = 0;
+
+  /** In-flight signaling negotiations on this call (diagnostic count). */
+  private negotiationsInFlight = 0;
+
+  /** Whether the recovery branch timer is armed (diagnostic count). */
+  private recoveryTimerActive = false;
 
   /** Latest core session state (signaling truth). */
   private sessionState: string = 'initial';
@@ -66,6 +85,7 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
     super();
     this.runtime = runtime;
     this.mediaSessionId = mediaSessionId;
+    this.diagnosticCallIdValue = nextCallId();
   }
 
   /** Wrap the core {@link Inviter} as an outgoing call. */
@@ -112,9 +132,48 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
     return this.mediaSessionId;
   }
 
+  /** Opaque local diagnostic call id (never the SIP Call-ID). */
+  get diagnosticCallId(): string {
+    return this.diagnosticCallIdValue;
+  }
+
   /** Overridden by each subtype to read the owner's parsed identity. */
   protected remoteIdentityValue(): RemoteIdentity | undefined {
     return undefined;
+  }
+
+  // ------------------------------------------------------------------
+  // Internal diagnostic hooks (runtime-owned, never public).
+  // ------------------------------------------------------------------
+
+  /** @internal runtime hook: in-flight public operations on this call. */
+  _pendingOperationCount(): number {
+    return this.pendingOps;
+  }
+
+  /** @internal runtime hook: in-flight signaling negotiations on this call. */
+  _activeNegotiationCount(): number {
+    return this.negotiationsInFlight;
+  }
+
+  /** @internal runtime hook: armed timers owned by this call. */
+  _activeTimerCount(): number {
+    return this.recoveryTimerActive ? 1 : 0;
+  }
+
+  /**
+   * @internal runtime hook: track one in-flight public operation for the exact
+   * resource counters. `negotiate` additionally counts the operation as an
+   * active signaling negotiation. The returned promise settles when the
+   * underlying operation settles.
+   */
+  protected trackOperation(operation: Promise<void>, negotiate = false): Promise<void> {
+    this.pendingOps += 1;
+    if (negotiate) this.negotiationsInFlight += 1;
+    return operation.finally(() => {
+      if (negotiate) this.negotiationsInFlight -= 1;
+      this.pendingOps -= 1;
+    });
   }
 
   // ------------------------------------------------------------------
@@ -150,8 +209,9 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
       throw this.invalidCallState();
     }
     const previous = this.holdValue;
-    await this.ownerHold(direction);
+    await this.trackOperation(this.ownerHold(direction), true);
     this.commitHoldState(previous, Object.freeze({ local: true, remote: this.ownerRemoteHold() }));
+    this.runtime.recordCallEvent('call.hold', this);
   }
 
   /**
@@ -168,8 +228,9 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
       throw this.invalidCallState();
     }
     const previous = this.holdValue;
-    await this.ownerResume();
+    await this.trackOperation(this.ownerResume(), true);
     this.commitHoldState(previous, Object.freeze({ local: false, remote: this.ownerRemoteHold() }));
+    this.runtime.recordCallEvent('call.resume', this);
   }
 
   private commitHoldState(previous: HoldState, state: HoldState): void {
@@ -201,12 +262,16 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
     if (this.stateValue === 'terminated' || this.stateValue === 'failed') {
       throw this.invalidCallState();
     }
-    return this.runtime.manager.sendDtmf(tones, options);
+    const operation = this.trackOperation(this.runtime.manager.sendDtmf(tones, options));
+    return operation.catch((error: unknown) => {
+      this.runtime.recordCallEvent('call.dtmf_failed', this);
+      throw error;
+    });
   }
 
   /** Terminate the active call with BYE (shared). */
   hangup(): Promise<void> {
-    return this.hangupInternal();
+    return this.trackOperation(this.hangupInternal());
   }
 
   protected hangupInternal(): Promise<void> {
@@ -215,7 +280,7 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
 
   /** ICE restart on the confirmed dialog (staged in Task 12). */
   restartIce(): Promise<void> {
-    return this.ownerRestartIce();
+    return this.trackOperation(this.ownerRestartIce(), true);
   }
 
   // ------------------------------------------------------------------
@@ -251,6 +316,7 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
   ): Promise<void> {
     if (this.stateValue !== 'established') return;
     this.setSignalingState('recovering');
+    this.runtime.recordCallEvent('call.recovering', this);
     try {
       await this.runRecoveryBranch(networkChanged, recoveryOptions);
       // A remote BYE that terminated the call mid-recovery wins: never resurrect
@@ -275,6 +341,16 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
     networkChanged: boolean,
     recoveryOptions: WaitForConnectedOptions,
   ): Promise<void> {
+    return this.trackOperation(
+      this.recoveryBranch(networkChanged, recoveryOptions),
+      true,
+    );
+  }
+
+  private async recoveryBranch(
+    networkChanged: boolean,
+    recoveryOptions: WaitForConnectedOptions,
+  ): Promise<void> {
     const timeoutMs = recoveryOptions.timeoutMs ?? DEFAULT_MEDIA_OPERATION_TIMEOUT_MS;
     return new Promise<void>((resolve, reject) => {
       let settled = false;
@@ -283,8 +359,10 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
         if (settled) return;
         settled = true;
         if (timer !== -1) this.runtime.clock.clearTimeout(timer);
+        this.recoveryTimerActive = false;
         action();
       };
+      this.recoveryTimerActive = true;
       timer = this.runtime.clock.setTimeout(() => {
         finish(() => reject(
           new SipError(0, 'Signaling recovery failed.', 'SIGNALING_RECOVERY_FAILED'),
@@ -362,6 +440,9 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
   private setStateValue(mapped: CallState, error?: Error): void {
     const previous = this.stateValue;
     this.stateValue = mapped;
+    if (mapped === 'established') {
+      this.runtime.recordCallEvent('call.established', this);
+    }
     if (mapped === 'terminated' || mapped === 'failed') {
       // Detach BEFORE observers run for the terminal change.
       this.runtime.releaseCall(this, mapped);
@@ -532,7 +613,7 @@ export class OutgoingBrowserCall extends BrowserCall {
 
   /** Cancel an in-flight outgoing INVITE. */
   cancel(): Promise<void> {
-    return this.inviter.cancel();
+    return this.trackOperation(this.inviter.cancel());
   }
 
   protected override ownerHangup(): Promise<void> {
@@ -565,6 +646,10 @@ export class OutgoingBrowserCall extends BrowserCall {
   }
 
   private async runEstablish(invite: () => Promise<void>): Promise<void> {
+    return this.trackOperation(this.establishOperation(invite), true);
+  }
+
+  private async establishOperation(invite: () => Promise<void>): Promise<void> {
     const observed = this.observeOwnerOperation(invite(), 'outgoing call');
     await observed;
     await this.awaitMediaConnected();
@@ -592,7 +677,7 @@ export class IncomingBrowserCall extends BrowserCall {
 
   /** Reject the INVITE with a 4xx/5xx/6xx status. */
   reject(statusCode: number, reason?: string): Promise<void> {
-    return this.invitation.reject(statusCode, reason);
+    return this.trackOperation(this.invitation.reject(statusCode, reason));
   }
 
   protected override ownerHangup(): Promise<void> {

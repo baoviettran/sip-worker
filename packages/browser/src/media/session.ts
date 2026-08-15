@@ -220,6 +220,25 @@ export class WebRtcMediaSession {
     return this.mutedValue;
   }
 
+  // ------------------------------------------------------------------
+  // Internal diagnostic hooks (owner-read, never public).
+  // ------------------------------------------------------------------
+
+  /** @internal owner hook: whether this session owns a peer connection. */
+  get hasPeerConnection(): boolean {
+    return this.pc !== null;
+  }
+
+  /** @internal owner hook: whether this session owns a local mic track. */
+  get hasLocalTrack(): boolean {
+    return this.localTrack !== null;
+  }
+
+  /** @internal owner hook: armed timers (active DTMF op + ICE/deadline waiters). */
+  get activeTimerCount(): number {
+    return (this.activeDtmfOp !== null ? 1 : 0) + this.waiters.size;
+  }
+
   private transition(next: MediaSessionState, reason?: StateReason): void {
     if (this.state === next) return;
     const previous = this.state;

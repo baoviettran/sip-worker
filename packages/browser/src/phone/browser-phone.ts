@@ -17,14 +17,21 @@
  */
 
 import { normalizeBrowserPhoneOptions } from './config.js';
-import type { BrowserPhoneEventMap, BrowserPhoneOptions, ConnectionState, RegistrationState } from './types.js';
+import type {
+  BrowserPhoneEventMap,
+  BrowserPhoneOptions,
+  ConnectionState,
+  PhoneDiagnostics,
+  RegistrationState,
+  ResourceSnapshot,
+} from './types.js';
 import { DiagnosticRecorder } from './diagnostics.js';
 import { PhoneRuntime } from './runtime.js';
 import type { PhoneRuntimeCoreOptions } from './runtime.js';
 import type { BrowserWebSocketFactory } from '../transport/ws.js';
 import { BrowserWebSocketTransport } from '../transport/ws.js';
 import { ReconnectController } from '../recovery/reconnect-controller.js';
-import type { ConnectMonitor } from '../recovery/reconnect-controller.js';
+import type { ConnectMonitor, ReconnectDiagnostic } from '../recovery/reconnect-controller.js';
 import { createBrowserLifecycleEnvironment } from '../recovery/browser-lifecycle.js';
 import type { BrowserLifecycleHost } from '../recovery/browser-lifecycle.js';
 import type { BrowserMediaEnvironment } from '../media/types.js';
@@ -61,7 +68,7 @@ export class BrowserPhone {
   private readonly runtime: PhoneRuntime;
 
   private readonly environment: PhoneEnvironment;
-  private readonly diagnostics: DiagnosticRecorder;
+  private readonly diagnosticsRecorder: DiagnosticRecorder;
 
   private readonly transport: BrowserWebSocketTransport;
   private readonly reconnect: ReconnectController;
@@ -117,7 +124,7 @@ export class BrowserPhone {
       random: init.random ?? Math.random,
     };
 
-    this.diagnostics = new DiagnosticRecorder({
+    this.diagnosticsRecorder = new DiagnosticRecorder({
       logger: normalized.diagnostics?.logger ?? ((): void => {}),
     });
 
@@ -139,7 +146,7 @@ export class BrowserPhone {
       idGenerator: this.environment.idGenerator,
       mediaEnvironment: this.environment.mediaEnvironment,
       mediaOptions: normalized.media ?? {},
-      diagnostics: this.diagnostics,
+      diagnostics: this.diagnosticsRecorder,
       random: this.environment.random,
     };
 
@@ -151,7 +158,7 @@ export class BrowserPhone {
       random: Math.random,
       lifecycle,
       connect: (monitor): (() => void) => this.bridgeConnect(monitor),
-      diagnostics: (message) => this.diagnostics.record('connection.recovery_failed', { reason: message }),
+      diagnostics: (event): void => this.recordReconnectDiagnostic(event),
     });
 
     this.recoveryTimeoutMs = normalized.signaling.reconnect.recoveryTimeoutMs;
@@ -174,6 +181,62 @@ export class BrowserPhone {
 
   get registrationState(): RegistrationState {
     return this.runtime.registrationState;
+  }
+
+  /**
+   * Public read-only diagnostics facade. `resources()` snapshots the resources
+   * the phone currently owns, wired to direct owners. Counters are diagnostic
+   * assertions, never mutable control surfaces.
+   */
+  get diagnostics(): PhoneDiagnostics {
+    return { resources: (): ResourceSnapshot => this.snapshotResources() };
+  }
+
+  /** Compose the exact resource snapshot from the direct owners. */
+  private snapshotResources(): ResourceSnapshot {
+    return {
+      activeSocketGenerations: this.reconnect.activeSocketGenerations(),
+      // reconnectAttempts is a BOOLEAN recovery-lifecycle indicator, NOT a count
+      // of live socket attempts (that is `activeSocketGenerations`). The phone's
+      // recovery pipeline is its owner: 1 from transport loss until the committed
+      // `connected` fact — the established-call OPTIONS branch included — and 0
+      // whenever recovery is idle. The ReconnectController's own attempt counter
+      // is unsuitable here because it settles (attemptInFlight clears) as soon as
+      // the socket reconnects, before the established-call recovery branch runs.
+      reconnectAttempts: this.recovering ? 1 : 0,
+      reconnectTimers: this.reconnect.activeReconnectTimers(),
+      activeCalls: this.runtime.activeCallCount,
+      activeNegotiations: this.runtime.activeNegotiationCount,
+      pendingOperations: this.runtime.pendingOperationCount,
+      timers: this.runtime.timerCount,
+      peerConnections: this.runtime.manager.peerConnectionCount(),
+      localTracks: this.runtime.manager.localTrackCount(),
+      lifecycleListeners: (this.disposed ? 0 : 1) + this.reconnect.activeLifecycleListeners(),
+      deviceListeners: this.runtime.manager.deviceListenerCount(),
+    };
+  }
+
+  /** Map one structured reconnect diagnostic onto the closed diagnostic codes. */
+  private recordReconnectDiagnostic(event: ReconnectDiagnostic): void {
+    switch (event.type) {
+      case 'attempt':
+        this.diagnosticsRecorder.record('connection.reconnect_attempt', {
+          connectionId: this.runtime.connectionId,
+          context: { attempt: event.attempt },
+        });
+        break;
+      case 'attempt_failed':
+        this.diagnosticsRecorder.record('connection.reconnect_attempt_failed', {
+          connectionId: this.runtime.connectionId,
+          context: { attempt: event.attempt },
+        });
+        break;
+      case 'attempt_success':
+        this.diagnosticsRecorder.record('connection.reconnected', {
+          connectionId: this.runtime.connectionId,
+        });
+        break;
+    }
   }
 
   /** The single live call, only when exactly one is live (else undefined). */
@@ -357,6 +420,12 @@ export class BrowserPhone {
       this.transitionConnection('connected');
       return;
     }
+    // The registration is being restored: emit the recovery terminal before
+    // driving core's recoverRegistration().
+    this.diagnosticsRecorder.record('registration.recovering', {
+      connectionId: this.runtime.connectionId,
+      context: { attempt: this.reconnect.currentAttempt() },
+    });
     try {
       await this.runtime.coreInstance.recoverRegistration();
     } catch (error) {
@@ -413,7 +482,7 @@ export class BrowserPhone {
       (err as Error & { code?: string }).code = 'CONNECTION_RECOVERY_EXHAUSTED';
     }
     this.transitionEmit('failed', { type: 'failed', error: err });
-    this.diagnostics.record('connection.recovery_failed', { reason: 'exhausted' });
+    this.diagnosticsRecorder.record('connection.recovery_failed', { context: { reason: 'exhausted' } });
   }
 
   /** Cancel an active recovery cycle (manual disconnect / dispose). */

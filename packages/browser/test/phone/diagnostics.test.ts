@@ -22,10 +22,12 @@ describe('DiagnosticRecorder', () => {
     const logger: DiagnosticLogger = () => {};
     const recorder = recorderWithLogger(logger, true);
     recorder.record('connection.recovery_failed', {
-      attempt: 8,
-      password: 'secret',
-      sdp: 'v=0',
-      uri: 'sip:alice@example.com',
+      context: {
+        attempt: 8,
+        password: 'secret',
+        sdp: 'v=0',
+        uri: 'sip:alice@example.com',
+      },
     });
     expect(recorder.records[0]!.context).toEqual({ attempt: 8 });
   });
@@ -34,8 +36,7 @@ describe('DiagnosticRecorder', () => {
     const logger: DiagnosticLogger = () => {};
     const recorder = recorderWithLogger(logger, true);
     recorder.record('connection.recovery_failed', {
-      attempt: 1,
-      reason: 'x'.repeat(200),
+      context: { attempt: 1, reason: 'x'.repeat(200) },
     });
     expect(recorder.records[0]!.context!.reason).toHaveLength(128);
   });
@@ -43,9 +44,64 @@ describe('DiagnosticRecorder', () => {
   it('passes the exact allowlisted record to the injected logger', () => {
     let seen: DiagnosticRecord | undefined;
     const recorder = recorderWithLogger((record) => { seen = record; }, true);
-    recorder.record('call.failed', { callId: 'opaque-call', attempt: 3 });
+    recorder.record('call.failed', { callId: 'opaque-call', context: { attempt: 3 } });
     expect(seen!.code).toBe('call.failed');
-    expect(seen!.context).toEqual({ callId: 'opaque-call', attempt: 3 });
+    expect(seen!.callId).toBe('opaque-call');
+    expect(seen!.context).toEqual({ attempt: 3 });
+  });
+
+  it('places connectionId and callId at the top level, never inside context', () => {
+    const recorder = recorderWithLogger(() => {}, true);
+    recorder.record('call.failed', {
+      callId: 'opaque-call',
+      context: { callId: 'nested', attempt: 3 },
+    });
+    expect(recorder.records[0]!.callId).toBe('opaque-call');
+    expect(recorder.records[0]!.connectionId).toBeUndefined();
+    expect(recorder.records[0]!.context).toEqual({ attempt: 3 });
+  });
+
+  it('binds an oversized top-level connectionId/callId and drops a non-string one', () => {
+    const recorder = recorderWithLogger(() => {}, true);
+    recorder.record('call.failed', { callId: 'x'.repeat(200) });
+    recorder.record('connection.connected', { connectionId: 42 as unknown as string });
+    expect(recorder.records[0]!.callId).toHaveLength(128);
+    expect(recorder.records[1]!.connectionId).toBeUndefined();
+  });
+
+  it('records the closed control-terminal codes with their opaque ids', () => {
+    const recorder = recorderWithLogger(() => {}, true);
+    recorder.record('connection.reconnect_attempt', { connectionId: 'conn-1', context: { attempt: 2 } });
+    recorder.record('connection.reconnected', { connectionId: 'conn-1' });
+    recorder.record('registration.recovering', { connectionId: 'conn-1', context: { attempt: 1 } });
+    recorder.record('call.recovering', { callId: 'call-7' });
+    recorder.record('call.hold', { callId: 'call-7' });
+    recorder.record('call.resume', { callId: 'call-7' });
+    recorder.record('call.dtmf_failed', { callId: 'call-7' });
+    expect(recorder.records.map((r) => r.code)).toEqual([
+      'connection.reconnect_attempt',
+      'connection.reconnected',
+      'registration.recovering',
+      'call.recovering',
+      'call.hold',
+      'call.resume',
+      'call.dtmf_failed',
+    ]);
+    expect(recorder.records[0]).toMatchObject({ connectionId: 'conn-1', context: { attempt: 2 } });
+    expect(recorder.records[3]).toMatchObject({ callId: 'call-7' });
+  });
+
+  it('emits the closed recovery/media codes through the injected logger with fixed severities', () => {
+    const seen: DiagnosticRecord[] = [];
+    const recorder = recorderWithLogger((record) => seen.push(record));
+    recorder.record('connection.reconnect_attempt_failed', {
+      connectionId: 'conn-1',
+      context: { attempt: 3 },
+    });
+    recorder.record('media.failed', { callId: 'call-2' });
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toMatchObject({ code: 'connection.reconnect_attempt_failed', severity: 'warn' });
+    expect(seen[1]).toMatchObject({ code: 'media.failed', severity: 'error' });
   });
 
   it('records a timestamp and a subsystem for the event code', () => {
@@ -63,18 +119,18 @@ describe('DiagnosticRecorder', () => {
     // Runtime guard: an unrecognized code is dropped (no crash, no record).
     const logger: DiagnosticLogger = () => {};
     const recorder = recorderWithLogger(logger, true);
-    recorder.record('connection.recovery_failed' as DiagnosticCode, { attempt: 1 });
+    recorder.record('connection.recovery_failed' as DiagnosticCode, { context: { attempt: 1 } });
     expect(recorder.records[0]!.context).toEqual({ attempt: 1 });
   });
 
   it('fault-isolates a throwing logger and still does not leak unhandled errors', () => {
     const recorder = recorderWithLogger(() => { throw new Error('boom'); }, true);
-    expect(() => recorder.record('connection.recovery_failed', { attempt: 1 })).not.toThrow();
+    expect(() => recorder.record('connection.recovery_failed', { context: { attempt: 1 } })).not.toThrow();
   });
 
   it('stores no history when collect is disabled (production sink only)', () => {
     const recorder = recorderWithLogger(() => {}, false);
-    recorder.record('connection.recovery_failed', { attempt: 1 });
+    recorder.record('connection.recovery_failed', { context: { attempt: 1 } });
     expect(recorder.records).toEqual([]);
   });
 

@@ -28,7 +28,12 @@ import type { BrowserCall, OutgoingBrowserCall } from '../../src/phone/browser-c
 import type { WebRtcMediaManager } from '../../src/media/media-manager.js';
 import type { BrowserWebSocketFactory, BrowserWebSocketLike } from '../../src/transport/ws.js';
 import type { BrowserLifecycleHost } from '../../src/recovery/browser-lifecycle.js';
-import type { BrowserPhoneOptions, ReconnectOptions } from '../../src/phone/types.js';
+import type {
+  BrowserPhoneOptions,
+  DiagnosticLogger,
+  DiagnosticRecord,
+  ReconnectOptions,
+} from '../../src/phone/types.js';
 import { FakeBrowserWebSocket } from './fake-browser-web-socket.js';
 import { FakeMediaEnvironment, FakePeerConnection } from './fake-media-environment.js';
 import { ControlledClock } from './controlled-clock.js';
@@ -199,6 +204,8 @@ export interface PhoneHarness {
   readonly clock: ControlledClock;
   /** The runtime's media manager, for driving in-call device replacement. */
   readonly manager: WebRtcMediaManager;
+  /** Every diagnostic record emitted by the phone since construction. */
+  readonly records: readonly DiagnosticRecord[];
 }
 
 interface BuildPhoneOptions {
@@ -209,6 +216,12 @@ interface BuildPhoneOptions {
   readonly autoRespondRegister?: boolean;
   /** Credentials for authenticated (challenging) registration. */
   readonly credentials?: { readonly username: string; readonly password: string };
+  /**
+   * Diagnostics logger override. Every record is captured on `harness.records`
+   * regardless; when a logger is supplied it also runs after the capture (so a
+   * throwing sink never loses the captured record).
+   */
+  readonly diagnostics?: { readonly logger?: DiagnosticLogger };
 }
 
 let current: PhoneHarness | undefined;
@@ -229,6 +242,10 @@ export function buildPhone(options: BuildPhoneOptions = {}): PhoneHarness {
   env.queuedPeerConnections.push(pc as unknown as RTCPeerConnection);
 
   const clock = new ControlledClock();
+
+  // Capture every emitted diagnostic record on the harness surface; a user
+  // logger (when supplied) runs after the capture.
+  const records: DiagnosticRecord[] = [];
 
   // A call's offer/answer acquire a local microphone track from the media
   // environment. Seed a mic stream so `acquireMicrophone` resolves.
@@ -251,6 +268,12 @@ export function buildPhone(options: BuildPhoneOptions = {}): PhoneHarness {
           : { username: options.credentials.username, password: options.credentials.password }),
       },
       media: options.media,
+      diagnostics: {
+        logger: (record): void => {
+          records.push(record);
+          options.diagnostics?.logger?.(record);
+        },
+      },
     },
     factory,
     lifecycle,
@@ -277,6 +300,7 @@ export function buildPhone(options: BuildPhoneOptions = {}): PhoneHarness {
     // The phone keeps its runtime private; the harness reaches the manager
     // through it so tests can drive in-call device replacement directly.
     manager: (phone as unknown as { runtime: { manager: WebRtcMediaManager } }).runtime.manager,
+    records,
   };
   current = harness;
   return harness;

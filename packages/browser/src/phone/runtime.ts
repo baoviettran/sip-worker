@@ -40,6 +40,7 @@ import type {
   BrowserPhoneEventMap,
   CallState,
   ConnectionState,
+  DiagnosticCode,
   MediaError,
   RegistrationState,
 } from './types.js';
@@ -107,6 +108,13 @@ interface MediaWaiter {
 
 const MEDIA_CONNECT_TIMEOUT_MS = 120_000;
 
+/** Opaque local connection identifier generator (never the SIP identity). */
+let nextConnectionSeq = 0;
+function nextConnectionId(): string {
+  nextConnectionSeq += 1;
+  return `connection-${nextConnectionSeq}`;
+}
+
 export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & BrowserMediaEventMap> {
   /** The composed core SIP user agent (delegated, not inherited). */
   private readonly core: CoreUserAgent;
@@ -145,6 +153,12 @@ export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & Brows
   private registrationStateValue: RegistrationState = 'unregistered';
   private disposed = false;
   private disposePromise: Promise<void> | undefined;
+
+  /** Opaque local connection identifier for diagnostics (never the SIP identity). */
+  private connectionIdValue: string | undefined;
+
+  /** Pending top-level runtime mutations (connect/register/unregister/dispose). */
+  private pendingOps = 0;
 
   constructor(options: PhoneRuntimeCoreOptions) {
     super();
@@ -233,6 +247,45 @@ export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & Brows
     return this.core.identity;
   }
 
+  /** Opaque local connection id, set on connect (for diagnostics only). */
+  get connectionId(): string | undefined {
+    return this.connectionIdValue;
+  }
+
+  /** Number of live call owners (diagnostic count). */
+  get activeCallCount(): number {
+    return this.calls.size;
+  }
+
+  /** Number of calls with an in-flight negotiation operation (diagnostic count). */
+  get activeNegotiationCount(): number {
+    let total = 0;
+    for (const call of this.calls) {
+      if (call._activeNegotiationCount() > 0) total += 1;
+    }
+    return total;
+  }
+
+  /** Pending public operations across this runtime and its live calls. */
+  get pendingOperationCount(): number {
+    let total = this.pendingOps;
+    for (const call of this.calls) {
+      total += call._pendingOperationCount();
+    }
+    return total;
+  }
+
+  /** Active timers across runtime media waiters, the manager, and live calls. */
+  get timerCount(): number {
+    let total = 0;
+    for (const waiters of this.mediaWaiters.values()) total += waiters.size;
+    total += this.manager.activeTimerCount();
+    for (const call of this.calls) {
+      total += call._activeTimerCount();
+    }
+    return total;
+  }
+
   /** The single active call, only when exactly one is live. */
   get activeCall(): BrowserCall | undefined {
     // Exactly-one contract: 0 or 2+ live calls yield undefined (no arbitrary
@@ -272,32 +325,43 @@ export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & Brows
     // The transitional `connecting` updates the live fact but is not emitted
     // as an event (observers see only the final committed state).
     this.connectionStateValue = 'connecting';
+    this.connectionIdValue = nextConnectionId();
+    this.diagnostics?.record('connection.connecting', { connectionId: this.connectionIdValue });
+    this.pendingOps += 1;
     return this.core.connect().then(
       () => {
         if (this.disposed) return;
         this.commitConnection('connected');
-        this.diagnostics?.record('connection.connected');
+        this.diagnostics?.record('connection.connected', { connectionId: this.connectionIdValue });
       },
       (error: unknown) => {
         if (!this.disposed) this.connectionStateValue = 'disconnected';
         throw error;
       },
-    );
+    ).finally(() => {
+      this.pendingOps -= 1;
+    });
   }
 
   register(): Promise<void> {
     if (this.disposed) return Promise.reject(this.disposedError());
+    this.pendingOps += 1;
     return this.core.register().then(() => {
       if (this.disposed) return;
       this.commitRegistrationFromCore(this.core.registerState);
+    }).finally(() => {
+      this.pendingOps -= 1;
     });
   }
 
   unregister(): Promise<void> {
     if (this.disposed) return Promise.reject(this.disposedError());
+    this.pendingOps += 1;
     return this.core.unregister().then(() => {
       if (this.disposed) return;
       this.commitRegistrationFromCore(this.core.registerState);
+    }).finally(() => {
+      this.pendingOps -= 1;
     });
   }
 
@@ -333,7 +397,10 @@ export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & Brows
       return this.disposePromise ?? Promise.resolve();
     }
     this.disposed = true;
-    this.disposePromise = this.shutdown();
+    this.pendingOps += 1;
+    this.disposePromise = this.shutdown().finally(() => {
+      this.pendingOps -= 1;
+    });
     return this.disposePromise;
   }
 
@@ -374,7 +441,7 @@ export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & Brows
       }
       this.remoteHoldUnsubscribers.clear();
       this.calls.clear();
-      this.diagnostics?.record('lifecycle.disposed');
+      this.diagnostics?.record('lifecycle.disposed', { connectionId: this.connectionIdValue });
     }
   }
 
@@ -394,8 +461,14 @@ export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & Brows
     if (removed) {
       this.diagnostics?.record(
         terminalState === 'failed' ? 'call.failed' : 'call.terminated',
+        { callId: call.diagnosticCallId },
       );
     }
+  }
+
+  /** Record a call-scoped diagnostic through the runtime's recorder. */
+  recordCallEvent(code: DiagnosticCode, call: BrowserCall): void {
+    this.diagnostics?.record(code, { callId: call.diagnosticCallId });
   }
 
   // ------------------------------------------------------------------
@@ -501,6 +574,10 @@ export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & Brows
     // Forward media events onto the runtime surface too, so the legacy
     // BrowserUserAgent delegate can re-emit them (e.g. `deviceChanged`).
     this.emit(type as keyof BrowserMediaEventMap, value as never);
+    if (type === 'mediaFailed') {
+      const active = this.activeCall;
+      this.diagnostics?.record('media.failed', { callId: active?.diagnosticCallId });
+    }
     if (type === 'mediaStateChanged') {
       const event = value as BrowserMediaEventMap['mediaStateChanged'];
       if (event.state === 'connected') this.connectedSessions.add(event.sessionId);

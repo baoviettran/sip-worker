@@ -324,6 +324,18 @@ test('core-owned filenames live only under packages/core/src', () => {
   assert.deepEqual(diagnostics, [], `core-owned filenames outside core/src:\n${diagnostics.join('\n')}`);
 });
 
+test('no console.log/warn/error in production source', () => {
+  const diagnostics = [];
+  for (const file of files) {
+    const source = readFileSync(file, 'utf8');
+    const matches = source.match(/console\.(log|warn|error)\s*\(/g) ?? [];
+    if (matches.length > 0) {
+      diagnostics.push(`${short(file)} uses ${[...new Set(matches)].join(', ')}`);
+    }
+  }
+  assert.deepEqual(diagnostics, [], `console.* in production source:\n${diagnostics.join('\n')}`);
+});
+
 function short(file) {
   return file.slice(repoRoot.length + 1);
 }

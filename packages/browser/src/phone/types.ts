@@ -208,13 +208,21 @@ export interface BrowserCallEventMap {
 export type DiagnosticCode =
   | 'connection.connecting'
   | 'connection.connected'
+  | 'connection.reconnect_attempt'
+  | 'connection.reconnect_attempt_failed'
+  | 'connection.reconnected'
   | 'connection.recovery_failed'
   | 'connection.closed'
   | 'registration.registering'
   | 'registration.registered'
+  | 'registration.recovering'
   | 'registration.recovery_failed'
   | 'registration.unregistered'
   | 'call.established'
+  | 'call.recovering'
+  | 'call.hold'
+  | 'call.resume'
+  | 'call.dtmf_failed'
   | 'call.terminated'
   | 'call.failed'
   | 'media.failed'
@@ -262,6 +270,18 @@ export interface ResourceSnapshot {
   readonly localTracks: number;
   readonly lifecycleListeners: number;
   readonly deviceListeners: number;
+}
+
+/**
+ * Public read-only diagnostics facade exposed by a {@link BrowserPhone}.
+ *
+ * `resources()` snapshots the resources the phone currently owns, wired to
+ * direct owners (the reconnect controller, the runtime's live call set and
+ * pending operations, and the media manager's session/track/device listeners).
+ * Counters are diagnostic assertions — never mutable control surfaces.
+ */
+export interface PhoneDiagnostics {
+  readonly resources: () => ResourceSnapshot;
 }
 
 export type {
