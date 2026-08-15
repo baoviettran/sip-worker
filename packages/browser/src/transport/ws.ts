@@ -29,7 +29,21 @@ interface ConnectAttempt {
   readonly reject: (error: TransportError) => void;
 }
 
-interface DisconnectAttempt extends ConnectAttempt {}
+interface SocketGeneration {
+  readonly id: number;
+  readonly socket: BrowserWebSocketLike;
+  readonly connect: ConnectAttempt;
+  detached: boolean;
+  connected: boolean;
+  disconnectedEmitted: boolean;
+}
+
+interface SocketHandlers {
+  readonly open: () => void;
+  readonly message: (event: Event) => void;
+  readonly error: (event: Event) => void;
+  readonly close: (event: Event) => void;
+}
 
 export class BrowserWebSocketTransport implements Transport {
   readonly capabilities: TransportCapabilities;
@@ -37,57 +51,17 @@ export class BrowserWebSocketTransport implements Transport {
   private readonly token: 'WS' | 'WSS';
 
   private readonly listeners = new Set<(event: TransportEvent) => void>();
-  private socket?: BrowserWebSocketLike;
-  private connected = false;
-  private closing = false;
-  private closed = false;
-  private failed = false;
-  private socketListenersActive = false;
-  private disconnectedEmitted = false;
-  private pendingConnect?: ConnectAttempt;
-  private pendingDisconnect?: DisconnectAttempt;
+  private current?: SocketGeneration;
+  private nextGeneration = 0;
+  private disposed = false;
+  private pendingDisconnect?: ConnectAttempt;
+  private disposePromise?: Promise<void>;
+  private readonly handlers = new WeakMap<BrowserWebSocketLike, SocketHandlers>();
 
-  private readonly handleOpen = (): void => {
-    if (!this.socketListenersActive) return;
-    const connect = this.pendingConnect;
-    if (connect !== undefined) this.finishConnect(connect);
-  };
-
-  private readonly handleMessage = (event: Event): void => {
-    if (!this.socketListenersActive || !this.connected) return;
-    const data = copyWebSocketData((event as Event & { readonly data?: unknown }).data);
-    if (data === undefined) {
-      this.emit({
-        type: 'error',
-        error: new TransportError('Unsupported browser WebSocket message data'),
-      });
-      return;
-    }
-    this.emit({ type: 'data', data });
-  };
-
-  private readonly handleError = (event: Event): void => {
-    if (!this.socketListenersActive) return;
-    const cause = (event as Event & { readonly error?: unknown }).error ?? event;
-    const error = new TransportError('Browser WebSocket error', cause);
-    const connect = this.pendingConnect;
-    if (connect !== undefined) {
-      this.failed = true;
-      try {
-        this.emit({ type: 'error', error });
-      } finally {
-        this.closeAfterFailure(error);
-      }
-      return;
-    }
-    this.emit({ type: 'error', error });
-  };
-
-  private readonly handleClose = (event: Event): void => {
-    if (!this.socketListenersActive) return;
-    const close = event as Event & { readonly code?: unknown; readonly reason?: unknown };
-    this.finishClose(webSocketCloseError('Browser WebSocket', close.code, close.reason));
-  };
+  /** The id of the active socket generation (0 while idle / before first connect). */
+  get generation(): number {
+    return this.current?.id ?? this.nextGeneration;
+  }
 
   constructor(
     private readonly url: string,
@@ -102,92 +76,107 @@ export class BrowserWebSocketTransport implements Transport {
   }
 
   connect(): Promise<void> {
-    if (this.connected) return Promise.resolve();
-    if (this.closed || this.closing || this.failed) {
-      return Promise.reject(new TransportError('Browser WebSocket transport is closed'));
+    if (this.disposed) {
+      return Promise.reject(
+        new TransportError('Browser WebSocket transport is closed'),
+      );
     }
-    if (this.pendingConnect !== undefined) return this.pendingConnect.promise;
+    const current = this.current;
+    if (current !== undefined) {
+      if (current.connected) return Promise.resolve();
+      if (!current.detached) return current.connect.promise;
+    }
 
     const attempt = createAttempt();
-    this.pendingConnect = attempt;
     let socket: BrowserWebSocketLike;
     try {
       socket = this.factory(this.url, ['sip']);
     } catch (cause) {
       const error = new TransportError('Browser WebSocket creation failed', cause);
-      this.failed = true;
-      try {
-        this.emit({ type: 'error', error });
-      } finally {
-        this.finishClose(error);
-      }
+      attempt.reject(error);
+      this.emit({ type: 'error', error });
+      this.emit({ type: 'disconnected', error });
       return attempt.promise;
     }
 
-    this.socket = socket;
-    socket.binaryType = 'arraybuffer';
-    this.addSocketListeners(socket);
-    if (socket.readyState === OPEN) this.finishConnect(attempt);
-    else if (socket.readyState === CLOSED) {
-      this.failed = true;
-      this.finishClose(new TransportError('Browser WebSocket closed before connection'));
+    const generation: SocketGeneration = {
+      id: ++this.nextGeneration,
+      socket,
+      connect: attempt,
+      detached: false,
+      connected: false,
+      disconnectedEmitted: false,
+    };
+    this.current = generation;
+    this.attachSocket(generation, socket);
+    if (socket.readyState === OPEN) {
+      this.finishOpen(generation, attempt);
+    } else if (socket.readyState === CLOSED) {
+      this.closeGeneration(
+        generation,
+        new TransportError('Browser WebSocket closed before connection'),
+      );
     }
     return attempt.promise;
   }
 
   disconnect(): Promise<void> {
     if (this.pendingDisconnect !== undefined) return this.pendingDisconnect.promise;
-    if (this.closed) {
-      this.removeSocketListeners();
-      return Promise.resolve();
-    }
+    const generation = this.current;
+    if (generation === undefined) return Promise.resolve();
 
-    this.closing = true;
-    this.connected = false;
-    const connect = this.pendingConnect;
-    if (connect !== undefined) {
-      this.failConnect(connect, new TransportError('Browser WebSocket connection cancelled'));
+    if (generation.connected) generation.connected = false;
+    if (!generation.connected) {
+      // A still-pending connect is cancelled by the disconnect, mirroring the
+      // pre-generation behaviour of failing the in-flight attempt.
+      generation.connect.reject(
+        new TransportError('Browser WebSocket connection cancelled'),
+      );
     }
-
     const attempt = createAttempt();
     this.pendingDisconnect = attempt;
-    const socket = this.socket;
-    if (socket === undefined || socket.readyState === CLOSED) {
-      this.finishClose();
+    const socket = generation.socket;
+    if (socket.readyState === CLOSED) {
+      this.finishClose(generation);
       return attempt.promise;
     }
-
     try {
       socket.close(1000);
     } catch (cause) {
       const error = new TransportError('Browser WebSocket close failed', cause);
-      try {
-        this.emit({ type: 'error', error });
-      } finally {
-        this.finishClose(error);
-      }
+      this.emit({ type: 'error', error });
+      this.finishClose(generation, error);
     }
     return attempt.promise;
   }
 
   send(data: Uint8Array): Promise<void> {
-    const socket = this.socket;
+    if (this.disposed) {
+      return Promise.reject(new TransportError('Browser WebSocket transport is not open'));
+    }
+    const generation = this.current;
     if (
-      socket === undefined
-      || !this.connected
-      || this.closing
-      || this.closed
-      || socket.readyState !== OPEN
+      generation === undefined
+      || !generation.connected
+      || generation.detached
+      || generation.socket.readyState !== OPEN
     ) {
       return Promise.reject(new TransportError('Browser WebSocket transport is not open'));
     }
-
     try {
-      socket.send(data.slice());
+      generation.socket.send(data.slice());
       return Promise.resolve();
     } catch (cause) {
       return Promise.reject(new TransportError('Browser WebSocket send failed', cause));
     }
+  }
+
+  dispose(): Promise<void> {
+    if (this.disposePromise === undefined) {
+      this.disposed = true;
+      this.disposePromise = this.performDispose();
+    }
+    return this.disposePromise;
   }
 
   subscribe(listener: (event: TransportEvent) => void): () => void {
@@ -198,107 +187,155 @@ export class BrowserWebSocketTransport implements Transport {
   }
 
   isConnected(): boolean {
-    return this.connected;
+    return this.current !== undefined && this.current.connected;
   }
 
-  private finishConnect(attempt: ConnectAttempt): void {
-    if (
-      this.pendingConnect !== attempt
-      || this.closing
-      || this.closed
-      || this.failed
-    ) return;
-
-    const socket = this.socket;
-    if (socket === undefined) return;
-    if (socket.protocol !== 'sip') {
-      const error = new TransportError(
-        `Browser WebSocket negotiated unsupported protocol: ${socket.protocol || '(none)'}`,
-      );
-      this.failed = true;
-      try {
-        this.emit({ type: 'error', error });
-      } finally {
-        this.closeAfterFailure(error);
+  private async performDispose(): Promise<void> {
+    const generation = this.current;
+    if (generation !== undefined) {
+      generation.detached = true;
+      if (this.current === generation) this.current = undefined;
+      generation.connected = false;
+      this.removeSocketListeners(generation.socket);
+      if (generation.socket.readyState !== CLOSED) {
+        try {
+          generation.socket.close();
+        } catch {
+          // Best-effort teardown; dispose is terminal either way.
+        }
       }
+      generation.connect.reject(
+        new TransportError('Browser WebSocket transport is closed'),
+      );
+    }
+    if (this.pendingDisconnect !== undefined) {
+      this.pendingDisconnect.resolve();
+      this.pendingDisconnect = undefined;
+    }
+    this.listeners.clear();
+  }
+
+  private attachSocket(
+    generation: SocketGeneration,
+    socket: BrowserWebSocketLike,
+  ): void {
+    const open = (): void => {
+      if (this.current !== generation || generation.detached) return;
+      this.finishOpen(generation, generation.connect);
+    };
+    const message = (event: Event): void => {
+      if (this.current !== generation || generation.detached) return;
+      if (!generation.connected) return;
+      const data = copyWebSocketData(
+        (event as Event & { readonly data?: unknown }).data,
+      );
+      if (data === undefined) {
+        this.emit({
+          type: 'error',
+          error: new TransportError('Unsupported browser WebSocket message data'),
+        });
+        return;
+      }
+      this.emit({ type: 'data', data });
+    };
+    const error = (event: Event): void => {
+      if (this.current !== generation || generation.detached) return;
+      const cause = (event as Event & { readonly error?: unknown }).error ?? event;
+      const transportError = new TransportError('Browser WebSocket error', cause);
+      if (generation.connected) {
+        this.emit({ type: 'error', error: transportError });
+        return;
+      }
+      this.closeGeneration(generation, transportError);
+    };
+    const close = (event: Event): void => {
+      if (this.current !== generation || generation.detached) return;
+      const closeEvent = event as Event & { readonly code?: unknown; readonly reason?: unknown };
+      this.finishClose(
+        generation,
+        webSocketCloseError('Browser WebSocket', closeEvent.code, closeEvent.reason),
+      );
+    };
+    this.handlers.set(socket, { open, message, error, close });
+    socket.binaryType = 'arraybuffer';
+    socket.addEventListener('open', open);
+    socket.addEventListener('message', message);
+    socket.addEventListener('error', error);
+    socket.addEventListener('close', close);
+  }
+
+  private removeSocketListeners(socket: BrowserWebSocketLike): void {
+    const handlers = this.handlers.get(socket);
+    if (handlers === undefined) return;
+    this.handlers.delete(socket);
+    socket.removeEventListener('open', handlers.open);
+    socket.removeEventListener('message', handlers.message);
+    socket.removeEventListener('error', handlers.error);
+    socket.removeEventListener('close', handlers.close);
+  }
+
+  private finishOpen(generation: SocketGeneration, attempt: ConnectAttempt): void {
+    if (this.current !== generation || generation.detached) return;
+    if (generation.socket.protocol !== 'sip') {
+      this.closeGeneration(
+        generation,
+        new TransportError(
+          `Browser WebSocket negotiated unsupported protocol: ${generation.socket.protocol || '(none)'}`,
+        ),
+      );
       return;
     }
-
-    this.pendingConnect = undefined;
-    this.connected = true;
+    generation.connected = true;
     attempt.resolve();
     this.emit({ type: 'connected' });
   }
 
-  private failConnect(attempt: ConnectAttempt, error: TransportError): void {
-    if (this.pendingConnect !== attempt) return;
-    this.pendingConnect = undefined;
-    this.connected = false;
-    attempt.reject(error);
+  /** An abnormal terminal close (open/close error, subprotocol mismatch, pre-open close). */
+  private closeGeneration(generation: SocketGeneration, error: TransportError): void {
+    if (generation.detached) return;
+    generation.detached = true;
+    if (this.current === generation) this.current = undefined;
+    generation.connected = false;
+    this.removeSocketListeners(generation.socket);
+    generation.connect.reject(error);
+    this.closeSocket(generation.socket);
+    this.emit({ type: 'error', error });
+    this.emitDisconnected(generation, error);
   }
 
-  private closeAfterFailure(error: TransportError): void {
-    this.closing = true;
-    const socket = this.socket;
-    try {
-      if (socket !== undefined && socket.readyState !== CLOSED) socket.close();
-      this.finishClose(error);
-    } catch (cause) {
-      const closeError = new TransportError('Browser WebSocket close failed', cause);
-      try {
-        this.emit({ type: 'error', error: closeError });
-      } finally {
-        this.finishClose(closeError);
-      }
-    }
-  }
+  /** The socket's close event (or an explicit disconnect settling on that close). */
+  private finishClose(generation: SocketGeneration, error?: TransportError): void {
+    if (generation.detached) return;
+    generation.detached = true;
+    if (this.current === generation) this.current = undefined;
+    generation.connected = false;
+    this.removeSocketListeners(generation.socket);
 
-  private finishClose(error?: TransportError): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.closing = false;
-    this.connected = false;
-
-    const connect = this.pendingConnect;
-    if (connect !== undefined) {
-      this.failConnect(
-        connect,
-        error ?? new TransportError('Browser WebSocket closed before connection'),
-      );
-    }
     const disconnect = this.pendingDisconnect;
-    this.pendingDisconnect = undefined;
-    this.removeSocketListeners();
-
     if (disconnect !== undefined) {
+      this.pendingDisconnect = undefined;
       if (error === undefined) disconnect.resolve();
       else disconnect.reject(error);
     }
-    if (!this.disconnectedEmitted) {
-      this.disconnectedEmitted = true;
-      this.emit(error === undefined
-        ? { type: 'disconnected' }
-        : { type: 'disconnected', error });
+    if (error !== undefined) this.emit({ type: 'error', error });
+    this.emitDisconnected(generation, error);
+  }
+
+  private closeSocket(socket: BrowserWebSocketLike): void {
+    if (socket.readyState === CLOSED) return;
+    try {
+      socket.close();
+    } catch {
+      // A peer socket that refuses to close does not block onward lifecycle.
     }
   }
 
-  private addSocketListeners(socket: BrowserWebSocketLike): void {
-    this.socketListenersActive = true;
-    socket.addEventListener('open', this.handleOpen);
-    socket.addEventListener('message', this.handleMessage);
-    socket.addEventListener('error', this.handleError);
-    socket.addEventListener('close', this.handleClose);
-  }
-
-  private removeSocketListeners(): void {
-    if (!this.socketListenersActive) return;
-    this.socketListenersActive = false;
-    const socket = this.socket;
-    if (socket === undefined) return;
-    socket.removeEventListener('open', this.handleOpen);
-    socket.removeEventListener('message', this.handleMessage);
-    socket.removeEventListener('error', this.handleError);
-    socket.removeEventListener('close', this.handleClose);
+  private emitDisconnected(generation: SocketGeneration, error?: TransportError): void {
+    if (generation.disconnectedEmitted) return;
+    generation.disconnectedEmitted = true;
+    this.emit(error === undefined
+      ? { type: 'disconnected' }
+      : { type: 'disconnected', error });
   }
 
   private emit(event: TransportEvent): void {

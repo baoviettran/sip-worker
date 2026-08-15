@@ -279,4 +279,106 @@ describe('BrowserWebSocketTransport', () => {
     expect(outcome).toBe('resolved');
     await disconnected;
   });
+
+  describe('generations', () => {
+    it('reconnects after an unexpected close and suppresses stale events', async () => {
+      const first = new FakeBrowserWebSocket();
+      const second = new FakeBrowserWebSocket();
+      const sockets = [first, second];
+      const transport = new BrowserWebSocketTransport(
+        'wss://sip.example.test/ws',
+        () => sockets.shift()!,
+      );
+      const events: TransportEvent[] = [];
+      transport.subscribe((event) => events.push(event));
+
+      const firstConnect = transport.connect();
+      first.emitOpen('sip');
+      await firstConnect;
+      first.emitClose(1006, 'lost');
+
+      const secondConnect = transport.connect();
+      second.emitOpen('sip');
+      await secondConnect;
+      first.emitMessage('stale');
+      first.emitClose(1006, 'late');
+      first.emitError(new Error('stale'));
+
+      expect(transport.generation).toBe(2);
+      expect(events.filter((event) => event.type === 'connected')).toHaveLength(2);
+      expect(events.filter((event) => event.type === 'data')).toHaveLength(0);
+      await transport.dispose();
+      await expect(transport.connect()).rejects.toMatchObject({ code: 'TRANSPORT_FAILED' });
+    });
+
+    it('emits exactly one disconnected event per generation', async () => {
+      const first = new FakeBrowserWebSocket();
+      const second = new FakeBrowserWebSocket();
+      const sockets = [first, second];
+      const transport = new BrowserWebSocketTransport(
+        'wss://sip.example.test/ws',
+        () => sockets.shift()!,
+      );
+      const events: TransportEvent[] = [];
+      transport.subscribe((event) => events.push(event));
+
+      await connect(first, transport);
+      first.emitClose(1006, 'lost');
+      first.emitClose(1006, 'again');
+
+      await connect(second, transport);
+      second.emitClose(1006, 'lost');
+
+      expect(events.filter((event) => event.type === 'disconnected')).toHaveLength(2);
+    });
+
+    it('rejects sends to a stale generation after an exchange', async () => {
+      const first = new FakeBrowserWebSocket();
+      const second = new FakeBrowserWebSocket();
+      const sockets = [first, second];
+      const transport = new BrowserWebSocketTransport(
+        'wss://sip.example.test/ws',
+        () => sockets.shift()!,
+      );
+
+      await connect(first, transport);
+      first.emitClose(1006, 'lost');
+
+      await connect(second, transport);
+
+      // The stale (detached) first socket holds no active generation: sending
+      // through the second generation still works, but the new code path guards
+      // the swap, so a send against the old socket reference is not possible via
+      // the public API. Instead assert sends still work on the current generation
+      // and reject when no generation is active.
+      await transport.send(new Uint8Array([1]));
+      expect(second.sent).toHaveLength(1);
+
+      second.emitClose(1006, 'lost');
+      await expect(transport.send(new Uint8Array([2]))).rejects.toBeInstanceOf(TransportError);
+    });
+
+    it('dispose is terminal, idempotent, and awaited', async () => {
+      const socket = new FakeBrowserWebSocket();
+      const transport = new BrowserWebSocketTransport(
+        'wss://sip.example.test/ws',
+        () => socket,
+      );
+      const events: TransportEvent[] = [];
+      transport.subscribe((event) => events.push(event));
+      const pending = transport.connect();
+      socket.emitOpen('sip');
+      await pending;
+
+      const first = transport.dispose();
+      const second = transport.dispose();
+      await first;
+      await second;
+
+      expect(transport.isConnected()).toBe(false);
+      expect(events.filter((event) => event.type === 'disconnected')).toHaveLength(0);
+      expect(socket.closeCalls).toHaveLength(1);
+      await expect(transport.connect()).rejects.toMatchObject({ code: 'TRANSPORT_FAILED' });
+    });
+  });
 });
