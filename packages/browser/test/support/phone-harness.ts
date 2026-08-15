@@ -24,9 +24,9 @@ import {
   type SipResponseMessage,
 } from '@sip-worker/core';
 import { BrowserPhone } from '../../src/phone/browser-phone.js';
-import type { BrowserWebSocketFactory } from '../../src/transport/ws.js';
+import type { BrowserWebSocketFactory, BrowserWebSocketLike } from '../../src/transport/ws.js';
 import type { BrowserLifecycleHost } from '../../src/recovery/browser-lifecycle.js';
-import type { BrowserPhoneOptions } from '../../src/phone/types.js';
+import type { BrowserPhoneOptions, ReconnectOptions } from '../../src/phone/types.js';
 import { FakeBrowserWebSocket } from './fake-browser-web-socket.js';
 import { FakeMediaEnvironment, FakePeerConnection } from './fake-media-environment.js';
 import { ControlledClock } from './controlled-clock.js';
@@ -74,6 +74,117 @@ class FakePhoneWebSocket extends FakeBrowserWebSocket {
   }
 }
 
+const REALM = 'sip.example.com';
+const NONCE = '0cef7a94b60e1e00c9d1e5e';
+
+function statusText(status: number): string {
+  return status === 200 ? 'OK' : 'Unauthorized';
+}
+
+/**
+ * Deterministic SIP-over-WSS server fake for recovery orchestration.
+ *
+ * Each transport connect attempt asks the factory for a new socket generation;
+ * the server hands out fresh sockets and tracks all of them. The FIRST socket
+ * is auto-opened so the initial `connect()` resolves immediately. After
+ * `dropSocket()` (an unexpected loss) the phone's bounded reconnect may open
+ * further sockets. Per-connect behavior is scripted via `connectOnNext`:
+ * `'open'` (default) hands out an already-open socket, `'error'` hands a
+ * closed one so the transport rejects immediately, `'pending'` hands out a
+ * still-connecting socket that `openNextSocket()` later opens. The server
+ * auto-answers every outbound REGISTER (200) so recovered re-registration also
+ * settles; Register Call-ID/CSeq history is aggregate across every generation.
+ */
+type ConnectBehavior = 'open' | 'error' | 'pending';
+
+class FakeSipServer {
+  /** All sockets ever handed out, in factory-call order. */
+  readonly sockets: FakePhoneWebSocket[] = [];
+  /** Headers of REGISTER requests across every socket, in wire order. */
+  readonly registers: MessageHead[] = [];
+  private nextBehavior: ConnectBehavior[] = [];
+  /** When false, outbound REGISTERs are not auto-answered by the server. */
+  autoRespondRegister: boolean;
+
+  constructor(autoRespond = true) {
+    this.autoRespondRegister = autoRespond;
+  }
+
+  /** Script the behavior for the next `count` non-initial factory calls. */
+  connectOnNext(behavior: ConnectBehavior, count = 1): void {
+    for (let i = 0; i < count; i += 1) this.nextBehavior.push(behavior);
+  }
+
+  readonly factory: BrowserWebSocketFactory = (): BrowserWebSocketLike => {
+    const socket = new FakePhoneWebSocket();
+    socket.binaryType = 'arraybuffer';
+    const isFirst = this.sockets.length === 0;
+    const behavior = isFirst ? 'open' : (this.nextBehavior.shift() ?? 'open');
+    if (behavior === 'open') {
+      socket.readyState = 1;
+      socket.protocol = 'sip';
+    } else if (behavior === 'error') {
+      socket.readyState = 3;
+    } else {
+      socket.readyState = 0;
+    }
+    this.track(socket);
+    return socket;
+  };
+
+  get current(): FakePhoneWebSocket {
+    const current = this.sockets[this.sockets.length - 1];
+    if (current === undefined) throw new Error('no server socket has been created yet');
+    return current;
+  }
+
+  private track(socket: FakePhoneWebSocket): void {
+    this.sockets.push(socket);
+    const originalSend = socket.send.bind(socket);
+    socket.send = (data: Uint8Array): void => {
+      originalSend(data);
+      const head = parseHead(data);
+      if (head !== undefined && head.method === 'REGISTER') this.registers.push(head);
+      if (this.autoRespondRegister && head !== undefined && head.method === 'REGISTER') {
+        this.answerRegister(200);
+      }
+    };
+  }
+
+  /** Open the most recently created (pending) socket as a successful connection. */
+  openNextSocket(): void {
+    const socket = this.current;
+    if (socket.readyState !== 0) throw new Error('openNextSocket expected a pending socket');
+    socket.emitOpen('sip');
+  }
+
+  /** Answer the most recent outbound REGISTER with the given status (default 200). */
+  answerRegister(status = 200): void {
+    const last = this.registers.at(-1);
+    if (last === undefined) throw new Error('no outbound REGISTER to answer');
+    const sentText = this.sockets
+      .flatMap((s) => s.sent)
+      .map((b) => new TextDecoder().decode(b))
+      .reverse()
+      .find((t) => parseFromText(t)?.method === 'REGISTER');
+    const via = sentText === undefined ? last : parseFromText(sentText)!;
+    const headers = new Headers();
+    headers.set('Via', via.via);
+    headers.set('From', via.from);
+    headers.set('To', `${via.to};tag=${status === 200 ? 'server-tag' : ''}`);
+    headers.set('Call-ID', via.callId);
+    headers.set('CSeq', via.cseqLine);
+    headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
+    if (status === 401) headers.set('WWW-Authenticate', `Digest realm="${REALM}", nonce="${NONCE}"`);
+    this.current.emitMessage(serializeMessage(makeResponse(status, statusText(status), headers)));
+  }
+
+  /** Close the current connection abnormally (unexpected transport loss). */
+  dropSocket(code = 1006): void {
+    this.current.emitClose(code, '');
+  }
+}
+
 let idCounter = 0;
 function idGenerator() {
   return { branch: () => `id-${(idCounter += 1)}` };
@@ -83,6 +194,7 @@ function idGenerator() {
 export interface PhoneHarness {
   readonly phone: BrowserPhone;
   readonly socket: FakeBrowserWebSocket;
+  readonly server: FakeSipServer;
   readonly lifecycle: FakeLifecycleHost;
   readonly env: FakeMediaEnvironment;
   readonly pc: FakePeerConnection;
@@ -92,19 +204,19 @@ export interface PhoneHarness {
 interface BuildPhoneOptions {
   readonly media?: BrowserPhoneOptions['media'];
   readonly url?: string;
-  readonly disconnectReconnect?: boolean;
+  readonly reconnect?: Partial<ReconnectOptions>;
   /** When true, outbound REGISTER is not auto-answered by the harness. */
   readonly autoRespondRegister?: boolean;
+  /** Credentials for authenticated (challenging) registration. */
+  readonly credentials?: { readonly username: string; readonly password: string };
 }
 
 let current: PhoneHarness | undefined;
 
 /** Build a fresh phone, replacing the current module-scoped harness. */
 export function buildPhone(options: BuildPhoneOptions = {}): PhoneHarness {
-  const socket = new FakePhoneWebSocket();
-  socket.readyState = 1;
-  socket.protocol = 'sip';
-  const factory: BrowserWebSocketFactory = () => socket;
+  const server = new FakeSipServer(options.autoRespondRegister !== false);
+  const factory: BrowserWebSocketFactory = server.factory;
 
   const lifecycle = new FakeLifecycleHost();
   const env = new FakeMediaEnvironment([
@@ -125,14 +237,17 @@ export function buildPhone(options: BuildPhoneOptions = {}): PhoneHarness {
     options: {
       signaling: {
         url: options.url ?? 'wss://sip.example.test/ws',
-        reconnect: options.disconnectReconnect === true
-          ? { maxAttempts: 3, initialDelayMs: 10, maxDelayMs: 20, recoveryTimeoutMs: 100 }
-          : undefined,
+        reconnect: options.reconnect === undefined
+          ? undefined
+          : { maxAttempts: 3, initialDelayMs: 10, maxDelayMs: 20, recoveryTimeoutMs: 100, ...options.reconnect },
       },
       account: {
         registrarUri: 'sip:registrar.example.com',
         aor: 'sip:alice@example.com',
         contact: '<sip:alice@192.0.2.1:5060>',
+        ...(options.credentials === undefined
+          ? {}
+          : { username: options.credentials.username, password: options.credentials.password }),
       },
       media: options.media,
     },
@@ -143,20 +258,19 @@ export function buildPhone(options: BuildPhoneOptions = {}): PhoneHarness {
     idGenerator: idGenerator(),
   });
 
-  const harness: PhoneHarness = { phone, socket, lifecycle, env, pc, clock };
-
-  // Auto-answer outbound REGISTER so `await phone.register()` settles.
-  if (options.autoRespondRegister !== false) {
-    const originalSend = socket.send.bind(socket);
-    socket.send = (data: Uint8Array): void => {
-      originalSend(data);
-      const head = parseHead(data);
-      if (head !== undefined && head.method === 'REGISTER') {
-        respondOk('REGISTER');
-      }
-    };
-  }
-
+  const harness: PhoneHarness = {
+    phone,
+    // The initial socket is created on the first factory call (phone.connect()),
+    // so resolve it lazily rather than capturing it (undefined) at build time.
+    get socket(): FakeBrowserWebSocket {
+      return server.sockets[0]!;
+    },
+    server,
+    lifecycle,
+    env,
+    pc,
+    clock,
+  };
   current = harness;
   return harness;
 }
@@ -307,20 +421,42 @@ function parseFromText(text: string): MessageHead | undefined {
   return parseHead(new TextEncoder().encode(text));
 }
 
-/** Requests of the given method sent by the current phone's transport. */
+/** Requests of the given method sent by the current phone's transport
+ * (aggregated across every socket generation). */
 export function sentRequests(method: string): MessageHead[] {
   const out: MessageHead[] = [];
-  for (const bytes of currentHarness().socket.sent) {
+  for (const bytes of allSentBytes()) {
     const parsed = parseHead(bytes);
     if (parsed !== undefined && parsed.method === method) out.push(parsed);
   }
   return out;
 }
 
+/** Every byte sent across all server sockets, oldest first. */
+function allSentBytes(): Uint8Array[] {
+  const harness = currentHarness();
+  const out: Uint8Array[] = [];
+  for (const socket of harness.server.sockets) out.push(...socket.sent);
+  return out;
+}
+
+/** Call-IDs of outbound REGISTERs, in wire order (stable across recovery). */
+export function registerCallIds(): Array<string | undefined> {
+  return currentHarness().server.registers.map((r) => r.callId);
+}
+
+/** The `Call-ID <cseq>` header numbers of outbound REGISTERs, in wire order. */
+export function registerCSeqs(): Array<number | undefined> {
+  return currentHarness().server.registers.map((r) => {
+    const m = r.cseqLine.match(/^(\d+)/);
+    return m === null ? undefined : Number(m[1]);
+  });
+}
+
 /** Outbound SIP response status codes, in send order. */
 export function outboundResponseCodes(): number[] {
   const codes: number[] = [];
-  for (const bytes of currentHarness().socket.sent) {
+  for (const bytes of allSentBytes()) {
     const text = new TextDecoder().decode(bytes);
     const m = (text.split('\r\n')[0] ?? '').match(/^SIP\/2\.0 (\d{3})/);
     if (m !== null) codes.push(Number(m[1]));
