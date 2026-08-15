@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import type { MediaCommand, MediaReply } from '@sip-worker/core';
 import { WebRtcMediaManager } from '../../src/media/media-manager.js';
 import type { BrowserMediaEventMap } from '../../src/media/types.js';
-import { FakeMediaEnvironment, FakePeerConnection } from '../support/fake-media-environment.js';
+import {
+  FakeMediaEnvironment,
+  FakePeerConnection,
+  DTMF_TELEPHONE_EVENT_SDP,
+} from '../support/fake-media-environment.js';
 
 const VALID_CODES = [
   'PERMISSION_DENIED', 'DEVICE_NOT_FOUND', 'DEVICE_UNAVAILABLE', 'CONSTRAINT_UNSATISFIED',
@@ -722,5 +726,54 @@ describe('WebRtcMediaManager.setMuted', () => {
     expect(local).toBe(replacement as unknown as { enabled: boolean });
     expect(replacement.enabled).toBe(false); // replacement comes in muted
     expect(remote.enabled).toBe(true); // remote tracks untouched by mute or swap
+  });
+});
+
+describe('WebRtcMediaManager.sendDtmf', () => {
+  type FakeSender = {
+    dtmf: {
+      insertDTMFCalls: Array<{ tones: string; duration: number; interToneGap: number }>;
+      emitToneChange: (tone: string) => void;
+      canInsertDTMF: boolean;
+      tonechangeListenerCount: number;
+    };
+  };
+
+  it('routes DTMF to the active session and resolves when the tone buffer completes', async () => {
+    const { manager, env, replies } = setup();
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'off-1', sessionId: 's1' });
+    await settle(manager, pc);
+    // The fake's local offer already carries telephone-event; negotiate a remote
+    // answer that also does so the capability check passes.
+    manager.postMessage({
+      type: 'setRemote',
+      requestId: 'set-1',
+      sessionId: 's1',
+      remoteSdp: DTMF_TELEPHONE_EVENT_SDP,
+    });
+    await settle(manager, pc);
+    expect(replyFor(replies, 'set-1')!.type).toBe('mediaResult');
+    const sender = pc.transceivers[0]!.sender as unknown as FakeSender;
+    const op = manager.sendDtmf('123');
+    expect(sender.dtmf.insertDTMFCalls).toEqual([{ tones: '123', duration: 100, interToneGap: 70 }]);
+    expect(sender.dtmf.tonechangeListenerCount).toBe(1);
+    sender.dtmf.emitToneChange('1');
+    sender.dtmf.emitToneChange('');
+    await op;
+    expect(sender.dtmf.tonechangeListenerCount).toBe(0);
+  });
+
+  it('rejects canonical INVALID_STATE synchronously when no active media session', () => {
+    const { manager } = setup();
+    expect(() => manager.sendDtmf('1'))
+      .toThrowError(expect.objectContaining({ code: 'INVALID_STATE' }));
+  });
+
+  it('rejects canonical ABORTED synchronously after disposal', () => {
+    const { manager } = setup();
+    manager.dispose();
+    expect(() => manager.sendDtmf('1'))
+      .toThrowError(expect.objectContaining({ code: 'ABORTED' }));
   });
 });

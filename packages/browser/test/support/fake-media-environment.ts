@@ -173,11 +173,55 @@ class FakeStream {
   stop(): void { for (const t of this.tracks) t.stop(); }
 }
 
-/** Fake sender; records replaceTrack and the currently attached track. */
+/**
+ * Fake {@link RTCDTMFSender}: records `insertDTMF` calls, exposes `toneBuffer`,
+ * and lets tests drive `tonechange` events deterministically. `emitToneChange`
+ * models the browser firing a `tonechange` event with the given tone while
+ * advancing the tone buffer.
+ */
+class FakeRtpDtmfSender {
+  canInsertDTMF = true;
+  readonly insertDTMFCalls: Array<{ tones: string; duration: number; interToneGap: number }> = [];
+  toneBuffer = '';
+  private readonly toneListeners = new Set<(event: { tone: string }) => void>();
+
+  insertDTMF(tones: string, duration?: number, interToneGap?: number): void {
+    this.insertDTMFCalls.push({
+      tones,
+      duration: duration ?? 100,
+      interToneGap: interToneGap ?? 70,
+    });
+    this.toneBuffer = tones;
+  }
+
+  addEventListener(_type: 'tonechange', listener: (event: { tone: string }) => void): void {
+    this.toneListeners.add(listener);
+  }
+
+  removeEventListener(_type: 'tonechange', listener: (event: { tone: string }) => void): void {
+    this.toneListeners.delete(listener);
+  }
+
+  /** Emit a `tonechange` event; the final `''` empties the tone buffer. */
+  emitToneChange(tone: string): void {
+    this.toneBuffer = tone;
+    for (const listener of [...this.toneListeners]) {
+      listener({ tone });
+    }
+  }
+
+  /** How many `tonechange` listeners are currently attached (0 after cleanup). */
+  get tonechangeListenerCount(): number {
+    return this.toneListeners.size;
+  }
+}
+
+/** Fake sender; records replaceTrack, the attached track, and a DTMF sender. */
 class FakeRtpSender {
   track: FakeMediaStreamTrack | null = null;
   readonly replaceTrackCalls: Array<MediaStreamTrack | null> = [];
   failNextReplaceTrack = false;
+  readonly dtmf = new FakeRtpDtmfSender();
   async replaceTrack(track: MediaStreamTrack | null): Promise<void> {
     this.replaceTrackCalls.push(track);
     if (this.failNextReplaceTrack) {
@@ -185,6 +229,22 @@ class FakeRtpSender {
       throw new Error('replaceTrack failed');
     }
     this.track = (track ?? null) as unknown as FakeMediaStreamTrack;
+  }
+
+  // Convenience DTMF surface forwarding to the owned RTCDTMFSender fake, so the
+  // verbatim test snippet reads `sender.insertDTMFCalls` / `sender.emitToneChange`
+  // / `sender.canInsertDTMF` while the session code uses `sender.dtmf.*`.
+  get insertDTMFCalls(): Array<{ tones: string; duration: number; interToneGap: number }> {
+    return this.dtmf.insertDTMFCalls;
+  }
+  get canInsertDTMF(): boolean {
+    return this.dtmf.canInsertDTMF;
+  }
+  set canInsertDTMF(value: boolean) {
+    this.dtmf.canInsertDTMF = value;
+  }
+  emitToneChange(tone: string): void {
+    this.dtmf.emitToneChange(tone);
   }
 }
 
@@ -195,7 +255,7 @@ class FakeRtpReceiver {
 
 /** Fake transceiver with a sender, codec preferences, and a direction. */
 class FakeRtpTransceiver {
-  readonly sender: FakeRtpSender;
+  sender: FakeRtpSender;
   readonly receiver: FakeRtpReceiver;
   direction: RTCRtpTransceiverDirection;
   setCodecPreferencesCalls: RTCRtpCodec[][] = [];
@@ -254,7 +314,8 @@ export class FakePeerConnection {
       this.iceGatheringState = 'new';
     }
     const sdp = `v=0\no=sip-worker ${++this.offerCounter} 0 IN IP4 0.0.0.0\n` +
-      `s=-\nm=audio 49170 RTP/AVP\n`;
+      `s=-\nm=audio 49170 RTP/AVP 0 8 101\n` +
+      `a=rtpmap:0 PCMU/8000\na=rtpmap:8 PCMA/8000\na=rtpmap:101 telephone-event/8000\n`;
     return { type: 'offer', sdp };
   }
 
@@ -361,3 +422,20 @@ function nameOf(_o: object, _k: string): unknown {
 export function completeGathering(pc: FakePeerConnection): void {
   pc._completeGathering();
 }
+
+/**
+ * A remote audio SDP that negotiates RFC 4733 telephone-event (the DTMF
+ * capability check requires telephone-event in the current remote AND local SDP;
+ * the fake's generated local offer already carries it).
+ */
+export const DTMF_TELEPHONE_EVENT_SDP = [
+  'v=0',
+  'o=remote 1 1 IN IP4 0.0.0.0',
+  's=-',
+  'm=audio 5004 RTP/AVP 0 8 101',
+  'a=rtpmap:0 PCMU/8000',
+  'a=rtpmap:8 PCMA/8000',
+  'a=rtpmap:101 telephone-event/8000',
+  'a=sendrecv',
+  '',
+].join('\r\n');

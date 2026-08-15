@@ -38,6 +38,7 @@ import {
   type PhoneHarness,
 } from '../support/phone-harness.js';
 import type { FakeBrowserWebSocket } from '../support/fake-browser-web-socket.js';
+import { DTMF_TELEPHONE_EVENT_SDP } from '../support/fake-media-environment.js';
 
 /** Respond to the most recent outbound re-INVITE (echoing its Via/CSeq). */
 function respondToReinvite(
@@ -500,6 +501,93 @@ describe('BrowserCall — hold/resume', () => {
       { type: 'holdStateChanged', previous: { local: false, remote: false }, state: { local: false, remote: true } },
     ]);
 
+    await h.phone.dispose();
+  });
+});
+
+describe('BrowserCall — sendDtmf (RFC 4733)', () => {
+  type FakeSender = {
+    insertDTMFCalls: Array<{ tones: string; duration: number; interToneGap: number }>;
+    emitToneChange: (tone: string) => void;
+    canInsertDTMF: boolean;
+    dtmf: { tonechangeListenerCount: number };
+  };
+
+  /** Negotiate RFC 4733 telephone-event in the remote answer (STUB_SDP lacks it). */
+  function negotiateTelephoneEvent(h: PhoneHarness): void {
+    h.pc.remoteDescription = {
+      type: 'answer',
+      sdp: DTMF_TELEPHONE_EVENT_SDP,
+    } as RTCSessionDescription;
+  }
+
+  it('inserts a tone sequence via the DTMF sender and resolves only when the buffer completes', async () => {
+    const { h, call } = await establishedCall();
+    negotiateTelephoneEvent(h);
+    const sender = h.pc.transceivers[0]!.sender as unknown as FakeSender;
+
+    let settled = false;
+    const operation = call.sendDtmf('12#A', { durationMs: 120, interToneGapMs: 70 })
+      .then(() => { settled = true; });
+    expect(sender.insertDTMFCalls).toEqual([
+      { tones: '12#A', duration: 120, interToneGap: 70 },
+    ]);
+    expect(settled).toBe(false);
+    sender.emitToneChange('1');
+    expect(settled).toBe(false); // a digit event does NOT settle the operation
+    sender.emitToneChange('');
+    await operation;
+    expect(settled).toBe(true);
+
+    await expect(call.sendDtmf('1X')).rejects.toMatchObject({ code: 'DTMF_FAILED' });
+    sender.canInsertDTMF = false;
+    await expect(call.sendDtmf('1')).rejects.toMatchObject({ code: 'DTMF_UNSUPPORTED' });
+    await h.phone.dispose();
+  });
+
+  it('rejects DTMF with canonical INVALID_STATE synchronously on a terminal call', async () => {
+    const { h, call } = await establishedCall();
+    emitRemoteBye();
+    await settle();
+    expect(call.state).toBe('terminated');
+    expect(() => call.sendDtmf('1'))
+      .toThrowError(expect.objectContaining({ code: 'INVALID_STATE' }));
+    await h.phone.dispose();
+  });
+
+  it('settles a pending DTMF sequence with ABORTED when the call hangs up', async () => {
+    const { h, call } = await establishedCall();
+    negotiateTelephoneEvent(h);
+    const sender = h.pc.transceivers[0]!.sender as unknown as FakeSender;
+    const before = h.clock.pendingCount;
+    const op = call.sendDtmf('123');
+    op.catch(() => undefined); // settled during hangup before the assertion attaches
+    expect(h.clock.pendingCount).toBe(before + 1); // exactly one deadline timer armed
+    const hangup = call.hangup();
+    await flush();
+    respondOk('BYE');
+    await hangup;
+    await settle();
+    await expect(op).rejects.toMatchObject({ code: 'ABORTED' });
+    expect(h.clock.pendingCount).toBe(before); // DTMF deadline cleared on terminal
+    expect(sender.dtmf.tonechangeListenerCount).toBe(0);
+    await h.phone.dispose();
+  });
+
+  it('settles a pending DTMF sequence even when a state observer throws during hangup', async () => {
+    const { h, call } = await establishedCall();
+    negotiateTelephoneEvent(h);
+    call.on('stateChanged', () => {
+      throw new Error('observer failed');
+    });
+    const op = call.sendDtmf('123');
+    op.catch(() => undefined); // settled during hangup before the assertion attaches
+    const hangup = call.hangup();
+    await flush();
+    respondOk('BYE');
+    await hangup;
+    await settle();
+    await expect(op).rejects.toMatchObject({ code: 'ABORTED' });
     await h.phone.dispose();
   });
 });

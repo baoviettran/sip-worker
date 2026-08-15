@@ -23,7 +23,7 @@ import type { BrowserMediaEnvironment, BrowserMediaEventMap, BrowserMediaOptions
 import { DEFAULT_MEDIA_OPERATION_TIMEOUT_MS } from './types.js';
 import { MediaDeviceManager } from './device-manager.js';
 import { WebRtcMediaSession } from './session.js';
-import type { WebRtcMediaSessionDeps } from './session.js';
+import type { DtmfOptions, WebRtcMediaSessionDeps } from './session.js';
 import { createMediaPortPair } from './port-pair.js';
 
 /** Clock surface shared by the manager and the sessions it builds. */
@@ -559,6 +559,24 @@ export class WebRtcMediaManager {
       throw new MediaError('INVALID_STATE', 'No active media session is available.');
     }
     session.setMuted(muted);
+  }
+
+  /**
+   * Send an RFC 4733 DTMF digit sequence through the sole active session's
+   * browser DTMF sender. Routes to {@link WebRtcMediaSession.sendDtmf}, which
+   * validates before touching the sender, bounds the sequence with a deadline,
+   * and resolves only when the tone buffer drains. A disposed manager rejects
+   * `ABORTED`; no active session rejects canonical `INVALID_STATE` synchronously.
+   */
+  sendDtmf(tones: string, options?: DtmfOptions): Promise<void> {
+    if (this.disposed) {
+      throw new MediaError('ABORTED', 'The media operation was aborted.');
+    }
+    const session = this.owned;
+    if (session === null || this.reservedId === undefined) {
+      throw new MediaError('INVALID_STATE', 'No active media session is available.');
+    }
+    return session.sendDtmf(tones, options);
   }
 
   /**

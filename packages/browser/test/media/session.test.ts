@@ -5,6 +5,7 @@ import type { BrowserMediaEventMap } from '../../src/media/types.js';
 import { FakePeerConnection } from '../support/fake-media-environment.js';
 import { FakeMediaEnvironment } from '../support/fake-media-environment.js';
 import { completeGathering } from '../support/fake-media-environment.js';
+import { DTMF_TELEPHONE_EVENT_SDP } from '../support/fake-media-environment.js';
 
 /** Injectable clock driving the ICE-gathering deadline deterministically. */
 class FakeClock {
@@ -811,5 +812,166 @@ describe('WebRtcMediaSession.setMuted', () => {
     failed.pc._setIceConnection('failed'); // terminal
     expect(() => failed.session.setMuted(true))
       .toThrowError(expect.objectContaining({ code: 'INVALID_STATE' }));
+  });
+});
+
+describe('WebRtcMediaSession.sendDtmf', () => {
+  type FakeSender = {
+    dtmf: {
+      insertDTMFCalls: Array<{ tones: string; duration: number; interToneGap: number }>;
+      emitToneChange: (tone: string) => void;
+      canInsertDTMF: boolean;
+      toneBuffer: string;
+      tonechangeListenerCount: number;
+    };
+  };
+
+  function senderOf(pc: FakePeerConnection): FakeSender {
+    return pc.transceivers[0]!.sender as unknown as FakeSender;
+  }
+
+  /** A session with an active transceiver and telephone-event negotiated both ways. */
+  async function ready(): Promise<{ session: WebRtcMediaSession; pc: FakePeerConnection; clock: FakeClock }> {
+    const { session, pc, clock } = setup();
+    await fullOffer(session, pc);
+    await session.setRemote(DTMF_TELEPHONE_EVENT_SDP, 'answer');
+    return { session, pc, clock };
+  }
+
+  it('sends the tone sequence via the tone-buffer sender and resolves only when the buffer completes', async () => {
+    const { session, pc, clock } = await ready();
+    const sender = senderOf(pc);
+    let settled = false;
+    const op = session.sendDtmf('12#A', { durationMs: 120, interToneGapMs: 70 })
+      .then(() => { settled = true; });
+    expect(sender.dtmf.insertDTMFCalls).toEqual([{ tones: '12#A', duration: 120, interToneGap: 70 }]);
+    expect(settled).toBe(false);
+    expect(sender.dtmf.tonechangeListenerCount).toBe(1); // ONE owned listener installed
+    sender.dtmf.emitToneChange('1');
+    expect(settled).toBe(false); // a digit event does NOT settle the operation
+    sender.dtmf.emitToneChange('');
+    await op;
+    expect(settled).toBe(true);
+    expect(clock.pending()).toBe(0); // deadline timer cleared on completion
+    expect(sender.dtmf.tonechangeListenerCount).toBe(0); // listener removed
+  });
+
+  it('rejects durations outside 40-6000 ms with DTMF_FAILED and accepts the boundaries', async () => {
+    const { session, pc } = await ready();
+    const sender = senderOf(pc);
+    await expect(session.sendDtmf('1', { durationMs: 39 })).rejects.toMatchObject({ code: 'DTMF_FAILED' });
+    await expect(session.sendDtmf('1', { durationMs: 6001 })).rejects.toMatchObject({ code: 'DTMF_FAILED' });
+    await expect(session.sendDtmf('1', { durationMs: Number.NaN })).rejects.toMatchObject({ code: 'DTMF_FAILED' });
+    const low = session.sendDtmf('1', { durationMs: 40 });
+    expect(sender.dtmf.insertDTMFCalls.at(-1)).toEqual({ tones: '1', duration: 40, interToneGap: 70 });
+    sender.dtmf.emitToneChange('');
+    await low;
+    const high = session.sendDtmf('1', { durationMs: 6000 });
+    expect(sender.dtmf.insertDTMFCalls.at(-1)).toEqual({ tones: '1', duration: 6000, interToneGap: 70 });
+    sender.dtmf.emitToneChange('');
+    await high;
+  });
+
+  it('rejects an inter-tone gap below 30 ms with DTMF_FAILED and accepts 30 ms', async () => {
+    const { session, pc } = await ready();
+    const sender = senderOf(pc);
+    await expect(session.sendDtmf('1', { interToneGapMs: 29 })).rejects.toMatchObject({ code: 'DTMF_FAILED' });
+    const op = session.sendDtmf('1', { interToneGapMs: 30 });
+    expect(sender.dtmf.insertDTMFCalls.at(-1)).toEqual({ tones: '1', duration: 100, interToneGap: 30 });
+    sender.dtmf.emitToneChange('');
+    await op;
+  });
+
+  it('rejects an empty or oversized sequence with DTMF_FAILED before touching the sender', async () => {
+    const { session, pc } = await ready();
+    const sender = senderOf(pc);
+    await expect(session.sendDtmf('')).rejects.toMatchObject({ code: 'DTMF_FAILED' });
+    await expect(session.sendDtmf('1'.repeat(256))).rejects.toMatchObject({ code: 'DTMF_FAILED' });
+    expect(sender.dtmf.insertDTMFCalls).toHaveLength(0); // validated BEFORE the sender was touched
+  });
+
+  it('rejects lowercase symbols with DTMF_FAILED before touching the sender', async () => {
+    const { session, pc } = await ready();
+    const sender = senderOf(pc);
+    await expect(session.sendDtmf('a')).rejects.toMatchObject({ code: 'DTMF_FAILED' });
+    await expect(session.sendDtmf('1x')).rejects.toMatchObject({ code: 'DTMF_FAILED' });
+    expect(sender.dtmf.insertDTMFCalls).toHaveLength(0);
+  });
+
+  it('rejects a second active sequence with OPERATION_IN_PROGRESS and never queues it', async () => {
+    const { session, pc } = await ready();
+    const sender = senderOf(pc);
+    const first = session.sendDtmf('123');
+    await expect(session.sendDtmf('4')).rejects.toMatchObject({ code: 'OPERATION_IN_PROGRESS' });
+    expect(sender.dtmf.insertDTMFCalls).toHaveLength(1); // the second was never queued
+    sender.dtmf.emitToneChange('');
+    await first;
+  });
+
+  it('clears remaining queued tones with insertDTMF("") and settles exactly once on abort', async () => {
+    const { session, pc, clock } = await ready();
+    const sender = senderOf(pc);
+    const controller = new AbortController();
+    const op = session.sendDtmf('123', { signal: controller.signal });
+    expect(sender.dtmf.insertDTMFCalls.at(-1)).toEqual({ tones: '123', duration: 100, interToneGap: 70 });
+    controller.abort();
+    await expect(op).rejects.toMatchObject({ code: 'OPERATION_ABORTED' });
+    expect(sender.dtmf.insertDTMFCalls.at(-1)).toEqual({ tones: '', duration: 100, interToneGap: 70 });
+    expect(clock.pending()).toBe(0);
+    expect(sender.dtmf.tonechangeListenerCount).toBe(0);
+  });
+
+  it('rejects with OPERATION_TIMEOUT on the deadline and leaves no listener or timer', async () => {
+    const { session, pc, clock } = await ready();
+    const sender = senderOf(pc);
+    const op = session.sendDtmf('123', { timeoutMs: 5000 });
+    expect(clock.pending()).toBe(1);
+    clock.advance(5000);
+    await expect(op).rejects.toMatchObject({ code: 'OPERATION_TIMEOUT' });
+    expect(clock.pending()).toBe(0);
+    expect(sender.dtmf.tonechangeListenerCount).toBe(0);
+  });
+
+  it('settles with ABORTED when the session closes during the sequence and cleans up', async () => {
+    const { session, pc, clock } = await ready();
+    const sender = senderOf(pc);
+    const op = session.sendDtmf('123');
+    session.close();
+    await expect(op).rejects.toMatchObject({ code: 'ABORTED' });
+    expect(clock.pending()).toBe(0);
+    expect(sender.dtmf.tonechangeListenerCount).toBe(0);
+  });
+
+  it('settles with ABORTED when the sender is replaced mid-sequence', async () => {
+    const { session, pc, clock } = await ready();
+    const sender = senderOf(pc);
+    const op = session.sendDtmf('123');
+    // Replace the transceiver's sender with a fresh one (a different dtmf owner).
+    const transceiver = pc.transceivers[0]!;
+    const SenderCtor = sender.constructor as new () => typeof sender;
+    transceiver.sender = new SenderCtor() as unknown as typeof transceiver.sender;
+    sender.dtmf.emitToneChange('1'); // the stale sender's next event detects the replacement
+    await expect(op).rejects.toMatchObject({ code: 'ABORTED' });
+    expect(clock.pending()).toBe(0);
+    expect(sender.dtmf.tonechangeListenerCount).toBe(0);
+  });
+
+  it('rejects DTMF_UNSUPPORTED when telephone-event is not negotiated in the remote SDP', async () => {
+    const { session, pc } = setup();
+    await fullOffer(session, pc);
+    await session.setRemote('v=0\no=remote 1 1 IN IP4 0.0.0.0\ns=-\nm=audio 5004 RTP/AVP 0 8\n', 'answer');
+    await expect(session.sendDtmf('1')).rejects.toMatchObject({ code: 'DTMF_UNSUPPORTED' });
+  });
+
+  it('rejects DTMF_UNSUPPORTED when the sender cannot insert DTMF', async () => {
+    const { session, pc } = await ready();
+    const sender = senderOf(pc);
+    sender.dtmf.canInsertDTMF = false;
+    await expect(session.sendDtmf('1')).rejects.toMatchObject({ code: 'DTMF_UNSUPPORTED' });
+  });
+
+  it('rejects INVALID_STATE synchronously when the session has no transceiver', () => {
+    const { session } = setup();
+    expect(() => session.sendDtmf('1')).toThrowError(expect.objectContaining({ code: 'INVALID_STATE' }));
   });
 });

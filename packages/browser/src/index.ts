@@ -56,6 +56,7 @@ export {
   MIN_RECONNECT_ATTEMPTS,
 } from './phone/index.js';
 export type { OperationOptions } from './phone/index.js';
+export type { DtmfOptions } from './phone/index.js';
 export type {
   BrowserCallEventMap,
   BrowserPhoneEventMap,

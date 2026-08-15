@@ -24,6 +24,7 @@ import { TypedEventEmitter } from '@sip-worker/core';
 import { observeOperation } from '@sip-worker/core';
 import type { Inviter, Invitation, SessionEvent } from '@sip-worker/core';
 import type { BrowserMediaEventMap, MediaSessionState } from '../media/types.js';
+import type { DtmfOptions } from '../media/session.js';
 import type { PhoneRuntime } from './runtime.js';
 import type {
   BrowserCallEventMap,
@@ -35,6 +36,8 @@ import type {
 
 /** RemoteIdentity is the core-owned immutable bounded type; re-exported shape. */
 export type { RemoteIdentity } from './types.js';
+/** DtmfOptions bounds one RFC 4733 DTMF sequence (duration/gap/signal/timeout). */
+export type { DtmfOptions } from '../media/session.js';
 
 const DEFAULT_CALL_ESTABLISH_TIMEOUT_MS = 120_000;
 
@@ -186,9 +189,17 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
     this.emit('holdStateChanged', { type: 'holdStateChanged', previous, state: this.holdValue });
   }
 
-  /** Send a DTMF digit sequence (RTP event relay staged in Task 11). */
-  sendDtmf(_digits: string): Promise<void> {
-    return Promise.resolve();
+  /**
+   * Send an RFC 4733 DTMF digit sequence on the active call. Routes to the media
+   * session, which validates the sequence, bounds it with a deadline, and
+   * resolves only when the tone buffer drains. A terminal call throws canonical
+   * `INVALID_STATE` synchronously.
+   */
+  sendDtmf(tones: string, options?: DtmfOptions): Promise<void> {
+    if (this.stateValue === 'terminated' || this.stateValue === 'failed') {
+      throw this.invalidCallState();
+    }
+    return this.runtime.manager.sendDtmf(tones, options);
   }
 
   /** Terminate the active call with BYE (shared). */

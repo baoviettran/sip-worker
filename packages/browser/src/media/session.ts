@@ -16,8 +16,10 @@
  * candidates, credentials, and device identifiers are never logged.
  */
 
-import { MediaError } from '@sip-worker/core';
+import { MediaError, validateOperationTimeout } from '@sip-worker/core';
 import type { MediaDirection } from '@sip-worker/core';
+import type { OperationOptions } from '@sip-worker/core';
+import type { SipErrorCode } from '@sip-worker/core';
 import type { BrowserMediaEventMap, MediaSessionState } from './types.js';
 import { DEFAULT_ICE_GATHERING_TIMEOUT_MS } from './types.js';
 import type { BrowserMediaEnvironment, BrowserMediaOptions } from './types.js';
@@ -34,6 +36,23 @@ type StateReason = MediaError['code'];
 /** Upper bound (bytes) for a remote SDP body the session will pass to the browser. */
 const MAX_REMOTE_SDP_BYTES = 512_000;
 
+/**
+ * Accepted RFC 4733 DTMF symbols: `0-9`, `A-D`, `*`, and `#`. Lowercase is
+ * rejected (a browser DTMF sender expects upper-case tones).
+ */
+const DTMF_SYMBOLS = new Set('0123456789ABCD*#');
+/** Maximum tones in a single insertDTMF sequence (RFC 4733 / browser limit). */
+const DTMF_MAX_TONES = 255;
+/** DTMF tone duration bounds (ms), per RFC 4733 and browser defaults. */
+const DTMF_MIN_DURATION_MS = 40;
+const DTMF_MAX_DURATION_MS = 6000;
+const DTMF_DEFAULT_DURATION_MS = 100;
+/** Inter-tone gap minimum (ms); below the browser's floor the sequence is invalid. */
+const DTMF_MIN_GAP_MS = 30;
+const DTMF_DEFAULT_GAP_MS = 70;
+/** Default deadline (ms) for one DTMF sequence; never unbound. */
+const DTMF_DEFAULT_TIMEOUT_MS = 30_000;
+
 /** Constructor dependencies, resolved by the owning media manager. */
 export interface WebRtcMediaSessionDeps {
   readonly env: BrowserMediaEnvironment;
@@ -48,6 +67,20 @@ export interface WebRtcMediaSessionDeps {
   };
   readonly emitter: SessionEmitter;
   readonly sessionId: string;
+}
+
+/**
+ * Options bounding one RFC 4733 DTMF sequence (sent through the browser's
+ * `RTCDTMFSender`). Mirrors {@link OperationOptions}: `signal` aborts the
+ * sequence early (clearing the tone buffer and settling `OPERATION_ABORTED`),
+ * and `timeoutMs` bounds how long the sequence may run (default 30 s) before it
+ * settles `OPERATION_TIMEOUT`.
+ */
+export interface DtmfOptions extends OperationOptions {
+  /** Tone duration in ms (default 100, range 40-6000). */
+  readonly durationMs?: number;
+  /** Inter-tone gap in ms (default 70, minimum 30). */
+  readonly interToneGapMs?: number;
 }
 
 /**
@@ -132,6 +165,13 @@ export class WebRtcMediaSession {
   private negotiating = false;
   /** Cancellation hooks for in-flight ICE/deadline waiters; drained on teardown. */
   private readonly waiters = new Set<() => void>();
+  /**
+   * The single active DTMF tone-buffer operation's settle function, or null.
+   * Exactly one tone-buffer op may be active at a time; a duplicate sequence is
+   * rejected `OPERATION_IN_PROGRESS` and never queued. Cleared on every terminal
+   * path (completion, abort, timeout, hangup, sender replacement, teardown).
+   */
+  private activeDtmfOp: ((error: Error | null) => void) | null = null;
 
   constructor(deps: WebRtcMediaSessionDeps) {
     this.env = deps.env;
@@ -439,6 +479,140 @@ export class WebRtcMediaSession {
   }
 
   /**
+   * Send an RFC 4733 DTMF digit sequence through the browser's `RTCDTMFSender`
+   * and resolve only when the tone buffer fully drains (a final `tonechange`
+   * event with an empty tone AND an empty tone buffer). The sequence is
+   * validated BEFORE the sender is touched; a duplicate active sequence rejects
+   * `OPERATION_IN_PROGRESS` and is never queued; a bounded deadline (default
+   * 30 s) settles `OPERATION_TIMEOUT`; an abort signal clears the buffer with
+   * `insertDTMF('')` and settles `OPERATION_ABORTED` exactly once. A terminal
+   * session rejects canonical `INVALID_STATE` synchronously.
+   *
+   * Error shape: `ABORTED` (hangup/close/dispose/sender replacement) is a
+   * `MediaError`; every other DTMF-path failure — `DTMF_FAILED`,
+   * `DTMF_UNSUPPORTED`, `OPERATION_IN_PROGRESS`, `OPERATION_TIMEOUT`, and
+   * `OPERATION_ABORTED` — is a plain `Error` carrying a `.code` from the
+   * `SipErrorCode` set, the same shape as {@link BrowserCall}'s
+   * `invalidCallState()`.
+   */
+  sendDtmf(tones: string, options?: DtmfOptions): Promise<void> {
+    if (this.closed || this.state === 'failed' || this.pc === null || this.transceiver === null) {
+      throw this.invalidState('no active session');
+    }
+    const durationMs = normalizeDtmfDuration(options?.durationMs);
+    const interToneGapMs = normalizeDtmfGap(options?.interToneGapMs);
+    if (durationMs === undefined || interToneGapMs === undefined) {
+      return Promise.reject(dtmfOpError(
+        'DTMF_FAILED',
+        'The DTMF duration or inter-tone gap is outside the supported range.',
+      ));
+    }
+    if (!validateDtmfSequence(tones)) {
+      return Promise.reject(dtmfOpError(
+        'DTMF_FAILED',
+        'The DTMF sequence is empty, too long, or contains invalid symbols.',
+      ));
+    }
+    const sender = this.transceiver.sender as RTCRtpSender & { dtmf?: RTCDTMFSender };
+    const dtmf = sender.dtmf;
+    if (!this.telephoneEventNegotiated() || dtmf === undefined || dtmf.canInsertDTMF !== true) {
+      return Promise.reject(dtmfOpError(
+        'DTMF_UNSUPPORTED',
+        'DTMF (RFC 4733 telephone-event) is not available on this call.',
+      ));
+    }
+    if (this.activeDtmfOp !== null) {
+      return Promise.reject(dtmfOpError(
+        'OPERATION_IN_PROGRESS',
+        'A DTMF sequence is already in progress.',
+      ));
+    }
+
+    const timeoutMs = validateOperationTimeout(options?.timeoutMs, DTMF_DEFAULT_TIMEOUT_MS);
+    const signal = options?.signal;
+
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      // True once insertDTMF(tones) has actually queued the sequence; an
+      // already-aborted signal aborts before any clear is needed.
+      let started = false;
+
+      const finish = (error: Error | null): void => {
+        if (settled) return;
+        settled = true;
+        this.clock.clearTimeout(deadline);
+        if (this.activeDtmfOp === finish) this.activeDtmfOp = null;
+        dtmf.removeEventListener('tonechange', onToneChange);
+        if (signal !== undefined) signal.removeEventListener('abort', onAbort);
+        if (error !== null) reject(error);
+        else resolve();
+      };
+
+      const onToneChange = (event: { tone: string }): void => {
+        if (settled) return;
+        // A replaced sender means the sequence is no longer owned; abort rather
+        // than wait for a completion event that can never arrive.
+        if (this.transceiver?.sender?.dtmf !== dtmf) {
+          finish(this.aborted('DTMF'));
+          return;
+        }
+        if (event.tone === '' && dtmf.toneBuffer.length === 0) {
+          finish(null);
+        }
+      };
+
+      const onAbort = (): void => {
+        if (settled) return;
+        if (started) {
+          // Clear the queued tones so no digits keep playing after the abort.
+          try {
+            dtmf.insertDTMF('', durationMs, interToneGapMs);
+          } catch {
+            // A browser may reject a mid-sequence clear; the operation still aborts.
+          }
+        }
+        finish(dtmfOpError('OPERATION_ABORTED', 'The DTMF sequence was aborted.'));
+      };
+
+      const deadline = this.clock.setTimeout(() => {
+        if (settled) return;
+        finish(dtmfOpError('OPERATION_TIMEOUT', 'The DTMF sequence did not complete in time.'));
+      }, timeoutMs);
+
+      this.activeDtmfOp = finish;
+      dtmf.addEventListener('tonechange', onToneChange);
+      if (signal !== undefined) {
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+      started = true;
+      try {
+        dtmf.insertDTMF(tones, durationMs, interToneGapMs);
+      } catch {
+        // The browser rejected the insertion (e.g. an invalid sequence); the
+        // operation settles DTMF_FAILED and no listener or timer survives.
+        finish(dtmfOpError('DTMF_FAILED', 'The DTMF sequence could not be inserted.'));
+      }
+    });
+  }
+
+  /**
+   * Whether RFC 4733 telephone-event is negotiated in the current LOCAL and
+   * REMOTE audio SDP. Both sides must offer the payload for the browser's DTMF
+   * sender to actually relay tones, so the capability check requires both.
+   */
+  private telephoneEventNegotiated(): boolean {
+    const pc = this.pc;
+    if (pc === null) return false;
+    const local = typeof pc.localDescription?.sdp === 'string' ? pc.localDescription.sdp : '';
+    const remote = typeof pc.remoteDescription?.sdp === 'string' ? pc.remoteDescription.sdp : '';
+    return hasNegotiatedTelephoneEvent(local) && hasNegotiatedTelephoneEvent(remote);
+  }
+
+  /**
    * Idempotently release every resource this session owns. Bumps the operation
    * sequence (invalidating pending operations), detaches listeners, stops local
    * and remote tracks, closes the peer connection, clears waiters, and emits no
@@ -459,6 +633,14 @@ export class WebRtcMediaSession {
 
   /** Release PC listeners/resources without touching the lifecycle-closed flag. */
   private teardown(): void {
+    // A terminal session invalidates any in-flight DTMF sequence: settle it with
+    // ABORTED and clear the active op BEFORE releasing the peer connection so no
+    // stale tonechange listener outlives teardown.
+    const activeDtmf = this.activeDtmfOp;
+    this.activeDtmfOp = null;
+    if (activeDtmf !== null) {
+      activeDtmf(this.aborted('DTMF'));
+    }
     for (const cancel of this.waiters) {
       cancel();
     }
@@ -810,4 +992,45 @@ function stopStream(stream: MediaStream): void {
   for (const track of stream.getTracks()) {
     track.stop();
   }
+}
+
+/** Validate a DTMF sequence: non-empty, at most 255 symbols, all RFC 4733. */
+function validateDtmfSequence(tones: string): boolean {
+  if (typeof tones !== 'string' || tones.length === 0 || tones.length > DTMF_MAX_TONES) {
+    return false;
+  }
+  for (const symbol of tones) {
+    if (!DTMF_SYMBOLS.has(symbol)) return false;
+  }
+  return true;
+}
+
+/** Normalize a tone duration, or undefined when out of the 40-6000 ms range. */
+function normalizeDtmfDuration(value: number | undefined): number | undefined {
+  if (value === undefined) return DTMF_DEFAULT_DURATION_MS;
+  if (!Number.isFinite(value)) return undefined;
+  if (value < DTMF_MIN_DURATION_MS || value > DTMF_MAX_DURATION_MS) return undefined;
+  return value;
+}
+
+/** Normalize an inter-tone gap, or undefined when below the 30 ms minimum. */
+function normalizeDtmfGap(value: number | undefined): number | undefined {
+  if (value === undefined) return DTMF_DEFAULT_GAP_MS;
+  if (!Number.isFinite(value)) return undefined;
+  if (value < DTMF_MIN_GAP_MS) return undefined;
+  return value;
+}
+
+/** Whether an SDP body negotiates the RFC 4733 telephone-event audio payload. */
+function hasNegotiatedTelephoneEvent(sdp: string): boolean {
+  return /a=rtpmap:\d+\s+telephone-event\//i.test(sdp);
+}
+
+/**
+ * A plain error carrying the DTMF operation's public code. Only `SipErrorCode`
+ * values that are NOT `MediaErrorCode` members reach this helper (the DTMF and
+ * OPERATION_* codes); `ABORTED`/`INVALID_STATE` use the MediaError factories.
+ */
+function dtmfOpError(code: SipErrorCode, message: string): Error {
+  return Object.assign(new Error(message), { code });
 }
