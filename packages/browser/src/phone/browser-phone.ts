@@ -119,7 +119,15 @@ export class BrowserPhone {
       factory: init.factory,
       lifecycle: init.lifecycle,
       mediaEnvironment: init.mediaEnvironment,
-      clock: init.clock ?? { now: () => Date.now(), setTimeout, clearTimeout },
+      // Arrow wrappers, not bare references: the global setTimeout/clearTimeout
+      // are Window methods in browsers and throw `Illegal invocation` when
+      // called with a detached `this` (i.e. as methods of this clock object).
+      clock: init.clock ?? {
+        now: (): number => Date.now(),
+        setTimeout: (callback: () => void, delayMs: number): number =>
+          setTimeout(callback, delayMs) as unknown as number,
+        clearTimeout: (id: number): void => clearTimeout(id),
+      },
       idGenerator: init.idGenerator ?? { branch: () => genId() },
       random: init.random ?? Math.random,
     };
