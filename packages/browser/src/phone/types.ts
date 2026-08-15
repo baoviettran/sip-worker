@@ -46,10 +46,12 @@ export type RemoteIdentity = {
   readonly displayName?: string;
 };
 
-/** Asynchronous, cancellable acquisition of refreshed short-lived ICE servers. */
-export type IceServerProvider = (options: {
-  readonly signal: AbortSignal;
-}) => Promise<readonly RTCIceServer[]>;
+/**
+ * Asynchronous, cancellable acquisition of refreshed short-lived ICE servers.
+ * Owned by {@link ../media/types.js} (single definition); re-exported here so
+ * phone consumers import it from one place.
+ */
+export type { IceServerProvider } from '../media/index.js';
 
 /** Public product configuration accepted by the {@link BrowserPhone} root. */
 export interface BrowserPhoneOptions {
@@ -66,7 +68,6 @@ export interface BrowserPhoneOptions {
     readonly password?: string;
   };
   readonly media?: BrowserMediaOptions & {
-    readonly iceServerProvider?: IceServerProvider;
     readonly holdDirection?: 'sendonly' | 'inactive';
   };
   readonly diagnostics?: { readonly logger?: DiagnosticLogger };
@@ -92,7 +93,6 @@ export type NormalizedBrowserPhoneOptions = {
 
 /** Media option family after phone-level normalization/validation. */
 export interface NormalizedMediaPhoneOptions extends BrowserMediaOptions {
-  readonly iceServerProvider?: IceServerProvider;
   readonly holdDirection: 'sendonly' | 'inactive';
 }
 

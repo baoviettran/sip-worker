@@ -24,6 +24,7 @@ import {
   type SipResponseMessage,
 } from '@sip-worker/core';
 import { BrowserPhone } from '../../src/phone/browser-phone.js';
+import type { BrowserCall, OutgoingBrowserCall } from '../../src/phone/browser-call.js';
 import type { WebRtcMediaManager } from '../../src/media/media-manager.js';
 import type { BrowserWebSocketFactory, BrowserWebSocketLike } from '../../src/transport/ws.js';
 import type { BrowserLifecycleHost } from '../../src/recovery/browser-lifecycle.js';
@@ -77,10 +78,6 @@ class FakePhoneWebSocket extends FakeBrowserWebSocket {
 
 const REALM = 'sip.example.com';
 const NONCE = '0cef7a94b60e1e00c9d1e5e';
-
-function statusText(status: number): string {
-  return status === 200 ? 'OK' : 'Unauthorized';
-}
 
 /**
  * Deterministic SIP-over-WSS server fake for recovery orchestration.
@@ -172,12 +169,12 @@ class FakeSipServer {
     const headers = new Headers();
     headers.set('Via', via.via);
     headers.set('From', via.from);
-    headers.set('To', `${via.to};tag=${status === 200 ? 'server-tag' : ''}`);
+    headers.set('To', via.to.includes('tag=') ? via.to : `${via.to};tag=server-tag`);
     headers.set('Call-ID', via.callId);
     headers.set('CSeq', via.cseqLine);
     headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
     if (status === 401) headers.set('WWW-Authenticate', `Digest realm="${REALM}", nonce="${NONCE}"`);
-    this.current.emitMessage(serializeMessage(makeResponse(status, statusText(status), headers)));
+    this.current.emitMessage(serializeMessage(makeResponse(status, reasonPhrase(status), headers)));
   }
 
   /** Close the current connection abnormally (unexpected transport loss). */
@@ -356,7 +353,9 @@ export function emitRemoteBye(remoteTag = remoteTagOfLast200(), branch = 'remote
   headers.set('To', inv.from);
   headers.set('Call-ID', inv.callId);
   headers.set('CSeq', '1 BYE');
-  harness.socket.emitMessage(
+  // Emit on the CURRENT socket so the helper also works after a recovery cycle
+  // re-established signaling on a fresh socket generation.
+  harness.server.current.emitMessage(
     serializeMessage(makeRequest('BYE', localUriOf(inv.from), headers)),
   );
 }
@@ -540,12 +539,15 @@ export function outboundResponseCodes(): number[] {
 export function respondOk(
   method: string,
   toTag = 'server-tag',
+  sdp?: string,
 ): void {
   const harness = currentHarness();
   const requests = sentRequests(method);
   const last = requests.at(-1);
   if (last === undefined) throw new Error(`no outbound ${method} to answer`);
-  const viaText = harness.socket.sent
+  // Search the CURRENT socket first: post-recovery requests live on the newest
+  // socket generation, which `harness.socket` (socket[0]) no longer carries.
+  const viaText = harness.server.current.sent
     .map((b) => new TextDecoder().decode(b))
     .reverse()
     .find((t) => {
@@ -556,15 +558,15 @@ export function respondOk(
   const headers = new Headers();
   headers.set('Via', via.via);
   headers.set('From', via.from);
-  headers.set('To', `${via.to};tag=${toTag}`);
+  headers.set('To', via.to.includes('tag=') ? via.to : `${via.to};tag=${toTag}`);
   headers.set('Call-ID', via.callId);
   headers.set('CSeq', via.cseqLine);
   headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
   let response: SipResponseMessage = makeResponse(200, 'OK', headers);
   if (method === 'INVITE') {
-    response = withTextBody(response, STUB_SDP, 'application/sdp') as SipResponseMessage;
+    response = withTextBody(response, sdp ?? STUB_SDP, 'application/sdp') as SipResponseMessage;
   }
-  harness.socket.emitMessage(serializeMessage(response));
+  harness.server.current.emitMessage(serializeMessage(response));
 }
 
 /**
@@ -598,14 +600,112 @@ export function sendAck(): void {
 }
 
 /** Confirm the current outbound INVITE (200 OK) and drive the media session to
- * `connected` (ICE connected), settling the awaited `call.start()`.
+ * `connected` (ICE connected), settling the awaited `call.start()`. An optional
+ * SDP overrides the stub (a DTMF-capable test passes `DTMF_TELEPHONE_EVENT_SDP`).
  */
-export async function answerInviteAndConnectMedia(): Promise<void> {
+export async function answerInviteAndConnectMedia(sdp?: string): Promise<void> {
   const harness = currentHarness();
   // The offer→INVITE media chain is async; let it flush out before answering.
   await settle();
-  respondOk('INVITE');
+  respondOk('INVITE', 'server-tag', sdp);
   await settle();
   harness.pc._setIceConnection('connected');
   await settle();
+}
+
+// ---------------------------------------------------------------------------
+// v0.7 Task 13: established-call recovery helpers.
+// ---------------------------------------------------------------------------
+
+/** Establish an outgoing call on the current harness (settled to `established`).
+ * An optional answer SDP overrides the stub (DTMF-capable tests pass
+ * `DTMF_TELEPHONE_EVENT_SDP`). */
+export async function established(h: PhoneHarness, sdp?: string): Promise<BrowserCall> {
+  // createCall returns the base BrowserCall, but the outgoing call is always an
+  // OutgoingBrowserCall and only that subtype exposes start().
+  const call = h.phone.createCall('sip:bob@example.com') as OutgoingBrowserCall;
+  const start = call.start();
+  await answerInviteAndConnectMedia(sdp);
+  await start;
+  return call;
+}
+
+/** Let the recovery pipeline flush: reconnect + registration restore + the
+ * established-call recovery branch (its in-dialog request is left on the wire). */
+export async function restoreAndRegister(): Promise<void> {
+  for (let i = 0; i < 20; i += 1) await flush();
+  await settle();
+}
+
+/** Drop the current socket abnormally, then flush the recovery pipeline. */
+export async function dropAndRestore(): Promise<void> {
+  currentHarness().server.dropSocket(1006);
+  await restoreAndRegister();
+}
+
+/** Flush the remaining recovery settles (after answering the in-dialog request). */
+export async function waitForPhoneRecovery(): Promise<void> {
+  for (let i = 0; i < 20; i += 1) await flush();
+  await settle();
+}
+
+/** The newest outbound request head of the given method (across all sockets). */
+function viaOfLastRequest(method: string): MessageHead | undefined {
+  const harness = currentHarness();
+  const heads: MessageHead[] = [];
+  for (const socket of harness.server.sockets) {
+    for (const bytes of socket.sent) {
+      const parsed = parseHead(bytes);
+      if (parsed !== undefined) heads.push(parsed);
+    }
+  }
+  for (let i = heads.length - 1; i >= 0; i -= 1) {
+    if (heads[i]!.method === method) return heads[i];
+  }
+  return undefined;
+}
+
+function reasonPhrase(status: number): string {
+  switch (status) {
+    case 200: return 'OK';
+    case 405: return 'Method Not Allowed';
+    case 408: return 'Request Timeout';
+    case 481: return 'Call/Transaction Does Not Exist';
+    case 500: return 'Server Internal Error';
+    case 501: return 'Not Implemented';
+    default: return `Status ${status}`;
+  }
+}
+
+/** Build the echoed headers for a response to the newest outbound request. */
+function responseHeadersFor(method: string): Headers {
+  const via = viaOfLastRequest(method);
+  if (via === undefined) throw new Error(`no outbound ${method} to answer`);
+  const headers = new Headers();
+  headers.set('Via', via.via);
+  headers.set('From', via.from);
+  headers.set('To', via.to.includes('tag=') ? via.to : `${via.to};tag=server-tag`);
+  headers.set('Call-ID', via.callId);
+  headers.set('CSeq', via.cseqLine);
+  headers.set('Contact', '<sip:bob@192.0.2.2:5060>');
+  return headers;
+}
+
+/** Answer the most recent outbound in-dialog OPTIONS with the given status. */
+export function answerInDialogOptions(status: number): void {
+  const headers = responseHeadersFor('OPTIONS');
+  currentHarness().server.current.emitMessage(
+    serializeMessage(makeResponse(status, reasonPhrase(status), headers)),
+  );
+}
+
+/** Answer the most recent outbound (re-)INVITE with the given status and SDP. */
+export function answerReinvite(status: number, sdp: string): void {
+  const headers = responseHeadersFor('INVITE');
+  const response = withTextBody(
+    makeResponse(status, reasonPhrase(status), headers),
+    sdp,
+    'application/sdp',
+  ) as SipResponseMessage;
+  currentHarness().server.current.emitMessage(serializeMessage(response));
 }

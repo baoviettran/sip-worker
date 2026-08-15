@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { MediaCommand, MediaReply } from '@sip-worker/core';
 import { WebRtcMediaManager } from '../../src/media/media-manager.js';
-import type { BrowserMediaEventMap } from '../../src/media/types.js';
+import type { BrowserMediaEventMap, BrowserMediaOptions, IceServerProvider } from '../../src/media/types.js';
 import {
   FakeMediaEnvironment,
   FakePeerConnection,
@@ -95,7 +95,10 @@ interface Setup {
 }
 
 /** Build a manager; by default queues one mic stream + one fresh peer connection. */
-function setup(overrides?: { queued?: Array<MediaStream | Promise<MediaStream>> }): Setup {
+function setup(overrides?: {
+  queued?: Array<MediaStream | Promise<MediaStream>>;
+  media?: BrowserMediaOptions;
+}): Setup {
   // The device manager's pre-check needs at least one audio input to pass.
   // `mic-2` is present so a live replacement can be driven during a call.
   const env = new FakeMediaEnvironment([
@@ -106,7 +109,12 @@ function setup(overrides?: { queued?: Array<MediaStream | Promise<MediaStream>> 
   const recorder = new Recorder();
   const manager = new WebRtcMediaManager({
     env,
-    options: { iceGatheringTimeoutMs: 1000, mediaOperationTimeoutMs: 1000, codecPreference: ['opus'] },
+    options: {
+      iceGatheringTimeoutMs: 1000,
+      mediaOperationTimeoutMs: 1000,
+      codecPreference: ['opus'],
+      ...overrides?.media,
+    },
     clock,
     emitter: recorder,
   });
@@ -775,5 +783,257 @@ describe('WebRtcMediaManager.sendDtmf', () => {
     manager.dispose();
     expect(() => manager.sendDtmf('1'))
       .toThrowError(expect.objectContaining({ code: 'ABORTED' }));
+  });
+
+  it('C13: a successful ICE restart during an in-flight DTMF leaves the op running on the same RTCDTMFSender and settles with no leak', async () => {
+    const { manager, env, clock, replies } = setup();
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'off-1', sessionId: 's1' });
+    await settle(manager, pc);
+    expect(replyFor(replies, 'off-1')!.type).toBe('mediaResult');
+    manager.postMessage({
+      type: 'setRemote',
+      requestId: 'set-1',
+      sessionId: 's1',
+      remoteSdp: DTMF_TELEPHONE_EVENT_SDP,
+    });
+    await settle(manager, pc);
+    expect(replyFor(replies, 'set-1')!.type).toBe('mediaResult');
+    const sender = pc.transceivers[0]!.sender as unknown as FakeSender;
+    const op = manager.sendDtmf('123');
+    expect(sender.dtmf.tonechangeListenerCount).toBe(1);
+
+    // ICE restart mid-tone: the same sender object must be reused, and the tone
+    // listener must survive so the op still completes exactly once.
+    manager.postMessage({ type: 'createOffer', requestId: 'restart-1', sessionId: 's1', iceRestart: true });
+    await settle(manager, pc);
+    expect(replyFor(replies, 'restart-1')!.type).toBe('mediaResult');
+    expect((pc.transceivers[0]!.sender as unknown as FakeSender).dtmf).toBe(sender.dtmf);
+    expect(sender.dtmf.tonechangeListenerCount).toBe(1);
+
+    sender.dtmf.emitToneChange('1');
+    sender.dtmf.emitToneChange('');
+    await op;
+    expect(sender.dtmf.tonechangeListenerCount).toBe(0);
+    expect(clock.pending()).toBe(0);
+  });
+});
+
+describe('WebRtcMediaManager iceServerProvider', () => {
+  it('invokes the provider before a new session offer and applies the servers at PC creation', async () => {
+    const providerCalls: number[] = [];
+    const provider: IceServerProvider = async () => {
+      providerCalls.push(1);
+      return [{ urls: 'turn:turn.example.test:3478', username: 'user', credential: 'cred' }];
+    };
+    const { manager, env, replies } = setup({ media: { iceServerProvider: provider } });
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'p-1', sessionId: 's1' });
+    await settle(manager, pc);
+    expect(providerCalls).toHaveLength(1);
+    // The PC was created with the provider's servers (defensive copy) and
+    // setConfiguration was NOT needed (no PC existed yet).
+    expect(env.peerConnectionCalls[0]).toMatchObject({
+      iceServers: [{ urls: 'turn:turn.example.test:3478', username: 'user', credential: 'cred' }],
+    });
+    expect(pc.setConfigurationCalls).toHaveLength(0);
+    expect(replyFor(replies, 'p-1')!.type).toBe('mediaResult');
+  });
+
+  it('invokes the provider again before an ICE restart and applies refreshed servers via setConfiguration', async () => {
+    const providerCalls: number[] = [];
+    const provider: IceServerProvider = async () => {
+      providerCalls.push(1);
+      return [{ urls: 'turn:turn.example.test:3478' }];
+    };
+    const { manager, env, replies } = setup({ media: { iceServerProvider: provider } });
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'o1', sessionId: 's1' });
+    await settle(manager, pc);
+    expect(providerCalls).toHaveLength(1);
+    expect(replyFor(replies, 'o1')!.type).toBe('mediaResult');
+
+    manager.postMessage({ type: 'createOffer', requestId: 'r1', sessionId: 's1', iceRestart: true });
+    await settle(manager, pc);
+    expect(providerCalls).toHaveLength(2);
+    expect(pc.setConfigurationCalls).toHaveLength(1);
+    expect(pc.setConfigurationCalls[0]).toMatchObject({
+      iceServers: [{ urls: 'turn:turn.example.test:3478' }],
+    });
+    expect(pc.restartIceCalls).toHaveLength(1);
+    expect(replyFor(replies, 'r1')!.type).toBe('mediaResult');
+  });
+
+  it('fetches ONLY for a new session and an ICE restart, never a plain directional renegotiation', async () => {
+    let calls = 0;
+    const provider: IceServerProvider = async () => {
+      calls += 1;
+      return [{ urls: 'turn:dedupe.test' }];
+    };
+    const { manager, env, replies } = setup({ media: { iceServerProvider: provider } });
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    // New-session offer: fetch once.
+    manager.postMessage({ type: 'createOffer', requestId: 'o1', sessionId: 's1' });
+    await settle(manager, pc);
+    expect(calls).toBe(1);
+    expect(replyFor(replies, 'o1')!.type).toBe('mediaResult');
+    // ICE restart: fetch again (refreshed servers applied via setConfiguration).
+    manager.postMessage({ type: 'createOffer', requestId: 'r1', sessionId: 's1', iceRestart: true });
+    await settle(manager, pc);
+    expect(calls).toBe(2);
+    expect(replyFor(replies, 'r1')!.type).toBe('mediaResult');
+    // Plain directional (hold/resume) renegotiation: must NOT fetch, so a
+    // transient provider failure cannot reclaim a live call's media session.
+    manager.postMessage({ type: 'createOffer', requestId: 'h1', sessionId: 's1', direction: 'sendonly' });
+    await settle(manager, pc);
+    expect(calls).toBe(2);
+    expect(replyFor(replies, 'h1')!.type).toBe('mediaResult');
+  });
+
+  it('fetches before a FRESH createAnswer but skips the provider for an existing-session createAnswer', async () => {
+    let calls = 0;
+    const provider: IceServerProvider = async () => {
+      calls += 1;
+      return [{ urls: 'turn:answer.test' }];
+    };
+    const { manager, env, replies } = setup({ media: { iceServerProvider: provider } });
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+
+    // Fresh incoming call: createAnswer is the FIRST media command, so the
+    // session is newly created here. The provider is fetched once and applied at
+    // PC creation (the session was created but no PC exists yet).
+    manager.postMessage({ type: 'createAnswer', requestId: 'a1', sessionId: 's1', remoteSdp: 'v=0' });
+    await settle(manager, pc);
+    expect(calls).toBe(1);
+    expect(replyFor(replies, 'a1')!.type).toBe('mediaResult');
+    expect(env.peerConnectionCalls[0]).toMatchObject({
+      iceServers: [{ urls: 'turn:answer.test' }],
+    });
+
+    // A remote re-INVITE on the EXISTING session (remote hold/resume) also
+    // routes to createAnswer, but it must NOT fetch: a transient provider
+    // rejection during a live negotiation must not reclaim the established
+    // media session. `ownedWasNull` (read before ownership assignment)
+    // distinguishes this from the fresh-session answer above.
+    env.queuedUserMedia.push(makeAudioStream()); // the answer re-acquires a mic track
+    manager.postMessage({ type: 'createAnswer', requestId: 'a2', sessionId: 's1', remoteSdp: 'v=0' });
+    await settle(manager, pc);
+    expect(calls).toBe(1);
+    expect(replyFor(replies, 'a2')!.type).toBe('mediaResult');
+  });
+
+  it('a provider that never resolves rejects with MEDIA_OPERATION_TIMEOUT and creates no PC', async () => {
+    const provider: IceServerProvider = () => new Promise<readonly RTCIceServer[]>(() => {});
+    const { manager, env, clock, replies } = setup({ media: { iceServerProvider: provider } });
+    manager.postMessage({ type: 'createOffer', requestId: 't-1', sessionId: 's1' });
+    await flush();
+    clock.advance(1000); // mediaOperationTimeoutMs
+    await flush();
+    const reply = replyFor(replies, 't-1') as { type: string; code: string };
+    expect(reply.type).toBe('mediaError');
+    expect(reply.code).toBe('MEDIA_OPERATION_TIMEOUT');
+    expect(env.peerConnectionCalls).toHaveLength(0);
+  });
+
+  it('aborts the provider signal when the manager is disposed mid-fetch', async () => {
+    let receivedSignal: AbortSignal | undefined;
+    const provider: IceServerProvider = async ({ signal }) => {
+      receivedSignal = signal;
+      return new Promise<readonly RTCIceServer[]>(() => {});
+    };
+    const { manager, clock } = setup({ media: { iceServerProvider: provider } });
+    manager.postMessage({ type: 'createOffer', requestId: 'a-1', sessionId: 's1' });
+    await flush();
+    expect(receivedSignal?.aborted).toBe(false);
+    manager.dispose();
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(clock.pending()).toBe(0);
+  });
+
+  it('a provider returning a non-array maps to INTERNAL_ERROR with a safe message', async () => {
+    const provider: IceServerProvider = async () =>
+      ({ urls: 'turn:nope.test' }) as unknown as readonly RTCIceServer[];
+    const { manager, replies } = setup({ media: { iceServerProvider: provider } });
+    manager.postMessage({ type: 'createOffer', requestId: 'm-1', sessionId: 's1' });
+    await flush();
+    const reply = replyFor(replies, 'm-1') as { type: string; code: string };
+    expect(reply.type).toBe('mediaError');
+    expect(reply.code).toBe('INTERNAL_ERROR');
+  });
+
+  it('a provider rejection maps to INTERNAL_ERROR and leaks no credential text', async () => {
+    const provider: IceServerProvider = async () => {
+      throw new Error('turn secret-credential-xyz rejected');
+    };
+    const { manager, replies } = setup({ media: { iceServerProvider: provider } });
+    manager.postMessage({ type: 'createOffer', requestId: 's-1', sessionId: 's1' });
+    await flush();
+    const reply = replyFor(replies, 's-1') as { type: string; code: string; message: string };
+    expect(reply.type).toBe('mediaError');
+    expect(reply.code).toBe('INTERNAL_ERROR');
+    expect(reply.message).not.toContain('secret-credential-xyz');
+  });
+
+  it('provider servers replace static iceServers on the created PC (precedence)', async () => {
+    const provider: IceServerProvider = async () => [{ urls: 'turn:provider.test' }];
+    const { manager, env, replies } = setup({
+      media: {
+        iceServers: [{ urls: 'stun:static.test' }],
+        iceServerProvider: provider,
+      },
+    });
+    const pc = env.queuedPeerConnections[0] as unknown as FakePeerConnection;
+    manager.postMessage({ type: 'createOffer', requestId: 'prec-1', sessionId: 's1' });
+    await settle(manager, pc);
+    expect(replyFor(replies, 'prec-1')!.type).toBe('mediaResult');
+    // The provider's fresh servers win over the static iceServers at PC creation.
+    expect(env.peerConnectionCalls[0]).toMatchObject({
+      iceServers: [{ urls: 'turn:provider.test' }],
+    });
+  });
+
+  it('shares one in-flight provider result across overlapping fetches (defensive dedupe)', async () => {
+    let calls = 0;
+    const provider: IceServerProvider = async () => {
+      calls += 1;
+      return [{ urls: 'turn:dedupe.test' }];
+    };
+    const { manager } = setup({ media: { iceServerProvider: provider } });
+    const anyManager = manager as unknown as {
+      fetchIceServers: () => Promise<readonly RTCIceServer[]> | undefined;
+    };
+    const first = anyManager.fetchIceServers();
+    const second = anyManager.fetchIceServers();
+    expect(anyManager.fetchIceServers()).toBe(first); // in-flight result shared
+    // The provider runs on a microtask; flush before counting invocations.
+    await flush();
+    expect(calls).toBe(1);
+    const [a, b] = await Promise.all([first!, second!]);
+    expect(calls).toBe(1);
+    expect(a).toEqual([{ urls: 'turn:dedupe.test' }]);
+    expect(b).toEqual([{ urls: 'turn:dedupe.test' }]);
+    manager.dispose();
+  });
+
+  it('a provider returning a non-string urls element maps to INTERNAL_ERROR', async () => {
+    const provider: IceServerProvider = async () =>
+      [{ urls: [42] }] as unknown as readonly RTCIceServer[];
+    const { manager, replies } = setup({ media: { iceServerProvider: provider } });
+    manager.postMessage({ type: 'createOffer', requestId: 'u-1', sessionId: 's1' });
+    await flush();
+    const reply = replyFor(replies, 'u-1') as { type: string; code: string };
+    expect(reply.type).toBe('mediaError');
+    expect(reply.code).toBe('INTERNAL_ERROR');
+  });
+
+  it('a provider returning a non-string username or credential shape maps to INTERNAL_ERROR', async () => {
+    const provider: IceServerProvider = async () =>
+      [{ urls: 'turn:nope.test', username: 42 }] as unknown as readonly RTCIceServer[];
+    const { manager, replies } = setup({ media: { iceServerProvider: provider } });
+    manager.postMessage({ type: 'createOffer', requestId: 'u-2', sessionId: 's1' });
+    await flush();
+    const reply = replyFor(replies, 'u-2') as { type: string; code: string };
+    expect(reply.type).toBe('mediaError');
+    expect(reply.code).toBe('INTERNAL_ERROR');
   });
 });

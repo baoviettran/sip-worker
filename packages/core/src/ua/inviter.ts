@@ -604,6 +604,19 @@ export class Inviter {
         if (event.type === 'response') {
           this.onResponse(request, event.response);
         } else if (event.type === 'timeout' || event.type === 'transportError') {
+          // Once the dialog is confirmed, a leftover INVITE client transaction
+          // (still absorbing retransmitted 2xx under Timer M) must NOT fail the
+          // live dialog when a later transport loss terminates it. Established-
+          // call recovery is owned by the browser recovery layer (Task 13), not
+          // by this initial-invite listener.
+          if (this.session.state === 'confirmed') {
+            // A bare return lets the coordinator's `terminated` event (which
+            // always follows a `transportError` from `transaction.terminate`)
+            // run the normal teardown, including expiring extra forked-INVITE
+            // dialog owners. Tearing the invite listener down here would skip
+            // that expiry and leak forked-dialog owners until inviter dispose.
+            return;
+          }
           this.fail(new SipError(0, `INVITE ${event.type}`, event.type === 'transportError' ? 'TRANSPORT_FAILED' : 'TIMEOUT'));
         } else if (event.type === 'terminated') {
           this.dialogSet?.expireExtraOwners();

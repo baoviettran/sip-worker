@@ -228,9 +228,13 @@ export class DialogNegotiator {
   }
 
   /**
-   * Probe the confirmed dialog with an in-dialog OPTIONS. Resolves on any final
-   * that proves the dialog exists (2xx, 405, 501, or any non-481 final);
-   * rejects on a 481 or a transaction timeout (`SIGNALING_RECOVERY_FAILED`).
+   * Probe the confirmed dialog with an in-dialog OPTIONS. Resolves only on a
+   * final that is identity evidence of the dialog: a 2xx (the peer answered the
+   * in-dialog request), or 405/501 (the peer routed the in-dialog request to a
+   * non-OPTIONS-capable handler). Rejects on a definitive dialog loss (481), on
+   * every other final (e.g. 408/5xx — none prove the dialog still exists), on a
+   * transaction timeout, or on a transport error — all with
+   * `SIGNALING_RECOVERY_FAILED`.
    */
   validateDialog(): Promise<void> {
     if (this.disposed) {
@@ -525,11 +529,21 @@ export class DialogNegotiator {
         if (this.disposed) return;
         if (event.type === 'response') {
           const code = event.response.statusCode;
-          // 2xx, 405/501, or any non-481 final proves the dialog exists.
-          if (code === 481) {
-            settle(false, new SipError(481, 'Call/Transaction Does Not Exist', 'SIGNALING_RECOVERY_FAILED'));
-          } else {
+          // Only identity-valid finals prove the dialog exists: a 2xx (the peer
+          // answered the in-dialog request), or 405/501 (the peer routed it to a
+          // non-OPTIONS-capable handler). A 481 is definitive dialog loss; every
+          // other final (408/5xx/…) is ambiguous at best and never evidence, so
+          // it is treated as a failed validation.
+          if (code >= 200 && code < 300) {
             settle(true);
+          } else if (code === 405 || code === 501) {
+            settle(true);
+          } else {
+            settle(false, new SipError(
+              code === 481 ? 481 : 0,
+              code === 481 ? 'Call/Transaction Does Not Exist' : `OPTIONS final ${String(code)}`,
+              'SIGNALING_RECOVERY_FAILED',
+            ));
           }
         } else if (event.type === 'timeout' || event.type === 'transportError') {
           settle(false, new SipError(0, `OPTIONS ${event.type}`, 'SIGNALING_RECOVERY_FAILED'));

@@ -24,6 +24,7 @@ export type {
   BrowserMediaEnvironment,
   BrowserMediaEventMap,
   BrowserMediaOptions,
+  IceServerProvider,
   MediaCodec,
   MediaSessionState,
   NormalizedMediaOptions,

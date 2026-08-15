@@ -289,6 +289,8 @@ export class FakePeerConnection {
   readonly setRemoteCalls: RTCSessionDescriptionInit[] = [];
   readonly transceivers: FakeRtpTransceiver[] = [];
   readonly restartIceCalls: number[] = [];
+  /** Configurations applied via {@link FakePeerConnection.setConfiguration}. */
+  readonly setConfigurationCalls: RTCConfiguration[] = [];
   /** When true, createOffer uses an iceRestart flag without calling restartIce(). */
   noRestartIceMethod = false;
   /** When true, setLocalDescription immediately marks ICE gathering complete. */
@@ -350,6 +352,11 @@ export class FakePeerConnection {
 
   restartIce(): void {
     this.restartIceCalls.push(1);
+  }
+
+  setConfiguration(configuration: RTCConfiguration): void {
+    if (this.closed) throw new Error('InvalidStateError');
+    this.setConfigurationCalls.push(configuration);
   }
 
   _setNoRestartIce(): void {

@@ -9,10 +9,22 @@
 
 import type { MediaError, MediaErrorCode } from '@sip-worker/core';
 
+/**
+ * Refreshable ICE/TURN server provider (v0.7). Invoked before a new session's
+ * offer/answer and before every ICE restart, with a caller-ownable abort signal
+ * and a bounded deadline. Concurrent requests share one result; the returned
+ * array is defensively copied and credentials never appear in errors or
+ * diagnostics.
+ */
+export type IceServerProvider = (options: {
+  readonly signal: AbortSignal;
+}) => Promise<readonly RTCIceServer[]>;
+
 /** Aggregate options used to configure browser media for a call. */
 export interface BrowserMediaOptions {
   readonly iceServers?: readonly RTCIceServer[];
   readonly iceTransportPolicy?: RTCIceTransportPolicy;
+  readonly iceServerProvider?: IceServerProvider;
   readonly iceGatheringTimeoutMs?: number;
   readonly mediaOperationTimeoutMs?: number;
   readonly microphoneDeviceId?: string;
@@ -99,6 +111,7 @@ const UNKNOWN_OPERATION = 'media operation';
 export type NormalizedMediaOptions = {
   readonly iceServers?: readonly RTCIceServer[];
   readonly iceTransportPolicy?: RTCIceTransportPolicy;
+  readonly iceServerProvider?: IceServerProvider;
   readonly iceGatheringTimeoutMs: number;
   readonly mediaOperationTimeoutMs: number;
   readonly microphoneDeviceId?: string;
@@ -127,7 +140,7 @@ function copyOptionalArray<T>(value: readonly T[] | undefined): readonly T[] | u
 }
 
 /** Deep defensive copy of ICE servers, including URL arrays and OAuth credentials. */
-function copyIceServers(
+export function copyIceServers(
   value: readonly RTCIceServer[] | undefined,
 ): readonly RTCIceServer[] | undefined {
   return value === undefined ? undefined : copyAndFreeze(value);

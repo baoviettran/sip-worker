@@ -20,10 +20,12 @@
  * shared-owner contract.
  */
 
-import { TypedEventEmitter } from '@sip-worker/core';
+import { SipError, TypedEventEmitter } from '@sip-worker/core';
 import { observeOperation } from '@sip-worker/core';
 import type { Inviter, Invitation, SessionEvent } from '@sip-worker/core';
 import type { BrowserMediaEventMap, MediaSessionState } from '../media/types.js';
+import { DEFAULT_MEDIA_OPERATION_TIMEOUT_MS } from '../media/types.js';
+import type { WaitForConnectedOptions } from '../media/media-manager.js';
 import type { DtmfOptions } from '../media/session.js';
 import type { PhoneRuntime } from './runtime.js';
 import type {
@@ -217,6 +219,124 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
   }
 
   // ------------------------------------------------------------------
+  // Signaling recovery (Task 13; runtime-driven).
+  // ------------------------------------------------------------------
+
+  /**
+   * @internal runtime hook: mark a live established call `recovering` when the
+   * phone arms connection recovery. Unconfirmed/terminal calls are untouched.
+   */
+  markRecovering(): void {
+    if (this.stateValue !== 'established') return;
+    this.setSignalingState('recovering');
+  }
+
+  /**
+   * @internal runtime hook: run the established-call recovery decision branch.
+   *
+   * When the media is still connected and no browser network change was
+   * observed (`networkChanged === false`), the dialog itself is validated
+   * in-band with an in-dialog OPTIONS — the fast path. Otherwise (media dropped,
+   * or the network observably changed) ICE servers are refreshed and one
+   * serialized ICE-restart re-INVITE is driven, then the manager waits for media
+   * to reconnect within the bounded recovery deadline. Success returns the call
+   * to `stable`; any failure (an OPTIONS final that is not identity evidence, a
+   * transaction timeout, a transport error, a rejected ICE restart, an ICE
+   * server provider failure, or the media deadline) terminates the call with
+   * signaling `lost` and a canonical `SIGNALING_RECOVERY_FAILED` error.
+   */
+  async recoverSignaling(
+    networkChanged: boolean,
+    recoveryOptions: WaitForConnectedOptions,
+  ): Promise<void> {
+    if (this.stateValue !== 'established') return;
+    this.setSignalingState('recovering');
+    try {
+      await this.runRecoveryBranch(networkChanged, recoveryOptions);
+      // A remote BYE that terminated the call mid-recovery wins: never resurrect
+      // a terminated call to `stable`. Read the live state fresh (the field may
+      // have changed during the awaited recovery branch above).
+      if (!this.isTerminal()) {
+        this.setSignalingState('stable');
+      }
+    } catch (error) {
+      this.failRecovery(error);
+    }
+  }
+
+  /**
+   * Run the recovery decision branch bounded by the recovery deadline. The
+   * `recoveryOptions.timeoutMs` deadline caps the ENTIRE branch — the OPTIONS
+   * fast path (normally bounded only by the 32 s non-INVITE timer F) and the
+   * ICE-restart path (timer B) included — so the shorter 30 s recovery deadline
+   * wins as designed. Any settle (resolve or reject) clears the branch timer.
+   */
+  private async runRecoveryBranch(
+    networkChanged: boolean,
+    recoveryOptions: WaitForConnectedOptions,
+  ): Promise<void> {
+    const timeoutMs = recoveryOptions.timeoutMs ?? DEFAULT_MEDIA_OPERATION_TIMEOUT_MS;
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let timer = -1;
+      const finish = (action: () => void): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== -1) this.runtime.clock.clearTimeout(timer);
+        action();
+      };
+      timer = this.runtime.clock.setTimeout(() => {
+        finish(() => reject(
+          new SipError(0, 'Signaling recovery failed.', 'SIGNALING_RECOVERY_FAILED'),
+        ));
+      }, timeoutMs);
+
+      void (async (): Promise<void> => {
+        try {
+          const mediaConnected = this.runtime.manager.isMediaConnected(this.mediaSessionId);
+          if (mediaConnected && !networkChanged) {
+            await this.ownerValidateDialog();
+          } else {
+            await this.ownerRestartIce();
+            await this.runtime.manager.waitForConnected(this.mediaSessionId, recoveryOptions);
+          }
+          finish(() => resolve());
+        } catch (error) {
+          finish(() => reject(error));
+        }
+      })();
+    });
+  }
+
+  /** Whether the call reached a terminal public state (read live, un-narrowed). */
+  private isTerminal(): boolean {
+    return this.stateValue === 'terminated' || this.stateValue === 'failed';
+  }
+
+  /**
+   * @internal runtime hook: terminate a live call because signaling recovery
+   * failed. Sets signaling `lost`, then disposes the owning core owner with a
+   * canonical `SIGNALING_RECOVERY_FAILED` error so the session fails and media
+   * is released. No-ops when the call already ended (e.g. a remote BYE raced the
+   * recovery).
+   */
+  failRecovery(error: unknown): void {
+    if (this.stateValue === 'terminated' || this.stateValue === 'failed') return;
+    if (this.signalingStateValue !== 'recovering') {
+      this.setSignalingState('recovering');
+    }
+    this.setSignalingState('lost');
+    this.ownerDisposeForRecovery(toSignalingRecoveryError(error));
+  }
+
+  private setSignalingState(next: CallSignalingState): void {
+    if (this.signalingStateValue === next) return;
+    const previous = this.signalingStateValue;
+    this.signalingStateValue = next;
+    this.emit('signalingStateChanged', { type: 'signalingStateChanged', previous, state: next });
+  }
+
+  // ------------------------------------------------------------------
   // State helpers (runtime-driven).
   // ------------------------------------------------------------------
 
@@ -334,6 +454,32 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
   protected ownerRemoteHold(): boolean {
     return false;
   }
+
+  /** The owner's in-dialog validation (base: not active). */
+  protected ownerValidateDialog(): Promise<void> {
+    return Promise.reject(new Error('call not active'));
+  }
+
+  /** Dispose the owning core owner after a failed recovery (base: no-op). */
+  protected ownerDisposeForRecovery(error: Error): void {
+    void error;
+  }
+}
+
+/**
+ * Map an arbitrary recovery failure to a canonical `SIGNALING_RECOVERY_FAILED`
+ * SipError. Errors already carrying the canonical code pass through unchanged.
+ */
+function toSignalingRecoveryError(error: unknown): Error {
+  if (error instanceof Error && (error as { code?: unknown }).code === 'SIGNALING_RECOVERY_FAILED') {
+    return error;
+  }
+  return new SipError(
+    0,
+    'Signaling recovery failed.',
+    'SIGNALING_RECOVERY_FAILED',
+    error instanceof Error ? { cause: error } : undefined,
+  );
 }
 
 function mapCallState(sessionState: string): CallState {
@@ -410,6 +556,14 @@ export class OutgoingBrowserCall extends BrowserCall {
     return this.inviter.remoteHold;
   }
 
+  protected override ownerValidateDialog(): Promise<void> {
+    return this.inviter.validateDialog();
+  }
+
+  protected override ownerDisposeForRecovery(error: Error): void {
+    this.inviter.dispose(error);
+  }
+
   private async runEstablish(invite: () => Promise<void>): Promise<void> {
     const observed = this.observeOwnerOperation(invite(), 'outgoing call');
     await observed;
@@ -461,6 +615,14 @@ export class IncomingBrowserCall extends BrowserCall {
 
   protected override ownerRemoteHold(): boolean {
     return this.invitation.remoteHold;
+  }
+
+  protected override ownerValidateDialog(): Promise<void> {
+    return this.invitation.validateDialog();
+  }
+
+  protected override ownerDisposeForRecovery(error: Error): void {
+    this.invitation.dispose(error);
   }
 
   private async runEstablish(answer: () => Promise<void>): Promise<void> {

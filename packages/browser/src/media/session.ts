@@ -103,6 +103,14 @@ export class WebRtcMediaSession {
   private closed = false;
 
   /**
+   * Refreshed ICE servers/policy (v0.7), applied via `setConfiguration` when a
+   * peer connection already exists and used to build a fresh peer connection
+   * when it does not. Cleared only on close.
+   */
+  private iceServersOverride: readonly RTCIceServer[] | undefined;
+  private iceTransportPolicyOverride: RTCIceTransportPolicy | undefined;
+
+  /**
    * The last confirmed negotiated direction. The transceiver always matches
    * this between direction transactions; a staged direction never survives a
    * commit/rollback/failure.
@@ -190,6 +198,11 @@ export class WebRtcMediaSession {
   /** Read the current state (for the manager/port-pair bridge). */
   get currentState(): MediaSessionState {
     return this.state;
+  }
+
+  /** The raw peer-connection ICE connection state, or `'new'` when none exists. */
+  get iceConnectionState(): RTCIceConnectionState {
+    return this.pc?.iceConnectionState ?? 'new';
   }
 
   /**
@@ -701,16 +714,51 @@ export class WebRtcMediaSession {
 
   private ensurePeerConnection(): void {
     if (this.pc !== null) return;
+    // A refreshed provider override (v0.7) wins over the static configured
+    // servers; both are defensively copied at the options boundary.
     const config: RTCConfiguration = {
-      iceServers: [...(this.options.iceServers ?? [])],
-      ...(this.options.iceTransportPolicy === undefined
-        ? {}
-        : { iceTransportPolicy: this.options.iceTransportPolicy }),
+      iceServers: this.iceServersOverride !== undefined
+        ? [...this.iceServersOverride]
+        : [...(this.options.iceServers ?? [])],
+      ...(this.iceTransportPolicyOverride !== undefined
+        ? { iceTransportPolicy: this.iceTransportPolicyOverride }
+        : this.options.iceTransportPolicy === undefined
+          ? {}
+          : { iceTransportPolicy: this.options.iceTransportPolicy }),
     };
     this.pc = this.env.createPeerConnection(config);
     this.pc.oniceconnectionstatechange = (): void => this.onIceConnectionChange(this.pc!);
     this.pc.onconnectionstatechange = (): void => this.onConnectionChange(this.pc!);
     this.pc.ontrack = (event): void => this.onTrack(event);
+  }
+
+  /**
+   * Apply refreshed ICE servers/policy (v0.7). Stores the override for the next
+   * `ensurePeerConnection` and, when a peer connection already exists, applies
+   * it immediately via `setConfiguration`. An active configuration is never
+   * partially applied: either the whole object applies or the previous one is
+   * preserved.
+   */
+  applyIceConfiguration(
+    iceServers: readonly RTCIceServer[],
+    iceTransportPolicy?: RTCIceTransportPolicy,
+  ): void {
+    this.iceServersOverride = iceServers;
+    this.iceTransportPolicyOverride = iceTransportPolicy;
+    if (this.pc !== null) {
+      const config: RTCConfiguration = {
+        iceServers: [...iceServers],
+        ...(iceTransportPolicy === undefined
+          ? {}
+          : { iceTransportPolicy }),
+      };
+      const setConfiguration = (
+        this.pc as RTCPeerConnection & { setConfiguration?: (config: RTCConfiguration) => void }
+      ).setConfiguration;
+      if (typeof setConfiguration === 'function') {
+        setConfiguration.call(this.pc, config);
+      }
+    }
   }
 
   private onIceConnectionChange(pc: RTCPeerConnection): void {

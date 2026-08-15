@@ -1100,6 +1100,41 @@ describe('DialogNegotiator', () => {
       expect(h.negotiator.busy).toBe(false);
     });
 
+    // A 408 (Request Timeout) proves the transaction timed out end-to-end, which
+    // is NOT identity evidence of the dialog: only 2xx/405/501 final responses
+    // (or 481, whose failure IS identity) settle the validation.
+    it('rejects SIGNALING_RECOVERY_FAILED on a 408 final', async () => {
+      const h = setup();
+      const validated = h.negotiator.validateDialog();
+      await flush();
+      const options = h.sentRequests.filter((r) => r.method === 'OPTIONS').at(-1)!;
+      const headers = new Headers();
+      headers.set('Via', options.headers.get('Via') ?? '');
+      headers.set('From', options.headers.get('From') ?? '');
+      headers.set('To', options.headers.get('To') ?? '');
+      headers.set('Call-ID', options.headers.get('Call-ID') ?? '');
+      headers.set('CSeq', options.headers.get('CSeq') ?? '');
+      h.layer.receive(makeResponse(408, 'Request Timeout', headers));
+      await expect(validated).rejects.toMatchObject({ code: 'SIGNALING_RECOVERY_FAILED' });
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it('rejects SIGNALING_RECOVERY_FAILED on any other non-481 final', async () => {
+      const h = setup();
+      const validated = h.negotiator.validateDialog();
+      await flush();
+      const options = h.sentRequests.filter((r) => r.method === 'OPTIONS').at(-1)!;
+      const headers = new Headers();
+      headers.set('Via', options.headers.get('Via') ?? '');
+      headers.set('From', options.headers.get('From') ?? '');
+      headers.set('To', options.headers.get('To') ?? '');
+      headers.set('Call-ID', options.headers.get('Call-ID') ?? '');
+      headers.set('CSeq', options.headers.get('CSeq') ?? '');
+      h.layer.receive(makeResponse(500, 'Server Internal Error', headers));
+      await expect(validated).rejects.toMatchObject({ code: 'SIGNALING_RECOVERY_FAILED' });
+      expect(h.negotiator.busy).toBe(false);
+    });
+
     it('rejects SIGNALING_RECOVERY_FAILED on a transaction timeout', async () => {
       const h = setup();
       const validated = h.negotiator.validateDialog();

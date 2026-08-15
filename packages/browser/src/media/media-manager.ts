@@ -20,7 +20,7 @@ import { MediaError } from '@sip-worker/core';
 import type { MediaErrorCode } from '@sip-worker/core';
 import type { MediaCommand, MediaDirection, MediaMessage, MediaReply } from '@sip-worker/core';
 import type { BrowserMediaEnvironment, BrowserMediaEventMap, BrowserMediaOptions } from './types.js';
-import { DEFAULT_MEDIA_OPERATION_TIMEOUT_MS } from './types.js';
+import { DEFAULT_MEDIA_OPERATION_TIMEOUT_MS, copyIceServers } from './types.js';
 import { MediaDeviceManager } from './device-manager.js';
 import { WebRtcMediaSession } from './session.js';
 import type { DtmfOptions, WebRtcMediaSessionDeps } from './session.js';
@@ -146,6 +146,10 @@ export class WebRtcMediaManager {
   private readonly connectedWaiters = new Set<() => void>();
   /** Terminal media failures per session id (drives the waitForConnected fast-path). */
   private readonly sessionErrors = new Map<string, MediaError>();
+  /** Shared in-flight ICE-server provider fetch; concurrent dispatches share it. */
+  private providerInFlight: Promise<readonly RTCIceServer[]> | undefined;
+  /** The abort controller for the in-flight provider fetch (aborted on dispose). */
+  private providerAbort: AbortController | undefined;
   private processing = false;
   private disposed = false;
   /** Bumped on close/dispose so late tracks/streams and stale continuations drop. */
@@ -309,13 +313,25 @@ export class WebRtcMediaManager {
           this.owned = this.createSession(sessionId);
         }
         try {
+          // C13: refresh ICE servers ONLY before a new-session negotiation and
+          // before an ICE restart. A plain directional (hold/resume) or other
+          // renegotiation must NOT fetch, so a transient provider rejection
+          // cannot reclaim the media session of an established call. A provider
+          // failure rejects BEFORE the peer connection is configured, so no
+          // partially-configured PC ever exists.
+          if (created || pending.iceRestart === true) {
+            const servers = await this.fetchIceServers();
+            if (servers !== undefined) {
+              this.owned!.applyIceConfiguration(servers);
+            }
+          }
           const operation = created
-            ? this.owned.createOffer()
+            ? this.owned!.createOffer()
             : pending.iceRestart === true
-              ? this.owned.restartIce()      // C4: restart an active session
+              ? this.owned!.restartIce()     // C4: restart an active session
               : pending.direction !== undefined
-                ? this.owned.createDirectionalOffer(pending.direction)
-                : this.owned.createOffer();
+                ? this.owned!.createDirectionalOffer(pending.direction)
+                : this.owned!.createOffer();
           const sdp = await this.runBounded(operation);
           if (generation === this.generation && this.reservedId === sessionId) {
             this.emitResult(requestId, sessionId, sdp);
@@ -349,7 +365,12 @@ export class WebRtcMediaManager {
         // `createAnswer` handles an incoming call, which may be the very first
         // media command (no prior offer): reserve the session and build it.
         // `setRemote` requires an existing, active session by contract.
-        if (this.owned === null && type === 'createAnswer') {
+        // Read the ownership state BEFORE any session is created/assigned: it
+        // distinguishes a FRESH incoming call (new-session answer) from a remote
+        // re-INVITE on an EXISTING session (remote hold/resume), which only the
+        // provider fetch below must not treat as a new-session negotiation.
+        const ownedWasNull = this.owned === null;
+        if (ownedWasNull && type === 'createAnswer') {
           if (this.reservedId === undefined) {
             this.reservedId = sessionId;
           }
@@ -361,12 +382,25 @@ export class WebRtcMediaManager {
         }
         try {
           if (type === 'createAnswer') {
-            const sdp = await this.runBounded(this.owned.createAnswer(pending.remoteSdp ?? ''));
+            // C13: refresh ICE servers before answering a FRESH incoming call
+            // too; a provider failure rejects before the PC is configured.
+            // `ownedWasNull` (captured above, before session creation) is the
+            // discriminator: a new-session answer fetches, while a remote
+            // re-INVITE on an EXISTING session (remote hold/resume) must NOT —
+            // a transient provider rejection there would fail a live
+            // negotiation and reclaim the established call's media session.
+            if (ownedWasNull) {
+              const servers = await this.fetchIceServers();
+              if (servers !== undefined) {
+                this.owned!.applyIceConfiguration(servers);
+              }
+            }
+            const sdp = await this.runBounded(this.owned!.createAnswer(pending.remoteSdp ?? ''));
             if (generation === this.generation && this.reservedId === sessionId) {
               this.emitResult(requestId, sessionId, sdp);
             }
           } else {
-            await this.runBounded(this.owned.setRemote(pending.remoteSdp ?? ''));
+            await this.runBounded(this.owned!.setRemote(pending.remoteSdp ?? ''));
             if (generation === this.generation && this.reservedId === sessionId) {
               this.emitResult(requestId, sessionId);
             }
@@ -469,6 +503,83 @@ export class WebRtcMediaManager {
       cancel();
     }
     this.boundedCancels.clear();
+  }
+
+  /**
+   * Fetch refreshed ICE servers from the configured provider (v0.7). Returns
+   * `undefined` when no provider is configured. The fetch is bounded by the
+   * media-operation deadline (aborting the provider's signal on timeout), and
+   * concurrent requests share one result (`providerInFlight`). The dedupe is a
+   * defensive guard: the serialized negotiation queue means overlapping fetches
+   * are unreachable through the public path, but a direct call must never
+   * double-invoke the provider. On success the servers are validated and
+   * defensively copied; on a provider rejection or malformed output the error
+   * maps to a safe coded `MediaError` that never carries credentials.
+   */
+  private fetchIceServers(): Promise<readonly RTCIceServer[]> | undefined {
+    const provider = this.options.iceServerProvider;
+    if (provider === undefined) return undefined;
+    if (this.providerInFlight !== undefined) return this.providerInFlight;
+
+    const controller = new AbortController();
+    this.providerAbort = controller;
+    const deadlineMs = this.options.mediaOperationTimeoutMs ?? DEFAULT_MEDIA_OPERATION_TIMEOUT_MS;
+
+    const bounded = new Promise<readonly RTCIceServer[]>((resolve, reject) => {
+      let settled = false;
+      let timer = -1;
+      const cancel = (): void => {
+        controller.abort();
+        finish(() => reject(new MediaError('ABORTED', SAFE_MESSAGES.ABORTED)));
+      };
+      const finish = (action: () => void): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== -1) this.clock.clearTimeout(timer);
+        this.boundedCancels.delete(cancel);
+        if (this.providerInFlight === bounded) this.providerInFlight = undefined;
+        if (this.providerAbort === controller) this.providerAbort = undefined;
+        action();
+      };
+      this.boundedCancels.add(cancel);
+      timer = this.clock.setTimeout(() => {
+        controller.abort();
+        finish(() => reject(new MediaError('MEDIA_OPERATION_TIMEOUT', SAFE_MESSAGES.MEDIA_OPERATION_TIMEOUT)));
+      }, deadlineMs);
+
+      Promise.resolve()
+        .then(() => provider({ signal: controller.signal }))
+        .then(
+          (servers: readonly RTCIceServer[]) => {
+            // Validate BEFORE settling so a malformed result rejects the shared
+            // fetch instead of throwing out of the success handler (which would
+            // never settle the bounded promise).
+            let copied: readonly RTCIceServer[];
+            try {
+              copied = validateAndCopyIceServers(servers);
+            } catch (error) {
+              finish(() => reject(mapProviderError(error)));
+              return;
+            }
+            finish(() => resolve(copied));
+          },
+          (error: unknown) => finish(() => reject(mapProviderError(error))),
+        );
+    });
+
+    this.providerInFlight = bounded;
+    return bounded;
+  }
+
+  /**
+   * Whether the active media session with the given id reports ICE connected
+   * (or completed). Drives the established-call recovery decision branch.
+   */
+  isMediaConnected(sessionId: string): boolean {
+    const session = this.owned;
+    if (session === null || session.sessionId !== sessionId) return false;
+    const state = session.iceConnectionState;
+    return state === 'connected' || state === 'completed';
   }
 
   /** Construct a fresh session bound to this manager's env/clock/emitter. */
@@ -806,6 +917,48 @@ export class WebRtcMediaManager {
     }
     return 'INTERNAL_ERROR';
   }
+}
+
+/**
+ * Validate a provider result and return a defensive copy, or fail INTERNAL_ERROR.
+ * Every server must be an object whose `urls` is a string or an array of strings,
+ * whose `username` (when present) is a string, and whose `credential` (when
+ * present) is a string or an RTCOAuthCredential object. Anything else — e.g.
+ * `{ urls: [42] }` — rejects so the "validated defensive copies" claim holds.
+ */
+function validateAndCopyIceServers(
+  servers: readonly RTCIceServer[],
+): readonly RTCIceServer[] {
+  if (!Array.isArray(servers)) {
+    throw new MediaError('INTERNAL_ERROR', SAFE_MESSAGES.INTERNAL_ERROR);
+  }
+  for (const server of servers) {
+    if (server === null || typeof server !== 'object') {
+      throw new MediaError('INTERNAL_ERROR', SAFE_MESSAGES.INTERNAL_ERROR);
+    }
+    const { urls, username, credential } = server as RTCIceServer;
+    if (typeof urls !== 'string') {
+      if (!Array.isArray(urls) || urls.some((u) => typeof u !== 'string')) {
+        throw new MediaError('INTERNAL_ERROR', SAFE_MESSAGES.INTERNAL_ERROR);
+      }
+    }
+    if (username !== undefined && typeof username !== 'string') {
+      throw new MediaError('INTERNAL_ERROR', SAFE_MESSAGES.INTERNAL_ERROR);
+    }
+    if (
+      credential !== undefined
+      && typeof credential !== 'string'
+      && (credential === null || typeof credential !== 'object')
+    ) {
+      throw new MediaError('INTERNAL_ERROR', SAFE_MESSAGES.INTERNAL_ERROR);
+    }
+  }
+  return copyIceServers(servers) ?? [];
+}
+
+/** Map a provider rejection to a safe coded error (never leaks message/secrets). */
+function mapProviderError(_error: unknown): MediaError {
+  return new MediaError('INTERNAL_ERROR', SAFE_MESSAGES.INTERNAL_ERROR);
 }
 
 /** The first audio track of a directly-owned microphone stream, if any. */

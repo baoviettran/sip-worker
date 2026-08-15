@@ -92,6 +92,19 @@ export class BrowserPhone {
   /** A user-initiated unregister has disabled automatic re-registration. */
   private manuallyUnregistered = false;
 
+  /**
+   * Whether a browser offline transition was observed during recovery. Evidence
+   * that the network changed, forcing the ICE-restart branch even when media
+   * still reports connected.
+   */
+  private networkChangedDuringRecovery = false;
+
+  /** Recovery deadline passed to each established call's media wait. */
+  private readonly recoveryTimeoutMs: number;
+
+  /** Browser offline listener (records network change while recovering). */
+  private readonly unsubscribeOffline: () => void;
+
   constructor(init: BrowserPhoneInit) {
     const normalized = normalizeBrowserPhoneOptions(init.options);
 
@@ -139,6 +152,15 @@ export class BrowserPhone {
       lifecycle,
       connect: (monitor): (() => void) => this.bridgeConnect(monitor),
       diagnostics: (message) => this.diagnostics.record('connection.recovery_failed', { reason: message }),
+    });
+
+    this.recoveryTimeoutMs = normalized.signaling.reconnect.recoveryTimeoutMs;
+
+    // A browser `offline` event during recovery is the network-change evidence
+    // the established-call recovery branch consumes. It only matters while a
+    // recovery cycle is armed, so the flag is guarded on `this.recovering`.
+    this.unsubscribeOffline = this.environment.lifecycle.subscribe('offline', () => {
+      if (this.recovering) this.networkChangedDuringRecovery = true;
     });
 
     this.unsubscribeTransport = transport.subscribe((event) => {
@@ -222,6 +244,7 @@ export class BrowserPhone {
   private async shutdown(): Promise<void> {
     this.cancelRecovery();
     this.unsubscribeTransport();
+    this.unsubscribeOffline();
     this.reconnect.dispose();
     await this.runtime.dispose();
   }
@@ -296,8 +319,13 @@ export class BrowserPhone {
 
     // Synchronous transition — observers read 'recovering' immediately.
     this.recovering = true;
+    this.networkChangedDuringRecovery = false;
     this.transitionConnection('recovering');
     if (wasRegistered) this.transitionRegistration('recovering');
+
+    // Mark every live established call recovering synchronously, so observers
+    // read the signaling state before any recovery I/O starts.
+    this.runtime.markCallsRecovering();
 
     void this.runRecovery(generation);
   }
@@ -311,6 +339,7 @@ export class BrowserPhone {
       // Reconnect exhaustion/deadline is a genuine terminal failure.
       this.recovering = false;
       this.recoveryPending = false;
+      this.runtime.failEstablishedCalls();
       this.finishConnectionRecovery(error);
       return;
     }
@@ -318,6 +347,12 @@ export class BrowserPhone {
 
     // Connection is healthy again. Restore registration only when it was owed.
     if (!this.recoveryPending) {
+      // No registration to restore; recover any established calls and commit.
+      await this.runtime.recoverEstablishedCalls(
+        this.networkChangedDuringRecovery,
+        { timeoutMs: this.recoveryTimeoutMs },
+      );
+      if (!this.live(generation)) return;
       this.recovering = false;
       this.transitionConnection('connected');
       return;
@@ -328,12 +363,21 @@ export class BrowserPhone {
       if (!this.live(generation)) return;
       this.recovering = false;
       this.recoveryPending = false;
+      this.runtime.failEstablishedCalls();
       this.finishRegistrationRecovery();
       return;
     }
     if (!this.live(generation)) return;
 
-    // Registration restored. Commit the recovered facts.
+    // Registration restored. Recover the established calls with the bounded
+    // media deadline; per-call failures are contained and never block commit.
+    await this.runtime.recoverEstablishedCalls(
+      this.networkChangedDuringRecovery,
+      { timeoutMs: this.recoveryTimeoutMs },
+    );
+    if (!this.live(generation)) return;
+
+    // Commit the recovered facts.
     this.recoveryPending = false;
     this.recovering = false;
     this.transitionRegistration('registered');
@@ -377,6 +421,7 @@ export class BrowserPhone {
     this.recoveryGeneration += 1;
     this.recoveryPending = false;
     this.recovering = false;
+    this.networkChangedDuringRecovery = false;
     try {
       this.reconnect.cancel();
     } catch {

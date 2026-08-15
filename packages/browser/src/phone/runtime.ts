@@ -20,14 +20,14 @@
  */
 
 import type { Invitation } from '@sip-worker/core';
-import { TypedEventEmitter } from '@sip-worker/core';
+import { SipError, TypedEventEmitter } from '@sip-worker/core';
 import { UserAgent as CoreUserAgent, WorkerMediaController } from '@sip-worker/core';
 import type {
   RegistrationIdentity,
   UserAgentEventMap,
 } from '@sip-worker/core';
 import { WebRtcMediaManager } from '../media/media-manager.js';
-import type { MediaManagerClock } from '../media/media-manager.js';
+import type { MediaManagerClock, WaitForConnectedOptions } from '../media/media-manager.js';
 import { createMediaPortPair } from '../media/port-pair.js';
 import type {
   BrowserMediaEnvironment,
@@ -395,6 +395,52 @@ export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & Brows
       this.diagnostics?.record(
         terminalState === 'failed' ? 'call.failed' : 'call.terminated',
       );
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Established-call signaling recovery (Task 13).
+  // ------------------------------------------------------------------
+
+  /**
+   * Mark every live established call `recovering` when the phone arms
+   * connection recovery. Unconfirmed/terminal calls are untouched (an
+   * unconfirmed call fails immediately on transport loss, never through the
+   * recovery branch).
+   */
+  markCallsRecovering(): void {
+    for (const call of this.calls) {
+      call.markRecovering();
+    }
+  }
+
+  /**
+   * Run the established-call recovery decision branch for every live call.
+   * Individual call failures are contained with `Promise.allSettled`: the phone
+   * commits its connection/registration recovery regardless of per-call
+   * outcomes, and a call that raced to a terminal state is simply skipped.
+   */
+  async recoverEstablishedCalls(
+    networkChanged: boolean,
+    recoveryOptions: WaitForConnectedOptions,
+  ): Promise<void> {
+    const calls = [...this.calls].filter((call) => call.state === 'established');
+    await Promise.allSettled(
+      calls.map((call) => call.recoverSignaling(networkChanged, recoveryOptions)),
+    );
+  }
+
+  /**
+   * Terminate every live established call with `SIGNALING_RECOVERY_FAILED`
+   * (connection/registration recovery failed after transport loss). The phone
+   * calls this on the terminal recovery paths; the runtime never throws from it.
+   */
+  failEstablishedCalls(): void {
+    const error = new SipError(0, 'Signaling recovery failed.', 'SIGNALING_RECOVERY_FAILED');
+    for (const call of [...this.calls]) {
+      if (call.state === 'established') {
+        call.failRecovery(error);
+      }
     }
   }
 
