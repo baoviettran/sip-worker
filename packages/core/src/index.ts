@@ -109,6 +109,15 @@ export type {
 } from './reliability/index.js';
 export type { UserAgentOptions } from './ua/index.js';
 export {
+  MAX_OPERATION_TIMEOUT_MS,
+  observeOperation,
+  validateOperationTimeout,
+} from './ua/index.js';
+export type {
+  OperationOptions,
+  ObserveOperationConfig,
+} from './ua/index.js';
+export {
   WorkerRuntime,
   WorkerSupervisor,
   WorkerClosedError,

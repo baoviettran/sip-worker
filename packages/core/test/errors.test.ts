@@ -16,6 +16,15 @@ describe('public error codes', () => {
   });
 
   it('exports a closed code union', () => {
+    const codes: SipErrorCode[] = [
+      'CONNECTION_RECOVERY_EXHAUSTED', 'REGISTRATION_RECOVERY_FAILED',
+      'SIGNALING_RECOVERY_FAILED', 'OPERATION_ABORTED', 'OPERATION_TIMEOUT',
+      'OPERATION_IN_PROGRESS', 'HOLD_NEGOTIATION_FAILED',
+      'DTMF_UNSUPPORTED', 'DTMF_FAILED',
+    ];
+    for (const code of codes) {
+      expect(new SipError(0, 'x', code).code).toBe(code);
+    }
     expectTypeOf<'TIMEOUT'>().toMatchTypeOf<SipErrorCode>();
     // @ts-expect-error arbitrary strings are not public error codes
     const invalid: SipErrorCode = 'anything';

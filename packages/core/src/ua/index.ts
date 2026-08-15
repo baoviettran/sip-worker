@@ -7,6 +7,15 @@ export type { InvitationOptions } from './invitation.js';
 export type { RegistrationIdentity, RegisterState } from './registration-types.js';
 export type { SessionState, SessionEvent, Session } from './session.js';
 export { TypedEventEmitter } from './events.js';
+export {
+  MAX_OPERATION_TIMEOUT_MS,
+  observeOperation,
+  validateOperationTimeout,
+} from './operation.js';
+export type {
+  OperationOptions,
+  ObserveOperationConfig,
+} from './operation.js';
 export type {
   CallStateChangedEvent,
   IncomingCallEvent,
