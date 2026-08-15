@@ -1,0 +1,14 @@
+{
+  "name": "browser-softphone",
+  "version": "0.5.0",
+  "private": true,
+  "type": "module",
+  "description": "Framework-free reference softphone for the packed @sip-worker/browser SDK (Task 15).",
+  "dependencies": {
+    "sip-worker": "^0.5.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.27.7",
+    "typescript": "^5.5.0"
+  }
+}

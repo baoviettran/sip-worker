@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reference Softphone — @sip-worker/browser</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Reference Softphone</h1>
+      <p class="lede">
+        Framework-free example consuming only the packed public
+        <code>sip-worker</code> artifact. Credentials live in memory; the audio
+        element is app-owned and <code>play()</code> runs only from a user
+        gesture.
+      </p>
+
+      <section class="card" aria-label="Phone">
+        <div class="status-row">
+          <span>Connection</span>
+          <strong id="connection-state" data-testid="connection-state">disconnected</strong>
+        </div>
+        <div class="status-row">
+          <span>Registration</span>
+          <strong id="registration-state" data-testid="registration-state">unregistered</strong>
+        </div>
+        <div class="actions">
+          <button id="btn-connect" type="button">Connect</button>
+          <button id="btn-unregister" type="button">Unregister</button>
+          <button id="btn-dispose" type="button">Dispose</button>
+        </div>
+        <label class="row" for="destination">
+          Destination
+          <input
+            id="destination"
+            aria-label="Destination"
+            placeholder="sip:bob@example.com"
+            spellcheck="false"
+          />
+        </label>
+        <div class="actions">
+          <button id="btn-call" type="button">Call</button>
+          <button id="btn-cancel" type="button">Cancel</button>
+          <button id="btn-hangup" type="button">Hangup</button>
+        </div>
+      </section>
+
+      <section class="card" aria-label="Call">
+        <div class="status-row">
+          <span>Call state</span>
+          <strong id="call-state" data-testid="call-state">new</strong>
+        </div>
+        <div class="status-row">
+          <span>Signaling</span>
+          <strong id="call-signaling" data-testid="call-signaling">stable</strong>
+        </div>
+        <div class="status-row">
+          <span>Mute</span>
+          <strong id="call-muted" data-testid="call-muted">active</strong>
+        </div>
+        <div class="status-row">
+          <span>Hold</span>
+          <strong id="call-hold" data-testid="call-hold">active</strong>
+        </div>
+        <div class="status-row">
+          <span>Last DTMF</span>
+          <strong id="last-dtmf" data-testid="last-dtmf"></strong>
+        </div>
+        <div class="status-row">
+          <span>Error</span>
+          <strong id="call-error" data-testid="call-error"></strong>
+        </div>
+        <div class="status-row">
+          <span>Resources</span>
+          <code id="resources" data-testid="resources">{}</code>
+        </div>
+        <div class="status-row">
+          <span>Audio</span>
+          <strong id="audio-state" data-testid="audio-state">idle</strong>
+        </div>
+        <div class="actions">
+          <button id="btn-mute" type="button">Mute</button>
+          <button id="btn-hold" type="button">Hold</button>
+          <button id="btn-resume" type="button">Resume</button>
+          <button id="btn-play-audio" type="button">Play audio</button>
+        </div>
+        <div class="dtmf" id="dtmf-pad"></div>
+      </section>
+
+      <section class="card incoming" id="incoming-panel" data-testid="incoming-panel" hidden>
+        <div class="incoming-line">
+          <span id="incoming-remote"></span> is calling
+        </div>
+        <div class="actions">
+          <button id="btn-answer" type="button">Answer</button>
+          <button id="btn-reject" type="button">Reject</button>
+        </div>
+      </section>
+
+      <section class="card" aria-label="Microphone">
+        <label class="row" for="device-select">
+          Microphone
+          <select id="device-select" data-testid="device-select"></select>
+        </label>
+        <div class="status-row">
+          <span>Selected device</span>
+          <strong id="selected-device" data-testid="selected-device"></strong>
+        </div>
+      </section>
+    </main>
+
+    <script src="/main.js"></script>
+    <script type="module">
+      // Test-hook relay: when the URL carries ?relay=1, bridge the library's
+      // WebRTC SDP to an in-page SyntheticPeer so call controls exercise REAL
+      // media. Loaded outside the bundle so the artifact stays self-contained.
+      if (new URLSearchParams(location.search).has('relay')) {
+        import('/relay.js');
+      }
+    </script>
+  </body>
+</html>

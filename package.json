@@ -26,6 +26,7 @@
     "test:architecture": "node --test test/architecture/*.test.mjs",
     "test:browser-media": "playwright test",
     "test:browser-media:install": "playwright install --with-deps chromium firefox webkit",
+    "test:example": "playwright test --config=test/example/playwright.config.ts",
     "test:api": "npm run api:check --workspaces --if-present",
     "test:bundle": "node test/browser-bundle/browser-bundle.test.mjs",
     "test:package": "node test/package/workspace-pack.test.mjs",
