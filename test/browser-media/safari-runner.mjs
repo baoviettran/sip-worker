@@ -122,7 +122,21 @@ async function setupKeychainTrust() {
   execFileSync('security', ['list-keychains', '-d', 'user', '-s', KEYCHAIN_PATH, login], { stdio: 'ignore' });
   execFileSync('security', ['import', certs.caCrt, '-k', KEYCHAIN_PATH, '-t', 'cert', '-A'], { stdio: 'ignore' });
   // Allow Safari/WebKit to read the imported key without an interactive prompt.
-  execFileSync('security', ['set-key-partition-list', '-S', 'apple-tool:,apple:', '-k', KEYCHAIN_PASS, KEYCHAIN_PATH], { stdio: 'ignore' });
+  // Known to flake on GitHub's macOS runners with a transient keychain error;
+  // retry with backoff. The gate still fails hard if provisioning cannot
+  // complete — this only retries a documented environmental command.
+  const partitionAttempts = 3;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      execFileSync('security', ['set-key-partition-list', '-S', 'apple-tool:,apple:', '-k', KEYCHAIN_PASS, KEYCHAIN_PATH], { stdio: 'ignore' });
+      break;
+    } catch (error) {
+      if (attempt >= partitionAttempts) throw error;
+      const waitMs = attempt * 2000;
+      console.warn(`set-key-partition-list failed (attempt ${attempt}/${partitionAttempts}); retrying in ${waitMs}ms`);
+      await sleep(waitMs);
+    }
+  }
   // Trust the ephemeral CA as a root anchor in the user domain.
   execFileSync('security', ['add-trusted-cert', '-r', 'trustRoot', '-k', KEYCHAIN_PATH, certs.caCrt], { stdio: 'ignore' });
   execFileSync('security', ['default-keychain', '-s', KEYCHAIN_PATH], { stdio: 'ignore' });
