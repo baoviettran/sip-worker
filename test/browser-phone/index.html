@@ -343,46 +343,6 @@
 
     // -------------------------------------------------------------------------
     // Measurements
-    // -------------------------------------------------------------------------
-    // TEMP DIAGNOSTIC: report the source AudioContext state, the relay-peer
-    // state, and the LIBRARY PC's audio-send path when outbound RTP is not
-    // observed, so a suspended source (feeds nothing on Safari) is
-    // distinguishable from a relay/ICE issue. Captured at FAILURE time, after
-    // the wait, so it reflects whether the source ever resumed. Removed once
-    // the Safari phone-gate blocker is diagnosed.
-    async function captureMuteDiag(result, peerPc) {
-      try {
-        const libPc = bridge.pcs[bridge.pcs.length - 1] ?? null;
-        let libOut = { bytes: 0, packets: 0 };
-        let libIce = 'n/a', libConn = 'n/a', libSenders = [];
-        try {
-          if (libPc) {
-            libIce = libPc.iceConnectionState;
-            libConn = libPc.connectionState;
-            libSenders = libPc.getSenders().map((s) => `${s.track ? `${s.track.kind}@${s.track.readyState}` : 'no-track'}`);
-            // getStats can hang on Safari's phone page; bound it like
-            // sampleInboundAudio so a stalled PC cannot hang the diagnostic.
-            const st = await Promise.race([
-              libPc.getStats(),
-              new Promise((resolve) => setTimeout(() => resolve(null), 10000)),
-            ]);
-            if (st) st.forEach((s) => { if (s.type === 'outbound-rtp' && s.kind === 'audio') libOut = { bytes: s.bytesSent ?? 0, packets: s.packetsSent ?? 0 }; });
-          }
-        } catch {}
-        result._muteDiag = {
-          micContext: bridge._micContext ? bridge._micContext.state : 'n/a',
-          peerIce: peerPc.iceConnectionState,
-          peerConn: peerPc.connectionState,
-          inboundBytes: (await sampleInboundAudio(peerPc)).bytesReceived,
-          inboundPackets: (await sampleInboundAudio(peerPc)).packets,
-          peerReceivers: bridge.relayPeer ? bridge.relayPeer.pc.getReceivers().map((r) => `${r.track ? `${r.track.kind}@${r.track.readyState}` : 'no-track'}`) : [],
-          libPc: { ice: libIce, conn: libConn, senders: libSenders, outboundBytes: libOut.bytes, outboundPackets: libOut.packets },
-        };
-      } catch (error) {
-        result._muteDiag = { error: String(error && error.message) };
-      }
-    }
-
     async function runMuteMeasurements(call, result) {
       const peerPc = bridge.relayPeer.pc;
 
@@ -394,8 +354,6 @@
       setStage('mute-rtp');
       const rtp = await waitForRtpGrowth(peerPc, 45000);
       if (!rtp) {
-        setStage('mute-diag');
-        await captureMuteDiag(result, peerPc);
         throw new Error('no outbound RTP observed before mute calibration');
       }
 
@@ -567,26 +525,6 @@
         // 45s. If it still does not resume, capture the library PC's audio path.
         const growth = await waitForRtpGrowth(libPc, 45000);
         result.rtpResumedAfterRecovery = !!growth;
-        if (!growth) {
-          try {
-            const libSenders = libPc.getSenders().map((s) => `${s.track ? `${s.track.kind}@${s.track.readyState}` : 'no-track'}`);
-            let libOut = { bytes: 0, packets: 0 };
-            const st = await Promise.race([
-              libPc.getStats(),
-              new Promise((resolve) => setTimeout(() => resolve(null), 10000)),
-            ]);
-            if (st) st.forEach((s) => { if (s.type === 'outbound-rtp' && s.kind === 'audio') libOut = { bytes: s.bytesSent ?? 0, packets: s.packetsSent ?? 0 }; });
-            result._recoveryDiag = {
-              mode,
-              libIce: libPc.iceConnectionState,
-              libConn: libPc.connectionState,
-              libSenders,
-              outboundBytes: libOut.bytes,
-              outboundPackets: libOut.packets,
-              micContext: bridge._micContext ? bridge._micContext.state : 'n/a',
-            };
-          } catch {}
-        }
       } else {
         result.rtpResumedAfterRecovery = false;
       }
@@ -671,7 +609,6 @@
         ctx = createPhone(scenario);
         micSrc = makeSyntheticSource(scenario.freqB);
         ctx.micStreamRef.set(micSrc);
-        bridge._micContext = micSrc.context; // diagnostic: source AudioContext state
 
         setStage('connect');
         await ctx.phone.connect();
@@ -913,7 +850,6 @@
             error: r.error || null,
             connectionState: r.connectionState ?? null,
             callState: r.callState ?? null,
-            muteDiag: r._muteDiag ?? null,
           };
         }
 
@@ -966,8 +902,6 @@
           error: err,
           connectionState: (r.connectionState ?? fast.connectionState ?? ice.connectionState) ?? null,
           callState: (r.callState ?? fast.callState ?? ice.callState) ?? null,
-          fastDiag: fast._recoveryDiag ?? null,
-          iceDiag: ice._recoveryDiag ?? null,
         };
       } catch (error) {
         return {

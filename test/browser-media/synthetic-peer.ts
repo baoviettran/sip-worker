@@ -51,9 +51,6 @@ export function makeSyntheticSource(freqHz) {
   return {
     stream: dest.stream,
     stop: () => { try { clearInterval(nudge); ac.close(); } catch {} },
-    // Exposed for harness diagnostics (a suspended context feeds silence into
-    // the track, which a receiving peer reads as no RTP growth).
-    context: ac,
   };
 }
 
