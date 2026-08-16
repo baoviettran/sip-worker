@@ -45,19 +45,26 @@ jobs:
           # harnesses and points its own WebDriver fetch at that same localhost;
           # the throwaway CA is never committed, so disable TLS verification ONLY
           # for this CI-local link. Safari itself trusts the ephemeral CA via the
-          # temp keychain the runner imports it into.
+          # System-keychain trust anchor the runner installs (setupKeychainTrust).
           NODE_TLS_REJECT_UNAUTHORIZED: "0"
           HARNESS_PORT: "8443"
           PHONE_HARNESS_PORT: "8444"
           SIP_WSS_PORT: "4200"
           KEYCHAIN_DIR: "${{ runner.temp }}"
-          KEYCHAIN_NAME: "sipw-safari.keychain-db"
         run: node test/browser-media/safari-runner.mjs
-      - name: Remove ephemeral Safari trust keychain
+      - name: Remove ephemeral Safari CA trust from the System keychain
         if: always()
+        # The runner removes the trust in `finally`; this catches a hard crash
+        # before teardown. Any surviving per-run CA bundle under runner.temp
+        # (signed CN=sipw-test-ca) has its System trust anchor removed. Safe
+        # only because this job is pinned to ephemeral GitHub-hosted macos
+        # runners — the trust anchor dies with the VM.
         run: |
-          security default-keychain -s "$HOME/Library/Keychains/login.keychain-db" >/dev/null 2>&1 || true
-          security delete-keychain "${{ runner.temp }}/sipw-safari.keychain-db" >/dev/null 2>&1 || true
+          for crt in "${{ runner.temp }}"/sipw-phone-*/ca.crt; do
+            [ -e "$crt" ] || continue
+            sudo security remove-trusted-cert -d "$crt" >/dev/null 2>&1 || true
+          done
+          true
       - name: Upload Safari runner logs on failure
         if: failure()
         uses: actions/upload-artifact@v4

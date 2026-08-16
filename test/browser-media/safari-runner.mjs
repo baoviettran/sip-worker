@@ -12,10 +12,12 @@
  *      server.mjs and browser-phone/server.mjs so the 503-when-artifact-absent
  *      contract is inherited (Safari requires a true secure context; unlike
  *      Playwright it will NOT grant getUserMedia/AudioContext over plain HTTP),
- *   3. imports the ephemeral CA into a temporary login keychain on macOS
- *      (trusted as root) so Safari accepts the leaf on 127.0.0.1/localhost;
- *      the keychain is deleted in `finally` and again by the workflow's
- *      `if: always()` step,
+ *   3. installs the ephemeral CA as a root trust anchor in the macOS System
+ *      keychain (`sudo security add-trusted-cert`) so Safari accepts the leaf
+ *      on 127.0.0.1/localhost; the trust is removed in `finally` and again by
+ *      the workflow's `if: always()` step. (The earlier ephemeral-keychain +
+ *      `set-key-partition-list` recipe failed deterministically on GitHub's
+ *      macos-14 runners before any Safari test launched.)
  *   4. creates a Safari WebDriver session via Node's built-in `fetch` against the
  *      W3C WebDriver /session endpoint of a locally-started `safaridriver`,
  *   5. navigates to each HTTPS harness, waits for it to boot the built bundle,
@@ -35,9 +37,7 @@
  *   SIP_WSS_PORT       default 4200  (WSS for /sip + /relay)
  *   HARNESS_URL        default https://localhost:<HARNESS_PORT>/index.html
  *   PHONE_HARNESS_URL  default https://localhost:<PHONE_HARNESS_PORT>/index.html
- *   KEYCHAIN_DIR       default os.tmpdir() (where the temp keychain is created)
- *   KEYCHAIN_NAME      default sipw-safari.keychain-db
- *   KEYCHAIN_PASS      default per-run random (only used inside this process)
+ *   KEYCHAIN_DIR       default os.tmpdir() (where the per-run CA bundle is created)
  */
 
 import { spawn, execFileSync } from 'node:child_process';
@@ -58,9 +58,6 @@ const SIP_WSS_PORT = Number(process.env.SIP_WSS_PORT || 4200);
 const MEDIA_HARNESS_URL = process.env.HARNESS_URL || `https://localhost:${HARNESS_PORT}/index.html`;
 const PHONE_HARNESS_URL = process.env.PHONE_HARNESS_URL || `https://localhost:${PHONE_HARNESS_PORT}/index.html`;
 const KEYCHAIN_DIR = process.env.KEYCHAIN_DIR || tmpdir();
-const KEYCHAIN_NAME = process.env.KEYCHAIN_NAME || 'sipw-safari.keychain-db';
-const KEYCHAIN_PATH = join(KEYCHAIN_DIR, KEYCHAIN_NAME);
-const KEYCHAIN_PASS = process.env.KEYCHAIN_PASS || `sipw-${process.pid}-${Math.random().toString(36).slice(2)}`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const errors = [];
@@ -70,13 +67,17 @@ let driver = null;
 let httpsServers = [];
 let sipWss = null;
 let certs = null;
+// Set when System-keychain trust teardown fails: the CA file must then survive
+// the cert-file unlink below so the workflow's `if: always()` cleanup step can
+// still find it and revoke the trust (see teardownKeychainTrust).
+let trustRemovalFailed = false;
 
 // --- TLS ------------------------------------------------------------------
 // Safari needs a real secure context for getusermedia/AudioContext and for WSS
 // (the SIP link is a real `wss://` per-run TLS service). The macOS runner has
 // `openssl`; mint a throwaway local CA + leaf (CN=localhost + IP:127.0.0.1 SAN)
-// covering BOTH HTTPS harnesses and the SIP WSS. The CA is imported into a
-// temporary login keychain below; Node's runner-side fetch is pointed at the
+// covering BOTH HTTPS harnesses and the SIP WSS. The CA is installed as a
+// root trust anchor below; Node's runner-side fetch is pointed at the
 // SAME localhost the cert names, and the macOS workflow runs it with
 // NODE_TLS_REJECT_UNAUTHORIZED=0 (throwaway, never in the tree). No credentials
 // ever pass over this link.
@@ -115,43 +116,32 @@ async function setupKeychainTrust() {
     console.log('NOT macOS: skipping keychain import (the Safari job is macOS-only; this run cannot attest Safari)');
     return;
   }
-  const login = `${process.env.HOME}/Library/Keychains/login.keychain-db`;
-  execFileSync('security', ['create-keychain', '-p', KEYCHAIN_PASS, KEYCHAIN_PATH], { stdio: 'ignore' });
-  execFileSync('security', ['unlock-keychain', '-p', KEYCHAIN_PASS, KEYCHAIN_PATH], { stdio: 'ignore' });
-  // Put the temp keychain first in the user search list so Safari consults it.
-  execFileSync('security', ['list-keychains', '-d', 'user', '-s', KEYCHAIN_PATH, login], { stdio: 'ignore' });
-  execFileSync('security', ['import', certs.caCrt, '-k', KEYCHAIN_PATH, '-t', 'cert', '-A'], { stdio: 'ignore' });
-  // Allow Safari/WebKit to read the imported key without an interactive prompt.
-  // Known to flake on GitHub's macOS runners with a transient keychain error;
-  // retry with backoff. The gate still fails hard if provisioning cannot
-  // complete — this only retries a documented environmental command.
-  const partitionAttempts = 3;
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      execFileSync('security', ['set-key-partition-list', '-S', 'apple-tool:,apple:', '-k', KEYCHAIN_PASS, KEYCHAIN_PATH], { stdio: 'ignore' });
-      break;
-    } catch (error) {
-      if (attempt >= partitionAttempts) throw error;
-      const waitMs = attempt * 2000;
-      console.warn(`set-key-partition-list failed (attempt ${attempt}/${partitionAttempts}); retrying in ${waitMs}ms`);
-      await sleep(waitMs);
-    }
-  }
-  // Trust the ephemeral CA as a root anchor in the user domain.
-  execFileSync('security', ['add-trusted-cert', '-r', 'trustRoot', '-k', KEYCHAIN_PATH, certs.caCrt], { stdio: 'ignore' });
-  execFileSync('security', ['default-keychain', '-s', KEYCHAIN_PATH], { stdio: 'ignore' });
-  console.log('Imported ephemeral CA into temp keychain', KEYCHAIN_PATH);
+  // Install the ephemeral CA as a root trust anchor in the SYSTEM domain. The
+  // previous ephemeral-keychain recipe (`create-keychain` + import +
+  // `set-key-partition-list`) failed deterministically on GitHub's macos-14
+  // runners on every retry, before any Safari test launched — this gate was
+  // never observed green in CI. A System-keychain trust anchor needs no
+  // partition list (the cert is readable by every process) and the GitHub
+  // runner user has passwordless sudo. Teardown removes the trust in `finally`
+  // and again via the workflow's `if: always()` step.
+  execFileSync(
+    'sudo',
+    ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k', '/Library/Keychains/System.keychain', certs.caCrt],
+    { stdio: 'inherit' },
+  );
+  console.log('Installed ephemeral CA as a System keychain trust root:', certs.caCrt);
 }
 
 function teardownKeychainTrust() {
   if (process.platform !== 'darwin') return;
+  if (!certs) return;
   try {
-    execFileSync('security', ['default-keychain', '-s', `${process.env.HOME}/Library/Keychains/login.keychain-db`], { stdio: 'ignore' });
-  } catch {}
-  try {
-    execFileSync('security', ['delete-keychain', KEYCHAIN_PATH], { stdio: 'ignore' });
-  } catch {}
-  console.log('Removed temp keychain', KEYCHAIN_PATH);
+    execFileSync('sudo', ['security', 'remove-trusted-cert', '-d', certs.caCrt], { stdio: 'inherit' });
+    console.log('Removed ephemeral CA trust from the System keychain');
+  } catch (error) {
+    trustRemovalFailed = true;
+    console.warn(`Failed to remove System keychain trust; leaving the CA file for the workflow cleanup step: ${error.message}`);
+  }
 }
 
 // --- W3C WebDriver over Node fetch ----------------------------------------
@@ -332,6 +322,7 @@ async function main() {
     }
     if (certs) {
       for (const f of [certs.leafKey, certs.leafCrt, certs.caKey, certs.caCrt]) {
+        if (trustRemovalFailed && f === certs.caCrt) continue; // cleanup step still needs it to revoke trust
         try { unlinkSync(f); } catch {}
       }
       for (const f of ['leaf.csr', 'leaf.ext', 'ca.srl']) {
