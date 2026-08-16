@@ -349,10 +349,19 @@ async function navigateTo(url, bootScript, bootFailMsg) {
   if (nav.status >= 300) {
     logProgress(`safari: /url ${url} -> HTTP ${nav.status} ${JSON.stringify(nav.json)}`);
   }
-  const booted = await poll(60000, async () => {
-    const v = await wdExecute(`return ${bootScript}`);
-    return v === true;
-  }, bootFailMsg);
+  // Wait up to 90s for the harness to set booted === true. This CANNOT use the
+  // generic poll(): that helper treats a falsy return (e.g. the boot probe's
+  // `false`) as a valid result and returns immediately — the boot wait would be
+  // a single 500ms probe, giving a booting page no time to load its modules
+  // (observed: failed at 2.5s with only /synthetic-peer.js fetched).
+  const deadline = Date.now() + 90000;
+  let booted = false;
+  while (Date.now() < deadline) {
+    try {
+      if (await wdExecute(`return ${bootScript}`) === true) { booted = true; break; }
+    } catch {}
+    await sleep(500);
+  }
   if (!booted) {
     await captureBootFailure(url);
     throw new Error(bootFailMsg);
