@@ -97,9 +97,6 @@ let certs = null;
 // the cert-file unlink below so the workflow's `if: always()` cleanup step can
 // still find it and revoke the trust (see teardownKeychainTrust).
 let trustRemovalFailed = false;
-// Which keychain the CA trust was installed into and verified on ('login' or
-// 'system'); teardown targets it specifically (both, to be safe).
-let trustedKeychain = null;
 
 // --- TLS ------------------------------------------------------------------
 // Safari needs a real secure context for getusermedia/AudioContext and for WSS
@@ -176,28 +173,19 @@ async function setupKeychainTrust() {
     console.log('NOT macOS: skipping keychain import (the Safari job is macOS-only; this run cannot attest Safari)');
     return;
   }
-  const loginKeychain = `${process.env.HOME}/Library/Keychains/login.keychain-db`;
-  const attempts = [
-    { label: 'login', cmd: 'security', args: ['add-trusted-cert', '-r', 'trustRoot', '-k', loginKeychain, certs.caCrt] },
-    { label: 'system', cmd: 'sudo', args: ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k', '/Library/Keychains/System.keychain', certs.caCrt] },
-  ];
-  trustedKeychain = null;
-  for (const attempt of attempts) {
-    try {
-      execFileSync(attempt.cmd, attempt.args, { stdio: 'inherit', timeout: 30000 });
-      logProgress(`safari: installed CA trust root via ${attempt.label} keychain`);
-    } catch (error) {
-      logProgress(`safari: ${attempt.label} keychain trust install FAILED -> ${error.message}`);
-      continue;
-    }
-    if (verifyLeafTrust()) {
-      trustedKeychain = attempt.label;
-      logProgress(`safari: ${attempt.label} keychain trust VERIFIED effective for the leaf`);
-      return;
-    }
-    logProgress(`safari: ${attempt.label} keychain trust present but leaf did not verify; trying next`);
+  // Trust the per-run CA as a root in the SYSTEM admin store — the canonical
+  // Safari-CI recipe. (User login-keychain trust ops HANG headlessly on the
+  // runner, so they are not attempted.) The leaf is verified afterward so a
+  // silent trust failure is reported as the cause, never a baffling boot error.
+  execFileSync(
+    'sudo',
+    ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k', '/Library/Keychains/System.keychain', certs.caCrt],
+    { stdio: 'inherit', timeout: 30000 },
+  );
+  logProgress(`safari: installed CA trust root via the System keychain: ${certs.caCrt}`);
+  if (!verifyLeafTrust()) {
+    throw new Error('CA trust was installed but the leaf still does not verify');
   }
-  throw new Error('CA trust could not be made effective for the leaf (login and System keychains both failed)');
 }
 
 /** True iff the leaf verifies under the current macOS trust settings. */
@@ -228,24 +216,13 @@ function dumpTrustSettings() {
 function teardownKeychainTrust() {
   if (process.platform !== 'darwin') return;
   if (!certs) return;
-  // Remove whatever trust anchor was actually installed. Both paths are tried
-  // so a mid-run switch never leaks a trust entry or a CA file. The workflow's
-  // `if: always()` cleanup step is the backstop for a hard crash.
-  const removals = [
-    { label: 'login', cmd: 'security', args: ['remove-trusted-cert', '-d', certs.caCrt] },
-    { label: 'system', cmd: 'sudo', args: ['security', 'remove-trusted-cert', '-d', certs.caCrt] },
-  ];
-  let removedAny = false;
-  for (const r of removals) {
-    try {
-      execFileSync(r.cmd, r.args, { stdio: 'inherit', timeout: 30000 });
-      logProgress(`Removed ephemeral CA trust (${r.label})`);
-      removedAny = true;
-    } catch (error) {
-      logProgress(`Failed to remove ${r.label} keychain trust -> ${error.message}`);
-    }
+  try {
+    execFileSync('sudo', ['security', 'remove-trusted-cert', '-d', certs.caCrt], { stdio: 'inherit', timeout: 30000 });
+    logProgress('Removed ephemeral CA trust from the System keychain');
+  } catch (error) {
+    trustRemovalFailed = true;
+    logProgress(`Failed to remove System keychain trust; leaving the CA file for the workflow cleanup step: ${error.message}`);
   }
-  if (!removedAny) trustRemovalFailed = true;
 }
 
 // --- W3C WebDriver over Node fetch ----------------------------------------
