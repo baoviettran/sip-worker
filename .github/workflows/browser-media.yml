@@ -31,6 +31,34 @@ jobs:
         run: npm run test:browser-media:install
       - name: Build / pack the browser package (built artifacts only)
         run: npm run build
+      # The ubuntu runner has no audio device. Headless Chromium/WebKit decode
+      # received WebRTC audio regardless, but headless Firefox reports the
+      # receive path as silent (reason 'silent-decode' in turn-relay.spec /
+      # mute tests) because cubeb finds no output sink. Provision a PulseAudio
+      # null sink (with an ALSA null-device fallback) so Firefox can open a
+      # real output stream and the audio-energy assertions hold.
+      - name: Provision a virtual audio sink for the runner's Firefox
+        run: |
+          set -euo pipefail
+          if ! command -v pulseaudio >/dev/null 2>&1; then
+            sudo apt-get update >/dev/null
+            sudo apt-get install -y pulseaudio >/dev/null
+          fi
+          pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+          pactl load-module module-null-sink sink_name=sipw-null >/dev/null 2>&1 || true
+          pactl set-default-sink sipw-null >/dev/null 2>&1 || true
+          if pactl info >/dev/null 2>&1 && pactl list short sinks | grep -q sipw-null; then
+            echo "pulseaudio null sink ready"
+          else
+            # No usable PulseAudio sink (headless daemon failure, module-load
+            # error). Kill any half-dead daemon so cubeb falls back to ALSA, then
+            # install an ALSA null PCM as the default device. Verify the write —
+            # fail loudly here rather than let the gate fail later with the same
+            # 'silent-decode' symptom.
+            pulseaudio --kill >/dev/null 2>&1 || true
+            echo 'pcm.!default { type null }' | sudo tee /etc/asound.conf >/dev/null
+            grep -q 'type null' /etc/asound.conf
+          fi
       - name: Three-engine real RTP audio suite (media + controls/recovery)
         # run the full three-engine suite, EXCLUDING every forced-TURN spec
         # (browser-media turn-relay + browser-phone call-controls TURN tests require
@@ -67,6 +95,28 @@ jobs:
           echo "::add-mask::$turn_password"
           echo "TURN_USERNAME=ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
           echo "TURN_PASSWORD=$turn_password" >> "$GITHUB_ENV"
+      - name: Provision a virtual audio sink for the runner's Firefox
+        run: |
+          set -euo pipefail
+          if ! command -v pulseaudio >/dev/null 2>&1; then
+            sudo apt-get update >/dev/null
+            sudo apt-get install -y pulseaudio >/dev/null
+          fi
+          pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+          pactl load-module module-null-sink sink_name=sipw-null >/dev/null 2>&1 || true
+          pactl set-default-sink sipw-null >/dev/null 2>&1 || true
+          if pactl info >/dev/null 2>&1 && pactl list short sinks | grep -q sipw-null; then
+            echo "pulseaudio null sink ready"
+          else
+            # No usable PulseAudio sink (headless daemon failure, module-load
+            # error). Kill any half-dead daemon so cubeb falls back to ALSA, then
+            # install an ALSA null PCM as the default device. Verify the write —
+            # fail loudly here rather than let the gate fail later with the same
+            # 'silent-decode' symptom.
+            pulseaudio --kill >/dev/null 2>&1 || true
+            echo 'pcm.!default { type null }' | sudo tee /etc/asound.conf >/dev/null
+            grep -q 'type null' /etc/asound.conf
+          fi
       - name: Provision pinned coturn relay
         id: coturn
         env:
