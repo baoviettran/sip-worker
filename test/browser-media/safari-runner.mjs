@@ -71,6 +71,15 @@ function logProgress(line) {
   process.stdout.write(`${line}\n`);
   try { appendFileSync(LOG_PATH, `${new Date().toISOString()} ${line}\n`); } catch {}
 }
+// Hard watchdog: if anything still manages to stall the runner (a bounded call
+// that does not settle, a synchronous tool that ignores its timeout), fail the
+// gate explicitly instead of hanging until the 40-minute job timeout — GitHub
+// retains no log for a timed-out job, so a silent hang is undiagnosable.
+// Acceptance legitimately runs up to ~10 minutes; 20 is safely above that.
+setTimeout(() => {
+  process.stderr.write(`Safari gate WATCHDOG: exceeded 20 minutes; aborting.\n`);
+  process.exit(1);
+}, 20 * 60 * 1000).unref();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const errors = [];
@@ -140,7 +149,7 @@ async function setupKeychainTrust() {
   execFileSync(
     'sudo',
     ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k', '/Library/Keychains/System.keychain', certs.caCrt],
-    { stdio: 'inherit' },
+    { stdio: 'inherit', timeout: 30000 },
   );
   logProgress(`Installed ephemeral CA as a System keychain trust root: ${certs.caCrt}`);
 }
@@ -148,8 +157,9 @@ async function setupKeychainTrust() {
 function teardownKeychainTrust() {
   if (process.platform !== 'darwin') return;
   if (!certs) return;
+  logProgress('safari: removing System keychain trust');
   try {
-    execFileSync('sudo', ['security', 'remove-trusted-cert', '-d', certs.caCrt], { stdio: 'inherit' });
+    execFileSync('sudo', ['security', 'remove-trusted-cert', '-d', certs.caCrt], { stdio: 'inherit', timeout: 30000 });
     logProgress('Removed ephemeral CA trust from the System keychain');
   } catch (error) {
     trustRemovalFailed = true;
@@ -363,6 +373,7 @@ async function main() {
   } catch (error) {
     errors.push(error.message || String(error));
   } finally {
+    logProgress('safari: closing WebDriver session');
     if (sessionId) await wdDelete(`${DRIVER_URL}/session/${sessionId}`);
     stopDriver();
     teardownKeychainTrust();
