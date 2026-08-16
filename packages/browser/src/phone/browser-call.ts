@@ -66,6 +66,8 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
   private signalingStateValue: CallSignalingState = 'stable';
   private holdValue: HoldState = Object.freeze({ local: false, remote: false });
   private mutedValue = false;
+  /** Last-known media session state, derived from `mediaStateChanged` events. */
+  private mediaStateValue: MediaSessionState | 'new' = 'new';
 
   /** In-flight public operations on this call (diagnostic count). */
   private pendingOps = 0;
@@ -119,7 +121,7 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
   }
 
   get mediaState(): MediaSessionState | 'new' {
-    return 'new';
+    return this.mediaStateValue;
   }
 
   /** Immutable, size-bounded remote participant identity (core-owned). */
@@ -455,8 +457,15 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
 
   /** Forward a media event onto this call's surface. */
   notifyMediaEvent(type: keyof BrowserMediaEventMap, value: unknown): void {
+    // Every media event is correlated to the session this call owns; an event
+    // from a stale/reclaimed session (e.g. a late delivery after a new call
+    // claimed the runtime) must never surface on this call.
+    const sessionId = (value as { sessionId?: string } | null)?.sessionId;
+    if (sessionId !== undefined && sessionId !== this.mediaSessionId) return;
+
     if (type === 'mediaStateChanged') {
       const event = value as BrowserCallEventMap['mediaStateChanged'];
+      this.mediaStateValue = event.state;
       if (event.state === 'connected') {
         this.mediaConnected = true;
         // A confirmed session plus connected media advances to `established`.
@@ -471,7 +480,6 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
       this.emit('remoteAudio', value as BrowserCallEventMap['remoteAudio']);
     } else if (type === 'mutedChanged') {
       const event = value as BrowserMediaEventMap['mutedChanged'];
-      if (event.sessionId !== this.mediaSessionId) return;
       // The session accepted the change; commit the boolean and forward the
       // event immutably (a fresh object per emission).
       this.mutedValue = event.muted;

@@ -84,7 +84,9 @@ call's bounded operation path without extra options.
   owns at most one live call.
 - **`BrowserCall`** is the shared per-call handle. `setMuted`, `hold`, `resume`,
   `sendDtmf`, `restartIce`, and `hangup` live here and delegate to the same
-  owner.
+  owner. `hangup()` is an outgoing-call operation in v0.7: on an incoming call
+  it rejects `INVALID_STATE` (see
+  [Operation settlement points](#operation-settlement-points)).
 - **`OutgoingBrowserCall`** adds `start()`, `cancel()`, and `startConfirmed()`
   (the last is deprecated, used by the v0.5 wrapper).
 - **`IncomingBrowserCall`** adds `answer()` and `reject(statusCode, reason?)`.
@@ -200,7 +202,12 @@ not merely when bytes are sent:
   with an empty tone and empty buffer).
 - `call.restartIce()` — resolves when the ICE-restart re-INVITE applies and
   media reconnects within the bounded deadline.
-- `call.hangup()` — resolves when the BYE 2xx arrives.
+- `call.hangup()` — on an **outgoing** call, resolves when the BYE 2xx arrives.
+  An **incoming** call in v0.7 has no local BYE owner yet: `hangup()` rejects
+  canonical `INVALID_STATE`. Terminate an inbound call by rejecting the INVITE
+  (`call.reject(status)`) or by letting the remote side BYE; the inbound BYE
+  ownership that lets an answered incoming call hang itself up is a later
+  milestone.
 - `phone.dispose()` — idempotent, non-cancellable; resolves only after every
   local owner/resource count reaches zero.
 

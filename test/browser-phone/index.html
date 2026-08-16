@@ -103,6 +103,11 @@
           relayWs.send(JSON.stringify({ type: 'offer', sdp, id: data.id }));
         } else if (data.type === 'remote-answer') {
           await bridge.relayPeer.applyAnswer(data.sdp);
+        } else if (data.type === 'renegotiate') {
+          // Peer-initiated re-INVITE: the peer renegotiates its EXISTING audio
+          // transceiver (same track/PC) and hands the library a fresh offer.
+          const sdp = await bridge.relayPeer.renegotiate(data.direction);
+          relayWs.send(JSON.stringify({ type: 'offer', sdp, id: data.id }));
         } else if (data.type === 'end-call') {
           try { bridge.relayPeer?.close(); } catch {}
           bridge.relayPeer = null;
@@ -120,9 +125,14 @@
     function createPhone(scenario) {
       const base = createBrowserMediaEnvironment();
       let micStream = null;
+      // Count every getUserMedia the library triggers. A correct session answers
+      // a peer re-INVITE from its EXISTING transceiver (no re-acquisition), so a
+      // call cycle must see exactly ONE acquisition — at the initial offer.
+      let micAcquisitions = 0;
       const env = {
         mediaDevices: {
           getUserMedia: async () => {
+            micAcquisitions += 1;
             if (!micStream) throw new Error('no fake mic configured');
             return micStream.stream;
           },
@@ -178,6 +188,7 @@
         phone,
         env,
         micStreamRef: { get: () => micStream, set: (s) => { micStream = s; } },
+        micAcquisitionCount: () => micAcquisitions,
       };
     }
 
@@ -264,6 +275,7 @@
         turn: opts.turn ?? null,
         incoming: opts.incoming ?? 'none',
         outgoingCancel: !!opts.outgoingCancel,
+        peerReinvite: opts.peerReinvite ?? null,
         cycleIndex: opts.cycleIndex ?? 0,
         freqA: opts.freqA ?? 523,
         freqB: opts.freqB ?? 220,
@@ -373,6 +385,39 @@
       await call.sendDtmf('1');
       await sleep(200);
       result.dtmfToneChanges = toneChanges;
+    }
+
+    async function runPeerReinvite(ctx, call, libPc, scenario, result) {
+      const peerPc = bridge.relayPeer.pc;
+
+      result.libraryTransceiverCountBeforeReinvite = libPc
+        .getTransceivers().filter((t) => t.sender.track && t.sender.track.kind === 'audio').length;
+      result.micAcquisitionsBeforeReinvite = ctx.micAcquisitionCount();
+      const senderBefore = libPc.getSenders().find((s) => s.track && s.track.kind === 'audio');
+      result.librarySenderTrackIdBeforeReinvite = senderBefore ? senderBefore.track.id : null;
+
+      // The peer renegotiates its EXISTING audio transceiver (same track/PC);
+      // the server forwards the offer as an in-dialog INVITE. The library must
+      // answer from its EXISTING transceiver: no re-acquisition, no second
+      // transceiver, mute/hold state preserved.
+      const remoteBefore = peerPc.remoteDescription?.sdp ?? null;
+      await postControl('/control/peer-reinvite', { direction: scenario.peerReinvite.direction ?? 'sendrecv' });
+      await waitFor(() => bridge.relayPeer && bridge.relayPeer.pc.remoteDescription?.sdp !== remoteBefore, 'peer applied the re-INVITE answer', 30000);
+      await waitFor(() => call.signalingState === 'stable', 'signaling stable after peer re-INVITE', 30000);
+      await waitFor(() => bridge.relayPeer && bridge.relayPeer.pc.connectionState === 'connected', 'peer pc connected after peer re-INVITE', 20000);
+
+      result.libraryTransceiverCountAfterReinvite = libPc
+        .getTransceivers().filter((t) => t.sender.track && t.sender.track.kind === 'audio').length;
+      result.micAcquisitionsAfterReinvite = ctx.micAcquisitionCount();
+      const senderAfter = libPc.getSenders().find((s) => s.track && s.track.kind === 'audio');
+      result.librarySenderTrackIdAfterReinvite = senderAfter ? senderAfter.track.id : null;
+      result.reinviteDirectionRecorded = (await getControl('/control/hold-offers')).directions.at(-1) ?? null;
+      result.signalingState = call.signalingState;
+
+      // Media must still flow after the renegotiation; then mute must silence
+      // the wire and unmute restore RTP on the SAME session.
+      await waitForRtpGrowth(peerPc, 20000);
+      await runMuteMeasurements(call, result);
     }
 
     async function runRecovery(ctx, call, scenario, result) {
@@ -541,6 +586,9 @@
         if (scenario.scenario === 'controls' && scenario.controls.mute) await runMuteMeasurements(call, result);
         if (scenario.scenario === 'controls' && scenario.controls.hold) await runHoldMeasurements(call, result);
         if (scenario.scenario === 'controls' && scenario.controls.dtmf) await runDtmfMeasurements(call, libPc, result);
+        if (scenario.scenario === 'controls' && scenario.peerReinvite) {
+          await runPeerReinvite(ctx, call, libPc, scenario, result);
+        }
 
         if (scenario.scenario === 'turn') {
           await sleep(1000);

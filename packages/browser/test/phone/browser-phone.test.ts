@@ -153,3 +153,50 @@ describe('BrowserPhone — lifecycle and ownership', () => {
   });
 });
 
+describe('PhoneRuntime — connected-session reclaim', () => {
+  it('drops a closed/failed session from the connected set so a reused session id settles fresh again', async () => {
+    const { phone } = buildPhone();
+    await phone.connect();
+    const runtime = (phone as unknown as {
+      runtime: {
+        waitForMediaConnected(sessionId: string): Promise<void>;
+        onManagerEvent(type: string, value: unknown): void;
+        dispose(): Promise<void>;
+      };
+    }).runtime;
+
+    // A fresh waiter on an id not yet seen does NOT resolve immediately; the
+    // connected event settles it.
+    let firstSettled = false;
+    const first = runtime.waitForMediaConnected('s-reuse').then(() => { firstSettled = true; });
+    await flush();
+    expect(firstSettled).toBe(false);
+    runtime.onManagerEvent('mediaStateChanged', {
+      type: 'mediaStateChanged',
+      sessionId: 's-reuse',
+      previous: 'new',
+      state: 'connected',
+    });
+    await first;
+    expect(firstSettled).toBe(true);
+
+    // The session closes; its connected marker must be reclaimed.
+    runtime.onManagerEvent('mediaStateChanged', {
+      type: 'mediaStateChanged',
+      sessionId: 's-reuse',
+      previous: 'connected',
+      state: 'closed',
+    });
+
+    // A fresh waiter on the SAME id must NOT resolve from the stale marker.
+    let secondSettled = false;
+    const second = runtime.waitForMediaConnected('s-reuse');
+    second.catch(() => undefined); // rejected at dispose; never unhandled
+    second.then(() => { secondSettled = true; }).catch(() => undefined);
+    await flush();
+    expect(secondSettled).toBe(false);
+
+    await phone.dispose();
+  });
+});
+

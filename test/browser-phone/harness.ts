@@ -87,6 +87,7 @@ export interface PhoneScenarioOpts {
   turn?: TurnOpts;
   incoming?: 'accept' | 'reject' | 'none';
   outgoingCancel?: boolean;
+  peerReinvite?: { direction?: 'sendrecv' | 'sendonly' | 'inactive' };
   cycleIndex?: number;
   freqA?: number;
   freqB?: number;
@@ -128,6 +129,15 @@ export interface PhoneScenarioResult {
   dtmfCanInsertPeer?: boolean;
   telephoneEventInLibraryOffer?: boolean;
   telephoneEventInPeerAnswer?: boolean;
+
+  // peer-initiated re-INVITE (Finding 1)
+  libraryTransceiverCountBeforeReinvite?: number;
+  libraryTransceiverCountAfterReinvite?: number;
+  micAcquisitionsBeforeReinvite?: number;
+  micAcquisitionsAfterReinvite?: number;
+  librarySenderTrackIdBeforeReinvite?: string | null;
+  librarySenderTrackIdAfterReinvite?: string | null;
+  reinviteDirectionRecorded?: string | null;
 
   // recovery
   callIdBeforeRecovery?: string | null;

@@ -286,13 +286,19 @@ export class WebRtcMediaSession {
   }
 
   /**
-   * Create a complete non-trickle SDP answer for an incoming call. Acquires a
-   * fresh microphone track, validates and applies the remote offer, creates and
-   * applies the local answer, and waits for ICE gathering before returning.
+   * Create a complete non-trickle SDP answer. For a FRESH incoming call this
+   * acquires a microphone track and wires one `sendrecv` transceiver, then
+   * validates and applies the remote offer, creates and applies the local
+   * answer, and waits for ICE gathering before returning. A remote re-INVITE on
+   * an ESTABLISHED session must NOT re-acquire or add a second transceiver: the
+   * existing transceiver/localTrack are reused as-is, so mute/hold state keeps
+   * governing the SENT track.
    */
   async createAnswer(remoteSdp: string): Promise<string> {
     return this.runNegotiation(async () => {
-      await this.aquireTrackAndWire('negotiating');
+      if (this.transceiver === null) {
+        await this.aquireTrackAndWire('negotiating');
+      }
       try {
         this.applyCodecs();
         await this.applyRemoteDescription(remoteSdp, 'offer');

@@ -955,7 +955,7 @@ export * from "@sip-worker/core";
 
 // Warnings were encountered during analysis:
 //
-// dist/index.d.ts:891:5 - (ae-unresolved-link) The @link reference could not be resolved: The package "sip-worker" does not have an export "ReconnectController"
+// dist/index.d.ts:893:5 - (ae-unresolved-link) The @link reference could not be resolved: The package "sip-worker" does not have an export "ReconnectController"
 
 // (No @packageDocumentation comment for this package)
 

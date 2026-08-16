@@ -254,6 +254,61 @@ describe('WebRtcMediaSession.createAnswer', () => {
     expect(sdp.length).toBeGreaterThan(0);
     expect(pc.createAnswerCalls.length).toBe(1);
   });
+
+  it('re-answers a remote re-INVITE without re-acquiring a mic or adding a second transceiver', async () => {
+    const env = new FakeMediaEnvironment([]);
+    const clock = new FakeClock();
+    const recorder = new Recorder();
+    const pc = new FakePeerConnection();
+    env.queuedPeerConnections.push(pc as unknown as RTCPeerConnection);
+    // Two streams: the second models the FRESH getUserMedia a buggy re-INVITE
+    // answer would trigger (a real capture returns a new track object).
+    const { stream, track } = makeAudioStream();
+    const { stream: secondStream, track: secondTrack } = makeAudioStream();
+    expect(secondTrack).not.toBe(track);
+    env.queuedUserMedia.push(stream, secondStream);
+    const session = new WebRtcMediaSession({
+      env,
+      options: {},
+      acquireTrack: async (): Promise<MediaStream> => env.queuedUserMedia.shift() as Promise<MediaStream>,
+      clock,
+      emitter: recorder,
+      sessionId: 's2',
+    });
+
+    const remoteOffer = 'v=0\no=remote 1 1 IN IP4 0.0.0.0\ns=-\nm=audio 5004 RTP/AVP 0\n';
+    const first = session.createAnswer(remoteOffer);
+    await flush();
+    pc._completeGathering();
+    await first;
+
+    expect(pc.transceivers).toHaveLength(1);
+    const originalTransceiver = pc.transceivers[0]!;
+    const anySession = session as unknown as { transceiver: unknown; localTrack: unknown };
+    expect(anySession.transceiver).toBe(originalTransceiver);
+    expect(activeLocalTrack(session)).toBe(track);
+    expect(env.queuedUserMedia).toHaveLength(1); // second stream unconsumed so far
+
+    // Mute BEFORE the peer re-INVITE; the mute must survive the second answer and
+    // still disable the SENT track.
+    session.setMuted(true);
+    expect(track.enabled).toBe(false);
+
+    // A peer-initiated re-INVITE arrives on the SAME session.
+    const second = session.createAnswer(remoteOffer);
+    await flush();
+    pc._completeGathering();
+    await second;
+
+    // Exactly ONE audio transceiver: the existing one, with the SAME localTrack
+    // and transceiver reference — no re-acquisition.
+    expect(pc.transceivers).toHaveLength(1);
+    expect(pc.transceivers[0]).toBe(originalTransceiver);
+    expect(anySession.transceiver).toBe(originalTransceiver);
+    expect(activeLocalTrack(session)).toBe(track);
+    expect(env.queuedUserMedia).toHaveLength(1); // still unconsumed: no re-acquisition
+    expect(track.enabled).toBe(false); // pre-set mute still disables the sent track
+  });
 });
 
 describe('WebRtcMediaSession.setRemote', () => {

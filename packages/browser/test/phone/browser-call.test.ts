@@ -32,7 +32,6 @@ import {
   emitRemoteBye,
   emitRemoteReinvite,
   emitReinviteAck,
-  makeAudioStream,
   sendAck,
   sentRequests,
   type PhoneHarness,
@@ -483,8 +482,10 @@ describe('BrowserCall — hold/resume', () => {
     call.on('holdStateChanged', (event) => { holdEvents.push(event); });
     expect(call.holdState).toEqual({ local: false, remote: false });
 
-    // The phone's createAnswer for the remote re-INVITE re-acquires a mic track.
-    h.env.queuedUserMedia.push(makeAudioStream());
+    // The phone's createAnswer for a remote re-INVITE reuses the EXISTING
+    // transceiver — it must NOT re-acquire a mic track, so the seeded queue
+    // stays drained (a regression here throws on the empty getUserMedia).
+    expect(h.env.queuedUserMedia).toHaveLength(0);
 
     emitRemoteReinvite('sendonly', 2);
     await settle();
@@ -588,6 +589,69 @@ describe('BrowserCall — sendDtmf (RFC 4733)', () => {
     await hangup;
     await settle();
     await expect(op).rejects.toMatchObject({ code: 'ABORTED' });
+    await h.phone.dispose();
+  });
+});
+
+describe('BrowserCall — media event correlation (mediaState + stale-session guard)', () => {
+  it('mediaState reflects the last known media session state', async () => {
+    const { h, call } = await establishedCall();
+    // The call's media session reached `connected` during establishment; the
+    // getter must expose that truth (the literal `'new'` the v0.5 stub returned
+    // is the regression this fixes).
+    expect(call.mediaState).toBe('connected');
+
+    call.notifyMediaEvent('mediaStateChanged', {
+      type: 'mediaStateChanged',
+      sessionId: call.sessionId,
+      previous: 'connected',
+      state: 'closed',
+    });
+    expect(call.mediaState).toBe('closed');
+    await h.phone.dispose();
+  });
+
+  it('ignores media events from a stale session once the call session id is established', async () => {
+    const { h, call } = await establishedCall();
+    const received: string[] = [];
+    call.on('mediaStateChanged', () => { received.push('mediaStateChanged'); });
+    call.on('mediaFailed', () => { received.push('mediaFailed'); });
+    call.on('remoteAudio', () => { received.push('remoteAudio'); });
+    const before = call.mediaState;
+
+    call.notifyMediaEvent('mediaStateChanged', {
+      type: 'mediaStateChanged',
+      sessionId: 'stale-session',
+      previous: 'new',
+      state: 'connected',
+    });
+    call.notifyMediaEvent('mediaFailed', {
+      type: 'mediaFailed',
+      sessionId: 'stale-session',
+      error: new Error('stale') as never,
+    });
+    call.notifyMediaEvent('remoteAudio', {
+      type: 'remoteAudio',
+      sessionId: 'stale-session',
+      stream: {} as MediaStream,
+    });
+
+    expect(received).toEqual([]);
+    expect(call.mediaState).toBe(before);
+    await h.phone.dispose();
+  });
+
+  it('forwards media events from the matching session', async () => {
+    const { h, call } = await establishedCall();
+    const received: string[] = [];
+    call.on('mediaStateChanged', () => { received.push('mediaStateChanged'); });
+    call.notifyMediaEvent('mediaStateChanged', {
+      type: 'mediaStateChanged',
+      sessionId: call.sessionId,
+      previous: 'new',
+      state: 'negotiating',
+    });
+    expect(received).toEqual(['mediaStateChanged']);
     await h.phone.dispose();
   });
 });

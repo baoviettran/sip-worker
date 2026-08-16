@@ -11,6 +11,7 @@ import {
   SipFakeServer,
   parseNameAddr,
   hasTag,
+  buildRequest,
 } from '../example/fake-sip-server.mjs';
 
 /**
@@ -201,6 +202,25 @@ export class PhoneSipServer extends SipFakeServer {
       send(200, { directions: this.reInvites.map((r) => r.direction) });
       return;
     }
+    if (method === 'POST' && path === '/control/peer-reinvite') {
+      // Drive a PEER-initiated re-INVITE on the established call: the in-page
+      // synthetic peer renegotiates its audio transceiver (same track/PC), the
+      // server forwards that offer in an in-dialog INVITE to the library, and on
+      // the library's 200 OK relays the answer back and ACKs. The library must
+      // answer from its EXISTING transceiver — no re-acquisition.
+      const data = await this._readJson(req);
+      try {
+        const result = await this._peerReinvite(data?.direction ?? 'sendrecv');
+        if (!result.ok) {
+          send(500, result);
+          return;
+        }
+        send(200, { ok: true });
+      } catch (err) {
+        send(500, { ok: false, error: String((err && err.message) || err) });
+      }
+      return;
+    }
     if (method === 'GET' && path === '/control/status') {
       const dialogs = [...this.dialogs.values()].map((d) => ({
         callId: d.callId,
@@ -298,11 +318,68 @@ export class PhoneSipServer extends SipFakeServer {
       return;
     }
 
+    if (msg.statusCode === 200 && cseqMethod === 'INVITE') {
+      // The library answered a PEER-initiated re-INVITE on the outgoing dialog
+      // (the initial outgoing INVITE is answered by THIS server, never the
+      // library). Record it WITHOUT logging the SDP body, relay the answer to
+      // the peer, then ACK so the library commits the negotiation.
+      const iceUfrag = parseIceUfrag(msg.body);
+      this.reInvites.push({
+        callId,
+        cseq: Number((msg.header('cseq') ?? '1 INVITE').split(' ')[0]) || 1,
+        direction: sdpDirection(msg.body),
+        iceUfrag,
+        iceRestart: dialog.initialIceUfrag !== undefined && iceUfrag !== null && iceUfrag !== dialog.initialIceUfrag,
+      });
+      if (msg.body) {
+        this._askRelay({ type: 'remote-answer', sdp: msg.body }).catch(() => {});
+      }
+      this.sipSocket?.sendText(this._ackRequest(dialog));
+      return;
+    }
+
     if (msg.statusCode === 200 && cseqMethod === 'BYE') {
       dialog.ended = true;
       this.dialogs.delete(callId);
       this._endRelayCall();
     }
+  }
+
+  /**
+   * Drive a peer-initiated re-INVITE: ask the in-page peer to renegotiate its
+   * audio transceiver (same track/PC, fresh complete offer), forward that offer
+   * in an in-dialog INVITE to the library, and advance the dialog CSeq so the
+   * eventual ACK carries the re-INVITE's sequence number.
+   */
+  async _peerReinvite(direction = 'sendrecv') {
+    if (!this.relay) return { ok: false, error: 'relay not connected' };
+    if (!this.sipSocket) return { ok: false, error: 'phone not connected' };
+    const dialog = [...this.dialogs.values()].find(
+      (d) => d.direction === 'outgoing' && d.acked && !d.ended,
+    );
+    if (!dialog) return { ok: false, error: 'no established outgoing dialog' };
+    const offered = await this._askRelay({ type: 'renegotiate', direction });
+    if (offered.type !== 'offer' || !offered.sdp) {
+      return { ok: false, error: 'relay did not produce a renegotiated offer' };
+    }
+    const cseqNum = (dialog.cseq ?? 1) + 1;
+    this.sipSocket.sendText(buildRequest({
+      method: 'INVITE',
+      uri: dialog.phoneUri,
+      branch: this._branch(),
+      from: dialog.remoteUri,
+      fromTag: dialog.remoteTag,
+      to: dialog.phoneUri,
+      toTag: dialog.phoneTag,
+      callId: dialog.callId,
+      cseqNum,
+      cseqMethod: 'INVITE',
+      contact: dialog.remoteUri,
+      contentType: 'application/sdp',
+      body: offered.sdp,
+    }));
+    dialog.cseq = cseqNum;
+    return { ok: true };
   }
 
   async _prepareRelay() {

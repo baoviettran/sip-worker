@@ -581,6 +581,11 @@ export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & Brows
     if (type === 'mediaStateChanged') {
       const event = value as BrowserMediaEventMap['mediaStateChanged'];
       if (event.state === 'connected') this.connectedSessions.add(event.sessionId);
+      // A closed/failed session is reclaimed: drop the connected marker so a
+      // later call reusing the same session id can settle its own media waiter.
+      if (event.state === 'closed' || event.state === 'failed') {
+        this.connectedSessions.delete(event.sessionId);
+      }
       const set = this.mediaWaiters.get(event.sessionId);
       if (set !== undefined) {
         for (const waiter of [...set]) {

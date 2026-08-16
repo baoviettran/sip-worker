@@ -143,6 +143,20 @@ export class SyntheticPeer {
     return this.pc.localDescription.sdp;
   }
 
+  /**
+   * Renegotiate an established call as the peer: optionally flip the audio
+   * transceiver direction (benign `sendrecv` renegotiation, or a remote-hold
+   * `sendonly` offer), then produce a fresh complete offer the library answers.
+   * The SAME transceiver is renegotiated — never a new capture or transceiver.
+   */
+  async renegotiate(direction) {
+    if (direction) {
+      const audio = this.pc.getTransceivers().find((t) => t.sender.track && t.sender.track.kind === 'audio');
+      if (audio) audio.direction = direction;
+    }
+    return this.createOffer();
+  }
+
   /** Resolve once this peer's ICE gathering has completed (complete SDP). */
   async gather(timeoutMs = 15000) {
     if (this.pc.iceGatheringState === 'complete') return;
