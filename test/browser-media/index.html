@@ -344,8 +344,15 @@
     }
 
     async function snapshot(pc) {
-      const stats = await pc.getStats();
+      // Bound getStats: Safari can hang a getStats call in some media states,
+      // which would stall waitForRtpGrowth past its deadline (the deadline only
+      // re-checks after the await). A timeout reads as no movement.
+      const stats = await Promise.race([
+        pc.getStats(),
+        new Promise((resolve) => setTimeout(() => resolve(null), 10000)),
+      ]);
       const out = { inbound: { packets: 0, bytes: 0 }, outbound: { packets: 0, bytes: 0 } };
+      if (!stats) return out;
       stats.forEach((s) => {
         if (s.type === 'inbound-rtp' && s.kind === 'audio') {
           out.inbound.packets = Math.max(out.inbound.packets, s.packetsReceived ?? 0);
@@ -360,7 +367,12 @@
 
     function collectSelectedTypes(pc) {
       return new Promise((resolve) => {
-        pc.getStats().then((stats) => {
+        // Bound getStats the same way snapshot() does (Safari hang guard).
+        Promise.race([
+          pc.getStats(),
+          new Promise((resolve) => setTimeout(() => resolve(null), 10000)),
+        ]).then((stats) => {
+          if (!stats) return resolve({ local: null, remote: null });
           let pair = null;
           stats.forEach((s) => { if (s.type === 'candidate-pair' && s.state === 'succeeded' && (!pair || s.priority > pair.priority)) pair = s; });
           if (!pair) return resolve({ local: null, remote: null });
