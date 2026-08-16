@@ -55,8 +55,12 @@ const DRIVER_PORT = Number(process.env.SAFARIDRIVER_PORT || 4444);
 const HARNESS_PORT = Number(process.env.HARNESS_PORT || 8443);
 const PHONE_HARNESS_PORT = Number(process.env.PHONE_HARNESS_PORT || 8444);
 const SIP_WSS_PORT = Number(process.env.SIP_WSS_PORT || 4200);
-const MEDIA_HARNESS_URL = process.env.HARNESS_URL || `https://localhost:${HARNESS_PORT}/index.html`;
-const PHONE_HARNESS_URL = process.env.PHONE_HARNESS_URL || `https://localhost:${PHONE_HARNESS_PORT}/index.html`;
+// 127.0.0.1 literal (not `localhost`): the harness servers bind 127.0.0.1 (IPv4
+// only), and Safari can resolve `localhost` to ::1 first — a refused IPv6
+// connect fails the WebDriver navigation and leaves the session on about:blank.
+// The per-run leaf carries the IP:127.0.0.1 SAN, so TLS still validates.
+const MEDIA_HARNESS_URL = process.env.HARNESS_URL || `https://127.0.0.1:${HARNESS_PORT}/index.html`;
+const PHONE_HARNESS_URL = process.env.PHONE_HARNESS_URL || `https://127.0.0.1:${PHONE_HARNESS_PORT}/index.html`;
 const KEYCHAIN_DIR = process.env.KEYCHAIN_DIR || tmpdir();
 // Bound every WebDriver HTTP call. A Safari stuck on a page-side operation
 // (dialog, never-resolving script) otherwise holds a /execute open until the
@@ -130,6 +134,17 @@ async function startHarnessServers() {
   sipWss = await startSipWss(fakeServer, { bundle: certs, port: SIP_WSS_PORT });
 
   console.log(`Safari harness: media https://localhost:${HARNESS_PORT}/  phone https://localhost:${PHONE_HARNESS_PORT}/  wss://127.0.0.1:${SIP_WSS_PORT}/sip`);
+  // Pre-flight the harness servers from Node (runs with NODE_TLS_REJECT_UNAUTHORIZED=0)
+  // so a dead port or an artifact-absent 503 is attributed to the server, not to
+  // a Safari boot failure.
+  for (const [label, u] of [['media', MEDIA_HARNESS_URL], ['phone', PHONE_HARNESS_URL]]) {
+    try {
+      const res = await fetch(u, { signal: AbortSignal.timeout(10000) });
+      logProgress(`safari: preflight ${label} ${u} -> HTTP ${res.status}`);
+    } catch (error) {
+      logProgress(`safari: preflight ${label} ${u} FAILED -> ${error && error.name}: ${error && error.message}`);
+    }
+  }
 }
 
 // --- macOS keychain trust --------------------------------------------------
@@ -271,7 +286,12 @@ async function createSafariSession() {
 }
 
 async function navigateTo(url, bootScript, bootFailMsg) {
-  await wdFetch(`${DRIVER_URL}/session/${sessionId}/url`, { method: 'POST', body: { url } });
+  const nav = await wdFetch(`${DRIVER_URL}/session/${sessionId}/url`, { method: 'POST', body: { url } });
+  // A non-2xx (e.g. "unknown error: ..." when Safari refuses the navigation)
+  // must be visible, not silently ignored while we poll an about:blank page.
+  if (nav.status >= 300) {
+    logProgress(`safari: /url ${url} -> HTTP ${nav.status} ${JSON.stringify(nav.json)}`);
+  }
   const booted = await poll(30000, async () => {
     const v = await wdExecute(`return ${bootScript}`);
     return v === true;
