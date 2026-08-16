@@ -369,6 +369,38 @@ async function navigateTo(url, bootScript, bootFailMsg) {
 }
 
 /**
+ * Grant user activation via a trusted WebDriver pointer action. Safari withholds
+ * autoplay (Web Audio included) from pages without a real user gesture; the
+ * phone page's synthetic AudioContext then stays suspended and the library's
+ * outbound RTP never flows. A W3C /actions input is treated as a trusted event,
+ * unlike a script-dispatched synthetic click.
+ */
+async function grantUserActivation() {
+  try {
+    await wdFetch(`${DRIVER_URL}/session/${sessionId}/actions`, {
+      method: 'POST',
+      body: {
+        actions: [
+          {
+            type: 'pointer',
+            id: 'mouse',
+            parameters: { pointerType: 'mouse' },
+            actions: [
+              { type: 'pointerMove', duration: 0, x: 20, y: 20 },
+              { type: 'pointerDown', button: 0 },
+              { type: 'pointerUp', button: 0 },
+            ],
+          },
+        ],
+      },
+    });
+    logProgress('safari: dispatched a trusted click (user activation for autoplay)');
+  } catch (error) {
+    logProgress(`safari: user-activation click failed -> ${error.message}`);
+  }
+}
+
+/**
  * When a harness page fails to boot, capture what the page actually shows and
  * a screenshot so the gate reports a cause (cert-interstitial, fatal harness
  * error, build absent) instead of a bare "did not boot".
@@ -442,6 +474,11 @@ async function navigateAndRun() {
     'window.__phoneRun && window.__phoneRun.booted === true',
     'browser-phone harness did not boot the built bundle over HTTPS',
   );
+  // Safari withholds autoplay from a page it has never seen a user gesture on;
+  // the phone page's synthetic AudioContext then stays suspended and the
+  // library sends no audio. A trusted WebDriver action counts as a real input,
+  // granting user activation for the page.
+  await grantUserActivation();
   logProgress('safari: polling runPhoneAcceptance (5 minute bound)');
   let phoneResult;
   try {
