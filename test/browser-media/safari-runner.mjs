@@ -188,6 +188,7 @@ async function wdExecute(script, args = []) {
 
 // --- driver lifecycle -------------------------------------------------------
 async function startDriver() {
+  logProgress(`safari: starting ${DRIVER_BIN} (readiness bound ${20}s)`);
   driver = spawn(DRIVER_BIN, ['--enable', '-p', String(DRIVER_PORT)], {
     stdio: ['ignore', 'ignore', 'pipe'],
   });
@@ -204,9 +205,17 @@ async function startDriver() {
       throw new Error(`safaridriver exited early (code ${driver.exitCode}); Safari unavailable on this runner`);
     }
     try {
-      const res = await fetch(`${DRIVER_URL}/status`);
-      if (res.status >= 200 && res.status < 500) return;
-    } catch {}
+      // Bound the readiness poll: a safaridriver that accepts the connection
+      // but never responds (e.g. blocked starting Safari on a permission
+      // dialog) must fail the gate, not hang it until the job timeout.
+      const res = await fetch(`${DRIVER_URL}/status`, { signal: AbortSignal.timeout(10000) });
+      if (res.status >= 200 && res.status < 500) {
+        logProgress('safari: safaridriver ready');
+        return;
+      }
+    } catch (error) {
+      logProgress(`[wd] status ${DRIVER_URL} -> ${error && error.name}: ${error && error.message}`);
+    }
     await sleep(400);
   }
   throw new Error('safaridriver did not become ready within the bounded window');
