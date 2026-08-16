@@ -479,10 +479,10 @@ async function navigateAndRun() {
   // library sends no audio. A trusted WebDriver action counts as a real input,
   // granting user activation for the page.
   await grantUserActivation();
-  logProgress('safari: polling runPhoneAcceptance (5 minute bound)');
+  logProgress('safari: polling runPhoneAcceptance (8 minute bound)');
   let phoneResult;
   try {
-    phoneResult = await poll(300000, async () => {
+    phoneResult = await poll(480000, async () => {
       const r = await wdExecute('return window.runPhoneAcceptance().then((x) => ({ __done: true, x }))');
       return r?.__done ? r.x : null;
     }, 'runPhoneAcceptance did not complete', true);

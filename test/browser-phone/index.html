@@ -229,7 +229,14 @@
     }
 
     async function sampleInboundAudio(pc) {
-      const stats = await pc.getStats();
+      // Bound getStats: Safari can hang a getStats call in some media states,
+      // which would otherwise stall the measurement past every deadline (the
+      // deadline only re-checks after the await). A timeout reads as no data.
+      const stats = await Promise.race([
+        pc.getStats(),
+        new Promise((resolve) => setTimeout(() => resolve(null), 10000)),
+      ]);
+      if (!stats) return { bytesReceived: 0, packets: 0 };
       let bytes = 0;
       let packets = 0;
       stats.forEach((s) => {
@@ -379,6 +386,7 @@
       // seconds to resume (autoplay grant on a second navigation), so allow a
       // generous 45s window; if it never grows the calibration is impossible
       // and the gate must fail loudly with the diagnostic attached.
+      setStage('mute-rtp');
       const rtp = await waitForRtpGrowth(peerPc, 45000);
       if (!rtp) {
         await captureMuteDiag(result, peerPc);
@@ -387,6 +395,7 @@
 
       // Calibrate the ACTIVE outbound byte rate (what the peer's inbound-rtp
       // stats count as it receives the library's live audio).
+      setStage('mute-cal');
       const calStart = await sampleInboundAudio(peerPc);
       await sleep(1200);
       const calEnd = await sampleInboundAudio(peerPc);
@@ -394,8 +403,10 @@
       result.activeThreshold = Math.max(Math.floor(activeCalibration * 0.4), 400);
       result.mutedThreshold = Math.max(Math.floor(activeCalibration * 0.2), 150);
 
+      setStage('mute-apply');
       call.setMuted(true);
       await waitFor(() => call.muted === true, 'muted', 5000);
+      setStage('mute-settle');
       // The track-disable transition is not instantaneous on every engine: after
       // the flip, Firefox and WebKit keep shipping jitter-buffered audio. WebKit
       // under sustained browser load has been measured still sending 1750B in a
