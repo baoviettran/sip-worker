@@ -61,6 +61,50 @@ const fakeSocket = {
   await transport.send(wire);
   await transport.disconnect();
   assert.equal(transport.isConnected(), false);
+
+  // ---- v0.7: BrowserPhone composition root constructs over injected seams ----
+  assert.equal(typeof root.BrowserPhone, 'function');
+  assert.equal(typeof root.BrowserCall, 'function');
+  assert.equal(typeof root.OutgoingBrowserCall, 'function');
+  assert.equal(typeof root.IncomingBrowserCall, 'function');
+
+  const phone = new root.BrowserPhone({
+    options: {
+      signaling: {
+        url: 'wss://sip.example.test/ws',
+        reconnect: { initialDelayMs: 250, maxDelayMs: 5_000, maxAttempts: 8, recoveryTimeoutMs: 30_000 },
+      },
+      account: {
+        registrarUri: 'sip:example.test',
+        aor: 'sip:alice@example.test',
+        contact: 'sip:alice@example.test',
+      },
+      media: { holdDirection: 'sendonly' },
+    },
+    factory: () => fakeSocket,
+    lifecycle: { isOnline: () => true, subscribe: () => () => {} },
+    mediaEnvironment: {
+      mediaDevices: {
+        getUserMedia: () => Promise.reject(new Error('unused')),
+        enumerateDevices: () => Promise.resolve([]),
+        addEventListener() {},
+        removeEventListener() {},
+      },
+      createPeerConnection() { throw new Error('unused'); },
+      createMediaStream() { throw new Error('unused'); },
+      getAudioCapabilities() { return null; },
+    },
+    clock: { now: () => 0, setTimeout: () => 0, clearTimeout: () => {} },
+    idGenerator: { branch: () => 'z9hG4bK-browser-phone' },
+  });
+  assert.equal(phone.connectionState, 'disconnected');
+  assert.equal(phone.registrationState, 'unregistered');
+  assert.equal(typeof phone.diagnostics.resources, 'function');
+  const resources = phone.diagnostics.resources();
+  assert.equal(typeof resources.activeSocketGenerations, 'number');
+  assert.equal(typeof resources.peerConnections, 'number');
+  assert.equal(typeof phone.createCall, 'function');
+  await phone.dispose();
 })().then(() => {
   console.log('browser-cjs-consumer OK');
 }).catch((e) => {

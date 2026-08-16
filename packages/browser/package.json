@@ -1,6 +1,6 @@
 {
   "name": "sip-worker",
-  "version": "0.5.0",
+  "version": "0.7.0",
   "description": "Browser SIP user agent (RFC 3261) with real WebRTC audio, as a TypeScript library.",
   "license": "MIT",
   "type": "module",
@@ -40,7 +40,7 @@
     }
   },
   "dependencies": {
-    "@sip-worker/core": "0.5.0"
+    "@sip-worker/core": "0.7.0"
   },
   "scripts": {
     "build": "tsup",

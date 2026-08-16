@@ -27,11 +27,11 @@ const fixturesRoot = join(here, 'fixtures');
 const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
 
 // Task 1 dependency contract: the adapters depend on the local core at the
-// exact workspace version; core has no dependencies.
+// exact workspace version; core has no dependencies. 0.7.0 release contract.
 const EXPECTED_DEPENDENCIES = {
   '@sip-worker/core': undefined,
-  'sip-worker': { '@sip-worker/core': '0.5.0' },
-  '@sip-worker/node': { '@sip-worker/core': '0.5.0' },
+  'sip-worker': { '@sip-worker/core': '0.7.0' },
+  '@sip-worker/node': { '@sip-worker/core': '0.7.0' },
 };
 
 const DIR_BY_NAME = {
@@ -111,7 +111,7 @@ async function assertTarball(tarball, name) {
   } else {
     assert.deepEqual(pkg.dependencies, expected, `${name}: manifest dependencies mismatch`);
   }
-  assert.equal(pkg.version, '0.5.0', `${name}: unexpected version`);
+  assert.equal(pkg.version, '0.7.0', `${name}: unexpected version`);
 }
 
 /**

@@ -9,6 +9,10 @@ import {
   SipStreamDecoder,
   UserAgent,
   BrowserUserAgent,
+  BrowserPhone,
+  BrowserCall,
+  OutgoingBrowserCall,
+  IncomingBrowserCall,
   AuthManager,
   TransactionLayer,
   Dialog,
@@ -147,6 +151,66 @@ assert.equal(transport.isConnected(), false);
   assert.equal(typeof browserUa.restartIce, 'function');
   assert.equal(typeof browserUa.dispose, 'function');
   await browserUa.dispose();
+}
+
+// ---- v0.7: BrowserPhone composition root constructs over injected seams ----
+{
+  assert.equal(typeof BrowserPhone, 'function');
+  assert.equal(typeof BrowserCall, 'function');
+  assert.equal(typeof OutgoingBrowserCall, 'function');
+  assert.equal(typeof IncomingBrowserCall, 'function');
+
+  const clock = { now: () => 0, setTimeout: () => 0, clearTimeout: () => {} };
+  const idGen = { branch: () => 'z9hG4bK-browser-phone' };
+  // Node-safe fake media environment (no real navigator.mediaDevices).
+  const fakeMediaEnvironment = {
+    mediaDevices: {
+      getUserMedia: () => Promise.reject(new Error('unused: no capture in fixture')),
+      enumerateDevices: () => Promise.resolve([]),
+      addEventListener() {},
+      removeEventListener() {},
+    },
+    createPeerConnection() { throw new Error('unused'); },
+    createMediaStream() { throw new Error('unused'); },
+    getAudioCapabilities() { return null; },
+  };
+
+  const phone = new BrowserPhone({
+    options: {
+      signaling: {
+        url: 'wss://sip.example.test/ws',
+        reconnect: { initialDelayMs: 250, maxDelayMs: 5_000, maxAttempts: 8, recoveryTimeoutMs: 30_000 },
+      },
+      account: {
+        registrarUri: 'sip:example.test',
+        aor: 'sip:alice@example.test',
+        contact: 'sip:alice@example.test',
+      },
+      media: {
+        iceServers: [{ urls: 'turns:turn.example.test', username: 'user', credential: 'placeholder' }],
+        iceTransportPolicy: 'relay',
+        holdDirection: 'sendonly',
+      },
+    },
+    factory: () => fakeSocket,
+    lifecycle: {
+      isOnline: () => true,
+      subscribe: () => () => {},
+    },
+    mediaEnvironment: fakeMediaEnvironment,
+    clock,
+    idGenerator: idGen,
+  });
+  assert.equal(phone.connectionState, 'disconnected');
+  assert.equal(phone.registrationState, 'unregistered');
+  assert.equal(typeof phone.diagnostics.resources, 'function');
+  const resources = phone.diagnostics.resources();
+  assert.equal(typeof resources.activeSocketGenerations, 'number');
+  assert.equal(typeof resources.peerConnections, 'number');
+  assert.equal(typeof resources.localTracks, 'number');
+  assert.equal(typeof phone.createCall, 'function');
+  assert.equal(typeof phone.dispose, 'function');
+  await phone.dispose();
 }
 
 console.log('browser-esm-consumer OK');

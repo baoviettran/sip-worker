@@ -17,13 +17,13 @@ test("workspace manifests define the approved graph", async () => {
   assert.equal(browser.name, "sip-worker");
   assert.equal(node.name, "@sip-worker/node");
   for (const pkg of [core, browser, node]) {
-    assert.equal(pkg.version, "0.5.0");
+    assert.equal(pkg.version, "0.7.0");
     assert.equal(pkg.type, "module");
     assert.equal(pkg.sideEffects, false);
     assert.deepEqual(pkg.files, ["dist"]);
   }
-  assert.equal(browser.dependencies["@sip-worker/core"], "0.5.0");
-  assert.equal(node.dependencies["@sip-worker/core"], "0.5.0");
+  assert.equal(browser.dependencies["@sip-worker/core"], "0.7.0");
+  assert.equal(node.dependencies["@sip-worker/core"], "0.7.0");
   assert.equal(core.dependencies?.["sip-worker"], undefined);
   assert.equal(core.dependencies?.["@sip-worker/node"], undefined);
   assert.equal(browser.dependencies?.["@sip-worker/node"], undefined);

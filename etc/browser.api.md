@@ -4,18 +4,24 @@
 
 ```ts
 
+import { IdGenerator } from '@sip-worker/core';
+import { Invitation } from '@sip-worker/core';
+import { Inviter } from '@sip-worker/core';
 import { MediaError as MediaError_2 } from '@sip-worker/core';
 import { MediaErrorCode } from '@sip-worker/core';
 import { MediaMessage } from '@sip-worker/core';
+import { MediaPort } from '@sip-worker/core';
 import { MediaReply } from '@sip-worker/core';
+import { OperationOptions } from '@sip-worker/core';
 import { RegisterState } from '@sip-worker/core';
 import { RegistrationIdentity } from '@sip-worker/core';
+import { SessionEvent } from '@sip-worker/core';
 import { Transport } from '@sip-worker/core/transport';
 import { TransportCapabilities } from '@sip-worker/core/transport';
 import { TransportEvent } from '@sip-worker/core/transport';
 import { TypedEventEmitter } from '@sip-worker/core';
-import { UserAgentEventMap } from '@sip-worker/core';
-import { UserAgentOptions } from '@sip-worker/core';
+import { UserAgent } from '@sip-worker/core';
+import { WorkerMediaController } from '@sip-worker/core';
 
 // Warning: (ae-missing-release-tag) "BrowserAudioDevice" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
@@ -29,6 +35,134 @@ export interface BrowserAudioDevice {
     readonly kind: 'audioinput' | 'audiooutput';
     // (undocumented)
     readonly label: string;
+}
+
+// Warning: (ae-missing-release-tag) "BrowserCall" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
+    protected constructor(runtime: PhoneRuntime, mediaSessionId: string);
+    // @internal
+    _activeNegotiationCount(): number;
+    // @internal
+    _activeTimerCount(): number;
+    // (undocumented)
+    protected attachSessionListener(session: {
+        on(listener: (event: SessionEvent) => void): void;
+    }): void;
+    // (undocumented)
+    protected awaitMediaConnected(): Promise<void>;
+    _commitState(sessionState: string, error?: Error): void;
+    get diagnosticCallId(): string;
+    // @internal
+    failRecovery(error: unknown): void;
+    hangup(): Promise<void>;
+    // (undocumented)
+    protected hangupInternal(): Promise<void>;
+    hold(direction?: 'sendonly' | 'inactive'): Promise<void>;
+    // (undocumented)
+    get holdState(): HoldState;
+    // Warning: (ae-unresolved-link) The @link reference could not be resolved: This type of declaration is not supported yet by the resolver
+    static incoming(invitation: Invitation, runtime: PhoneRuntime): IncomingBrowserCall;
+    // @internal
+    markRecovering(): void;
+    // (undocumented)
+    get mediaState(): MediaSessionState | 'new';
+    // (undocumented)
+    get muted(): boolean;
+    notifyMediaEvent(type: keyof BrowserMediaEventMap, value: unknown): void;
+    notifyRemoteHold(held: boolean): void;
+    // (undocumented)
+    protected observeOwnerOperation(source: Promise<void>, operation: string): Promise<void>;
+    // Warning: (ae-unresolved-link) The @link reference could not be resolved: This type of declaration is not supported yet by the resolver
+    static outgoing(inviter: Inviter, runtime: PhoneRuntime): OutgoingBrowserCall;
+    protected ownerDisposeForRecovery(error: Error): void;
+    // (undocumented)
+    protected ownerHangup(): Promise<void>;
+    // (undocumented)
+    protected ownerHold(_direction: 'sendonly' | 'inactive'): Promise<void>;
+    protected ownerRemoteHold(): boolean;
+    // (undocumented)
+    protected ownerRestartIce(): Promise<void>;
+    // (undocumented)
+    protected ownerResume(): Promise<void>;
+    protected ownerValidateDialog(): Promise<void>;
+    // @internal
+    _pendingOperationCount(): number;
+    // Warning: (ae-forgotten-export) The symbol "WaitForConnectedOptions" needs to be exported by the entry point index.d.ts
+    //
+    // @internal
+    recoverSignaling(networkChanged: boolean, recoveryOptions: WaitForConnectedOptions): Promise<void>;
+    get remoteIdentity(): RemoteIdentity | undefined;
+    protected remoteIdentityValue(): RemoteIdentity | undefined;
+    restartIce(): Promise<void>;
+    resume(): Promise<void>;
+    protected readonly runtime: PhoneRuntime;
+    sendDtmf(tones: string, options?: DtmfOptions): Promise<void>;
+    get sessionId(): string;
+    // Warning: (ae-unresolved-link) The @link reference could not be resolved: The package "sip-worker" does not have an export "notifyMediaEvent"
+    setMuted(muted: boolean): void;
+    // (undocumented)
+    get signalingState(): CallSignalingState;
+    // (undocumented)
+    get state(): CallState;
+    // @internal
+    protected trackOperation(operation: Promise<void>, negotiate?: boolean): Promise<void>;
+}
+
+// Warning: (ae-missing-release-tag) "BrowserCallEventMap" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface BrowserCallEventMap {
+    // (undocumented)
+    readonly failed: {
+        readonly type: 'failed';
+        readonly error: Error;
+    };
+    // (undocumented)
+    readonly holdStateChanged: {
+        readonly type: 'holdStateChanged';
+        readonly previous: HoldState;
+        readonly state: HoldState;
+    };
+    // (undocumented)
+    readonly mediaFailed: {
+        readonly type: 'mediaFailed';
+        readonly sessionId: string;
+        readonly error: MediaError_2;
+    };
+    // (undocumented)
+    readonly mediaStateChanged: {
+        readonly type: 'mediaStateChanged';
+        readonly sessionId: string;
+        readonly previous: MediaSessionState;
+        readonly state: MediaSessionState;
+        readonly reason?: MediaErrorCode;
+    };
+    // (undocumented)
+    readonly mutedChanged: {
+        readonly type: 'mutedChanged';
+        readonly previous: boolean;
+        readonly muted: boolean;
+    };
+    // (undocumented)
+    readonly remoteAudio: {
+        readonly type: 'remoteAudio';
+        readonly sessionId: string;
+        readonly stream: MediaStream;
+    };
+    // (undocumented)
+    readonly signalingStateChanged: {
+        readonly type: 'signalingStateChanged';
+        readonly previous: CallSignalingState;
+        readonly state: CallSignalingState;
+    };
+    // (undocumented)
+    readonly stateChanged: {
+        readonly type: 'stateChanged';
+        readonly previous: CallState;
+        readonly state: CallState;
+    };
 }
 
 // Warning: (ae-missing-release-tag) "BrowserMedia" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
@@ -97,6 +231,13 @@ export interface BrowserMediaEventMap {
         readonly reason?: MediaErrorCode;
     };
     // (undocumented)
+    readonly mutedChanged: {
+        readonly type: 'mutedChanged';
+        readonly sessionId: string;
+        readonly previous: boolean;
+        readonly muted: boolean;
+    };
+    // (undocumented)
     readonly remoteAudio: {
         readonly type: 'remoteAudio';
         readonly sessionId: string;
@@ -115,6 +256,8 @@ export interface BrowserMediaOptions {
     // (undocumented)
     readonly iceGatheringTimeoutMs?: number;
     // (undocumented)
+    readonly iceServerProvider?: IceServerProvider;
+    // (undocumented)
     readonly iceServers?: readonly RTCIceServer[];
     // (undocumented)
     readonly iceTransportPolicy?: RTCIceTransportPolicy;
@@ -124,36 +267,188 @@ export interface BrowserMediaOptions {
     readonly microphoneDeviceId?: string;
 }
 
-// Warning: (ae-missing-release-tag) "BrowserUserAgent" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+// Warning: (ae-missing-release-tag) "BrowserPhone" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export class BrowserPhone {
+    constructor(init: BrowserPhoneInit);
+    get activeCall(): BrowserCall | undefined;
+    // (undocumented)
+    connect(): Promise<void>;
+    // (undocumented)
+    get connectionState(): ConnectionState;
+    // (undocumented)
+    createCall(target: string): BrowserCall;
+    get diagnostics(): PhoneDiagnostics;
+    disconnect(): Promise<void>;
+    // (undocumented)
+    dispose(): Promise<void>;
+    on<K extends keyof BrowserPhoneEventMap>(event: K, listener: (value: BrowserPhoneEventMap[K]) => void): void;
+    // (undocumented)
+    register(): Promise<void>;
+    // (undocumented)
+    get registrationState(): RegistrationState;
+    // (undocumented)
+    unregister(): Promise<void>;
+}
+
+// Warning: (ae-missing-release-tag) "BrowserPhoneEventMap" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public
+export interface BrowserPhoneEventMap {
+    // (undocumented)
+    readonly connectionStateChanged: {
+        readonly type: 'connectionStateChanged';
+        readonly previous: ConnectionState;
+        readonly state: ConnectionState;
+    };
+    // (undocumented)
+    readonly failed: {
+        readonly type: 'failed';
+        readonly error: Error;
+    };
+    // (undocumented)
+    readonly incomingCall: {
+        readonly type: 'incomingCall';
+        readonly call: IncomingBrowserCall;
+    };
+    // (undocumented)
+    readonly registrationStateChanged: {
+        readonly type: 'registrationStateChanged';
+        readonly previous: RegistrationState;
+        readonly state: RegistrationState;
+    };
+}
+
+// Warning: (ae-missing-release-tag) "BrowserPhoneInit" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface BrowserPhoneInit {
+    // Warning: (ae-forgotten-export) The symbol "MediaManagerClock" needs to be exported by the entry point index.d.ts
+    //
+    // (undocumented)
+    readonly clock?: MediaManagerClock;
+    // (undocumented)
+    readonly factory: BrowserWebSocketFactory;
+    // (undocumented)
+    readonly idGenerator?: IdGenerator;
+    // Warning: (ae-forgotten-export) The symbol "BrowserLifecycleHost" needs to be exported by the entry point index.d.ts
+    //
+    // (undocumented)
+    readonly lifecycle: BrowserLifecycleHost;
+    // (undocumented)
+    readonly mediaEnvironment: BrowserMediaEnvironment;
+    // (undocumented)
+    readonly options: BrowserPhoneOptions;
+    readonly random?: () => number;
+}
+
+// Warning: (ae-missing-release-tag) "BrowserPhoneOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface BrowserPhoneOptions {
+    // (undocumented)
+    readonly account: {
+        readonly registrarUri: string;
+        readonly aor: string;
+        readonly contact: string;
+        readonly username?: string;
+        readonly password?: string;
+    };
+    // (undocumented)
+    readonly diagnostics?: {
+        readonly logger?: DiagnosticLogger;
+    };
+    // (undocumented)
+    readonly media?: BrowserMediaOptions & {
+        readonly holdDirection?: 'sendonly' | 'inactive';
+    };
+    // (undocumented)
+    readonly signaling: {
+        readonly url: string;
+        readonly allowInsecureWebSocket?: boolean;
+        readonly reconnect?: Partial<ReconnectOptions>;
+    };
+}
+
+// Warning: (ae-missing-release-tag) "BrowserUserAgent" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
 export class BrowserUserAgent extends TypedEventEmitter<BrowserUserAgentEventMap> {
     constructor(options: BrowserUserAgentOptions);
+    // @deprecated (undocumented)
     bye(): Promise<void>;
+    // (undocumented)
     get callState(): string;
+    // (undocumented)
     connect(): Promise<void>;
+    readonly controller: WorkerMediaController;
+    // (undocumented)
     dispose(): Promise<void>;
+    // (undocumented)
     get identity(): RegistrationIdentity | undefined;
+    // @deprecated (undocumented)
     invite(target: string): Promise<void>;
+    readonly manager: WebRtcMediaManager;
+    // (undocumented)
     get media(): BrowserMedia;
+    // Warning: (ae-forgotten-export) The symbol "createMediaPortPair" needs to be exported by the entry point index.d.ts
+    readonly ports: ReturnType<typeof createMediaPortPair> extends infer P ? P : never;
+    // (undocumented)
     register(): Promise<void>;
+    // (undocumented)
     get registerState(): RegisterState;
+    // @deprecated (undocumented)
     restartIce(): Promise<void>;
+    // (undocumented)
     unregister(): Promise<void>;
 }
 
 // Warning: (ae-missing-release-tag) "BrowserUserAgentEventMap" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public
-export interface BrowserUserAgentEventMap extends UserAgentEventMap, BrowserMediaEventMap {
+export interface BrowserUserAgentEventMap extends BrowserMediaEventMap {
+    // (undocumented)
+    callStateChanged: never;
+    // (undocumented)
+    failed: {
+        type: 'failed';
+        error: Error;
+    };
+    // (undocumented)
+    incomingCall: {
+        type: 'incomingCall';
+        call: BrowserCall;
+    };
+    // (undocumented)
+    registrationStateChanged: {
+        type: 'registrationStateChanged';
+        state: RegisterState;
+        identity: RegistrationIdentity;
+    };
 }
 
 // Warning: (ae-missing-release-tag) "BrowserUserAgentOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public
-export type BrowserUserAgentOptions = Omit<UserAgentOptions, 'mediaController'> & {
+export type BrowserUserAgentOptions = {
+    readonly transport: Transport;
+    readonly clock: MediaManagerClock;
+    readonly registrarUri: string;
+    readonly aor: string;
+    readonly contact: string;
+    readonly credentials?: {
+        readonly username: string;
+        readonly password: string;
+    };
+    readonly idGenerator: {
+        branch(): string;
+    };
+    readonly refreshFraction?: number;
     readonly media?: BrowserMediaOptions;
     readonly mediaEnvironment?: BrowserMediaEnvironment;
+    readonly viaAddress?: string;
+    readonly random?: () => number;
 };
 
 // Warning: (ae-missing-release-tag) "BrowserWebSocketFactory" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
@@ -193,12 +488,35 @@ export class BrowserWebSocketTransport implements Transport {
     // (undocumented)
     disconnect(): Promise<void>;
     // (undocumented)
+    dispose(): Promise<void>;
+    get generation(): number;
+    // (undocumented)
     isConnected(): boolean;
     // (undocumented)
     send(data: Uint8Array): Promise<void>;
     // (undocumented)
     subscribe(listener: (event: TransportEvent) => void): () => void;
 }
+
+// Warning: (ae-missing-release-tag) "CallId" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type CallId = string;
+
+// Warning: (ae-missing-release-tag) "CallSignalingState" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type CallSignalingState = 'stable' | 'recovering' | 'lost';
+
+// Warning: (ae-missing-release-tag) "CallState" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type CallState = 'new' | 'establishing' | 'established' | 'terminating' | 'terminated' | 'failed';
+
+// Warning: (ae-missing-release-tag) "ConnectionState" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'recovering' | 'failed' | 'disposed';
 
 // Warning: (ae-missing-release-tag) "createBrowserMediaEnvironment" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
@@ -215,10 +533,153 @@ export const DEFAULT_ICE_GATHERING_TIMEOUT_MS = 8000;
 // @public
 export const DEFAULT_MEDIA_OPERATION_TIMEOUT_MS = 30000;
 
+// Warning: (ae-missing-release-tag) "DEFAULT_RECONNECT_OPTIONS" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export const DEFAULT_RECONNECT_OPTIONS: Readonly<ReconnectOptions>;
+
+// Warning: (ae-missing-release-tag) "DiagnosticCode" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type DiagnosticCode = 'connection.connecting' | 'connection.connected' | 'connection.reconnect_attempt' | 'connection.reconnect_attempt_failed' | 'connection.reconnected' | 'connection.recovery_failed' | 'connection.closed' | 'registration.registering' | 'registration.registered' | 'registration.recovering' | 'registration.recovery_failed' | 'registration.unregistered' | 'call.established' | 'call.recovering' | 'call.hold' | 'call.resume' | 'call.dtmf_failed' | 'call.terminated' | 'call.failed' | 'media.failed' | 'lifecycle.disposed';
+
+// Warning: (ae-missing-release-tag) "DiagnosticLogger" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type DiagnosticLogger = (record: DiagnosticRecord) => void;
+
+// Warning: (ae-missing-release-tag) "DiagnosticRecord" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface DiagnosticRecord {
+    // (undocumented)
+    readonly callId?: string;
+    // (undocumented)
+    readonly code: DiagnosticCode;
+    // (undocumented)
+    readonly connectionId?: string;
+    // (undocumented)
+    readonly context?: Readonly<Record<string, string | number | boolean>>;
+    // (undocumented)
+    readonly severity: DiagnosticSeverity;
+    // (undocumented)
+    readonly subsystem: DiagnosticSubsystem;
+    // (undocumented)
+    readonly timestamp: number;
+}
+
+// Warning: (ae-missing-release-tag) "DiagnosticRecorder" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+// Warning: (ae-unresolved-link) The @link reference could not be resolved: The package "sip-worker" does not have an export "records"
+//
+// @public
+export class DiagnosticRecorder {
+    constructor(options: DiagnosticRecorderOptions);
+    record(code: DiagnosticCode, options?: {
+        readonly connectionId?: string;
+        readonly callId?: string;
+        readonly context?: Readonly<Record<string, string | number | boolean>>;
+    }): void;
+    // (undocumented)
+    readonly records: readonly DiagnosticRecord[];
+}
+
+// Warning: (ae-missing-release-tag) "DiagnosticRecorderOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface DiagnosticRecorderOptions {
+    readonly collect?: boolean;
+    // (undocumented)
+    readonly logger: DiagnosticLogger;
+    // (undocumented)
+    readonly now?: () => number;
+}
+
+// Warning: (ae-missing-release-tag) "DiagnosticSeverity" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type DiagnosticSeverity = 'debug' | 'info' | 'warn' | 'error';
+
+// Warning: (ae-missing-release-tag) "DiagnosticSubsystem" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type DiagnosticSubsystem = 'connection' | 'registration' | 'call' | 'media' | 'lifecycle';
+
+// Warning: (ae-missing-release-tag) "DtmfOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+// Warning: (ae-unresolved-link) The @link reference could not be resolved: This type of declaration is not supported yet by the resolver
+//
+// @public
+export interface DtmfOptions extends OperationOptions {
+    readonly durationMs?: number;
+    readonly interToneGapMs?: number;
+}
+
+// Warning: (ae-missing-release-tag) "HoldState" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface HoldState {
+    // (undocumented)
+    readonly local: boolean;
+    // (undocumented)
+    readonly remote: boolean;
+}
+
+// Warning: (ae-missing-release-tag) "IceServerProvider" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type IceServerProvider = (options: {
+    readonly signal: AbortSignal;
+}) => Promise<readonly RTCIceServer[]>;
+
+// Warning: (ae-missing-release-tag) "IncomingBrowserCall" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+// Warning: (ae-unresolved-link) The @link reference could not be resolved: This type of declaration is not supported yet by the resolver
+//
+// @public
+export class IncomingBrowserCall extends BrowserCall {
+    constructor(invitation: Invitation, runtime: PhoneRuntime);
+    answer(): Promise<void>;
+    // (undocumented)
+    protected ownerDisposeForRecovery(error: Error): void;
+    // (undocumented)
+    protected ownerHangup(): Promise<void>;
+    // (undocumented)
+    protected ownerHold(direction: 'sendonly' | 'inactive'): Promise<void>;
+    // (undocumented)
+    protected ownerRemoteHold(): boolean;
+    // (undocumented)
+    protected ownerRestartIce(): Promise<void>;
+    // (undocumented)
+    protected ownerResume(): Promise<void>;
+    // (undocumented)
+    protected ownerValidateDialog(): Promise<void>;
+    reject(statusCode: number, reason?: string): Promise<void>;
+    // (undocumented)
+    protected remoteIdentityValue(): RemoteIdentity | undefined;
+}
+
+// Warning: (ae-missing-release-tag) "MAX_CONTEXT_LENGTH" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export const MAX_CONTEXT_LENGTH = 128;
+
 // Warning: (ae-missing-release-tag) "MAX_MEDIA_TIMEOUT_MS" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public
 export const MAX_MEDIA_TIMEOUT_MS = 120000;
+
+// Warning: (ae-missing-release-tag) "MAX_RECONNECT_ATTEMPTS" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export const MAX_RECONNECT_ATTEMPTS = 20;
+
+// Warning: (ae-missing-release-tag) "MAX_RECONNECT_DELAY_MS" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export const MAX_RECONNECT_DELAY_MS = 30000;
+
+// Warning: (ae-missing-release-tag) "MAX_RECOVERY_TIMEOUT_MS" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export const MAX_RECOVERY_TIMEOUT_MS = 120000;
 
 // Warning: (ae-missing-release-tag) "MEDIA_CODECS" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
@@ -235,18 +696,189 @@ export type MediaCodec = 'opus' | 'PCMU' | 'PCMA';
 // @public
 export type MediaSessionState = 'new' | 'acquiring' | 'negotiating' | 'connecting' | 'connected' | 'failed' | 'closed';
 
+// Warning: (ae-missing-release-tag) "MIN_RECONNECT_ATTEMPTS" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export const MIN_RECONNECT_ATTEMPTS = 1;
+
+// Warning: (ae-missing-release-tag) "normalizeBrowserPhoneOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+// Warning: (ae-unresolved-link) The @link reference could not be resolved: The package "sip-worker" does not have an export "RangeError"
+// Warning: (ae-unresolved-link) The @link reference could not be resolved: The package "sip-worker" does not have an export "RangeError"
+// Warning: (ae-unresolved-link) The @link reference could not be resolved: The package "sip-worker" does not have an export "Error"
+// Warning: (ae-unresolved-link) The @link reference could not be resolved: The package "sip-worker" does not have an export "Error"
+//
+// @public
+export function normalizeBrowserPhoneOptions(options: BrowserPhoneOptions): Readonly<NormalizedBrowserPhoneOptions>;
+
+// Warning: (ae-missing-release-tag) "NormalizedBrowserPhoneOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type NormalizedBrowserPhoneOptions = {
+    readonly signaling: {
+        readonly url: string;
+        readonly allowInsecureWebSocket: boolean;
+        readonly reconnect: Readonly<ReconnectOptions>;
+    };
+    readonly account: {
+        readonly registrarUri: string;
+        readonly aor: string;
+        readonly contact: string;
+        readonly username?: string;
+        readonly password?: string;
+    };
+    readonly media?: NormalizedMediaPhoneOptions;
+    readonly diagnostics?: {
+        readonly logger?: DiagnosticLogger;
+    };
+};
+
 // Warning: (ae-missing-release-tag) "NormalizedMediaOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public
 export type NormalizedMediaOptions = {
     readonly iceServers?: readonly RTCIceServer[];
     readonly iceTransportPolicy?: RTCIceTransportPolicy;
+    readonly iceServerProvider?: IceServerProvider;
     readonly iceGatheringTimeoutMs: number;
     readonly mediaOperationTimeoutMs: number;
     readonly microphoneDeviceId?: string;
     readonly audioConstraints?: MediaTrackConstraints;
     readonly codecPreference?: readonly MediaCodec[];
 };
+
+// Warning: (ae-missing-release-tag) "NormalizedMediaPhoneOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface NormalizedMediaPhoneOptions extends BrowserMediaOptions {
+    // (undocumented)
+    readonly holdDirection: 'sendonly' | 'inactive';
+}
+
+export { OperationOptions }
+
+// Warning: (ae-missing-release-tag) "OutgoingBrowserCall" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+// Warning: (ae-unresolved-link) The @link reference could not be resolved: This type of declaration is not supported yet by the resolver
+//
+// @public
+export class OutgoingBrowserCall extends BrowserCall {
+    constructor(inviter: Inviter, runtime: PhoneRuntime);
+    cancel(): Promise<void>;
+    // (undocumented)
+    protected ownerDisposeForRecovery(error: Error): void;
+    // (undocumented)
+    protected ownerHangup(): Promise<void>;
+    // (undocumented)
+    protected ownerHold(direction: 'sendonly' | 'inactive'): Promise<void>;
+    // (undocumented)
+    protected ownerRemoteHold(): boolean;
+    // (undocumented)
+    protected ownerRestartIce(): Promise<void>;
+    // (undocumented)
+    protected ownerResume(): Promise<void>;
+    // (undocumented)
+    protected ownerValidateDialog(): Promise<void>;
+    // (undocumented)
+    protected remoteIdentityValue(): RemoteIdentity | undefined;
+    start(): Promise<void>;
+    // @internal @deprecated (undocumented)
+    startConfirmed(): Promise<void>;
+}
+
+// Warning: (ae-missing-release-tag) "PhoneDiagnostics" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface PhoneDiagnostics {
+    // (undocumented)
+    readonly resources: () => ResourceSnapshot;
+}
+
+// Warning: (ae-missing-release-tag) "PhoneEnvironment" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface PhoneEnvironment {
+    // (undocumented)
+    readonly clock: MediaManagerClock;
+    // (undocumented)
+    readonly factory: BrowserWebSocketFactory;
+    // (undocumented)
+    readonly idGenerator: IdGenerator;
+    // (undocumented)
+    readonly lifecycle: BrowserLifecycleHost;
+    // (undocumented)
+    readonly mediaEnvironment: BrowserMediaEnvironment;
+    readonly random: () => number;
+}
+
+// Warning: (ae-missing-release-tag) "PhoneRuntime" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export class PhoneRuntime extends TypedEventEmitter<BrowserPhoneEventMap & BrowserMediaEventMap> {
+    constructor(options: PhoneRuntimeCoreOptions);
+    get activeCall(): BrowserCall | undefined;
+    get activeCallCount(): number;
+    get activeNegotiationCount(): number;
+    get clock(): MediaManagerClock;
+    // (undocumented)
+    connect(): Promise<void>;
+    get connectionId(): string | undefined;
+    // (undocumented)
+    get connectionState(): ConnectionState;
+    get controllerInstance(): WorkerMediaController;
+    get coreInstance(): UserAgent;
+    createCall(target: string): BrowserCall;
+    dispose(): Promise<void>;
+    failEstablishedCalls(): void;
+    // (undocumented)
+    get identity(): RegistrationIdentity | undefined;
+    readonly manager: WebRtcMediaManager;
+    markCallsRecovering(): void;
+    get pendingOperationCount(): number;
+    get portsInstance(): ReturnType<typeof createMediaPortPair>;
+    recordCallEvent(code: DiagnosticCode, call: BrowserCall): void;
+    recoverEstablishedCalls(networkChanged: boolean, recoveryOptions: WaitForConnectedOptions): Promise<void>;
+    // (undocumented)
+    register(): Promise<void>;
+    // (undocumented)
+    get registrationState(): RegistrationState;
+    releaseCall(call: BrowserCall, terminalState: CallState): void;
+    get timerCount(): number;
+    // (undocumented)
+    unregister(): Promise<void>;
+    // (undocumented)
+    waitForMediaConnected(sessionId: string): Promise<void>;
+}
+
+// Warning: (ae-missing-release-tag) "PhoneRuntimeCoreOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface PhoneRuntimeCoreOptions {
+    // (undocumented)
+    readonly aor: string;
+    // (undocumented)
+    readonly clock: MediaManagerClock;
+    // (undocumented)
+    readonly contact: string;
+    // (undocumented)
+    readonly credentials?: {
+        readonly username: string;
+        readonly password: string;
+    };
+    readonly diagnostics?: DiagnosticRecorder;
+    // (undocumented)
+    readonly idGenerator: {
+        branch(): string;
+    };
+    readonly initialIdentity?: RegistrationIdentity;
+    // (undocumented)
+    readonly mediaEnvironment: BrowserMediaEnvironment;
+    // (undocumented)
+    readonly mediaOptions: BrowserMediaOptions;
+    readonly random?: () => number;
+    // (undocumented)
+    readonly registrarUri: string;
+    // (undocumented)
+    readonly transport: Transport;
+}
 
 // Warning: (ae-missing-release-tag) "PrepareMediaOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
@@ -258,6 +890,61 @@ export interface PrepareMediaOptions {
     readonly signal?: AbortSignal;
 }
 
+// Warning: (ae-missing-release-tag) "ReconnectOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface ReconnectOptions {
+    // (undocumented)
+    readonly initialDelayMs: number;
+    // (undocumented)
+    readonly maxAttempts: number;
+    // (undocumented)
+    readonly maxDelayMs: number;
+    // (undocumented)
+    readonly recoveryTimeoutMs: number;
+}
+
+// Warning: (ae-missing-release-tag) "RegistrationState" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type RegistrationState = 'unregistered' | 'registering' | 'registered' | 'recovering' | 'failed';
+
+// Warning: (ae-missing-release-tag) "RemoteIdentity" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type RemoteIdentity = {
+    readonly uri: string;
+    readonly displayName?: string;
+};
+
+// Warning: (ae-missing-release-tag) "ResourceSnapshot" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface ResourceSnapshot {
+    // (undocumented)
+    readonly activeCalls: number;
+    // (undocumented)
+    readonly activeNegotiations: number;
+    // (undocumented)
+    readonly activeSocketGenerations: number;
+    // (undocumented)
+    readonly deviceListeners: number;
+    // (undocumented)
+    readonly lifecycleListeners: number;
+    // (undocumented)
+    readonly localTracks: number;
+    // (undocumented)
+    readonly peerConnections: number;
+    // (undocumented)
+    readonly pendingOperations: number;
+    // (undocumented)
+    readonly reconnectAttempts: number;
+    // (undocumented)
+    readonly reconnectTimers: number;
+    // (undocumented)
+    readonly timers: number;
+}
+
 // Warning: (ae-missing-release-tag) "validateBrowserMediaOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public
@@ -265,6 +952,10 @@ export function validateBrowserMediaOptions(options: BrowserMediaOptions): Reado
 
 
 export * from "@sip-worker/core";
+
+// Warnings were encountered during analysis:
+//
+// dist/index.d.ts:891:5 - (ae-unresolved-link) The @link reference could not be resolved: The package "sip-worker" does not have an export "ReconnectController"
 
 // (No @packageDocumentation comment for this package)
 

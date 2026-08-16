@@ -6,6 +6,73 @@ All notable changes to this project are documented in this file, following
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-16
+
+### Added
+
+- **Browser phone product surface.** `sip-worker` (browser) adds a
+  `BrowserPhone` composition root with per-call ownership
+  (`BrowserCall`, `OutgoingBrowserCall`, `IncomingBrowserCall`), bounded
+  WSS/registration/call recovery, and real call controls over the real WebRTC
+  audio foundation added in 0.5.0. One `BrowserPhone` owns at most one live call;
+  a busy phone answers a second incoming INVITE with **486 Busy Here**, and a
+  second outgoing call rejects `INVALID_STATE`.
+- **Call controls.** Mute (`setMuted`), hold/resume (`hold` with `sendonly` or
+  `inactive`, `resume`), RFC 4733 DTMF (`sendDtmf` with `0-9 A-D *#`, negotiated
+  `telephone-event` on both SDP sides, never falls back to SIP INFO), and ICE
+  restart (`restartIce`). Documented in
+  [docs/browser-phone.md](docs/browser-phone.md).
+- **Bounded recovery.** Connection, registration, and call recovery run inside a
+  bounded reconnect budget (250 ms initial / 5000 ms max / 8 attempts / 30 s
+  recovery by default; capped at 20 attempts / 120 s). Exhaustion surfaces a
+  canonical error code (`CONNECTION_RECOVERY_EXHAUSTED`,
+  `REGISTRATION_RECOVERY_FAILED`, `SIGNALING_RECOVERY_FAILED`) rather than
+  retrying forever.
+- **Coded v0.7 errors.** Nine new members join the `SipErrorCode` union:
+  `CONNECTION_RECOVERY_EXHAUSTED`, `REGISTRATION_RECOVERY_FAILED`,
+  `SIGNALING_RECOVERY_FAILED`, `OPERATION_ABORTED`, `OPERATION_TIMEOUT`,
+  `OPERATION_IN_PROGRESS`, `HOLD_NEGOTIATION_FAILED`, `DTMF_UNSUPPORTED`,
+  `DTMF_FAILED`. The `DiagnosticCode` telemetry union (21 members) is a separate
+  closed union and also gained v0.7 reconnect/recovery/DTMF codes in Task 14.
+- **Diagnostics.** `PhoneDiagnostics.resources()` exposes a redacted
+  `ResourceSnapshot` of the phone's owned resources (active socket generations,
+  reconnect attempts/timers, active calls and negotiations, pending operations,
+  armed timers, peer connections, local tracks, lifecycle listeners, and device
+  listeners) and a bounded `DiagnosticCode` stream; documented in
+  [docs/diagnostics.md](docs/diagnostics.md).
+- **TURN provider.** The phone accepts an `iceServerProvider` for short-lived
+  TURN credentials; the provider's credentials object is validated and adopted
+  on refresh.
+- **Documents.** New [browser phone guide](docs/browser-phone.md),
+  [diagnostics guide](docs/diagnostics.md),
+  [0.5-to-0.7 migration guide](docs/migrations/0.5-to-0.7.md), and
+  [0.7 browser-phone compatibility note](docs/compatibility/0.7-browser-phone.md).
+
+### Changed
+
+- **`Registrar.onTransportConnected()` removed** (made awaitable in 0.5-era
+  work): subscription is now via `onTransportDisconnected` and the recovery
+  flow. See the
+  [migration guide](docs/migrations/0.5-to-0.7.md) for the signature map.
+- The v0.5 `BrowserUserAgent` + `ua.media` surface remains available as a
+  **deprecated compatibility wrapper** over the same phone runtime.
+
+### Security
+
+- 0.7.0 is an **internal-beta browser phone**, not a completed v1 product and
+  not authorized for general customer production. It is suitable for an internal
+  beta or a tightly controlled non-customer pilot; PBX certification and soak
+  remain v0.9 gates and shipping Safari on macOS is a mandatory release gate. It
+  ships **real WebRTC media** and **per-call controls** over a real
+  `RTCPeerConnection`, but still lacks TLS/SIPS, `auth-int` is refused, DTMF is
+  RFC 4733 only (no SIP INFO), there is no observability or high availability,
+  and there is no interop evidence against production media stacks (the staged
+  gate is a synthetic in-page peer across Chromium, Firefox, and Playwright
+  WebKit). Deployments require HTTPS, WSS, short-lived TURN credentials,
+  Permissions Policy, and autoplay-gesture handling. See
+  [SECURITY.md](SECURITY.md), [docs/browser-phone.md](docs/browser-phone.md),
+  and [docs/browser-media.md](docs/browser-media.md).
+
 ## [0.5.0] - 2026-08-14
 
 ### Added
@@ -130,6 +197,7 @@ All notable changes to this project are documented in this file, following
   observability). A real media adapter plus interop evidence gate the 1.0
   framing.
 
+[0.7.0]: https://github.com/baoviettran/sip-worker/releases/tag/v0.7.0
 [0.5.0]: https://github.com/baoviettran/sip-worker/releases/tag/v0.5.0
 [0.3.0]: https://github.com/baoviettran/sip-worker/releases/tag/v0.3.0
 [0.2.0]: https://github.com/baoviettran/sip-worker/releases/tag/v0.2.0

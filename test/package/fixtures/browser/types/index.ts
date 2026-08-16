@@ -12,6 +12,10 @@ import {
   OptionsLiveness,
   TypedEventEmitter,
   BrowserUserAgent,
+  BrowserPhone,
+  BrowserCall,
+  OutgoingBrowserCall,
+  IncomingBrowserCall,
   makeRequest,
   makeResponse,
   serializeMessage,
@@ -138,5 +142,49 @@ async function attachAndTeardown(ua: BrowserUserAgent): Promise<void> {
   }
 }
 void attachAndTeardown;
+
+// ---- v0.7: the preferred BrowserPhone/BrowserCall surface compiles ----
+declare const phone: BrowserPhone;
+declare const outgoing: OutgoingBrowserCall;
+declare const incoming: IncomingBrowserCall;
+declare const browserCall: BrowserCall;
+declare const phoneOptions: import('sip-worker').BrowserPhoneOptions;
+declare const reconnectOptions: import('sip-worker').ReconnectOptions;
+declare const dtmfOptions: import('sip-worker').DtmfOptions;
+declare const resourceSnapshot: import('sip-worker').ResourceSnapshot;
+declare const connectionState: import('sip-worker').ConnectionState;
+declare const registrationState: import('sip-worker').RegistrationState;
+declare const callState: import('sip-worker').CallState;
+declare const diagnosticCode: import('sip-worker').DiagnosticCode;
+void phone; void outgoing; void incoming; void browserCall;
+void phoneOptions; void reconnectOptions; void dtmfOptions; void resourceSnapshot;
+void connectionState; void registrationState; void callState; void diagnosticCode;
+
+// Phone-level surface: connection/registration getters, events, diagnostics.
+declare const phoneEvents: keyof import('sip-worker').BrowserPhoneEventMap;
+declare const callEvents: keyof import('sip-worker').BrowserCallEventMap;
+const conn: import('sip-worker').ConnectionState = phone.connectionState;
+const reg: import('sip-worker').RegistrationState = phone.registrationState;
+const resources: import('sip-worker').ResourceSnapshot = phone.diagnostics.resources();
+void phoneEvents; void callEvents; void conn; void reg; void resources;
+
+/**
+ * Compile the full v0.7 call-control surface without invoking network
+ * operations: mute, hold, RFC 4733 DTMF, resume, ICE restart, hangup, dispose.
+ */
+async function compilePhoneSurface(
+  phone: BrowserPhone,
+  call: OutgoingBrowserCall,
+  signal: AbortSignal,
+): Promise<void> {
+  call.setMuted(true);
+  await call.hold();
+  await call.sendDtmf('1', { signal });
+  await call.resume();
+  await call.restartIce();
+  await call.hangup();
+  await phone.dispose();
+}
+void compilePhoneSurface;
 
 export {};

@@ -1,30 +1,34 @@
 # sip-worker
 
 A from-scratch TypeScript SIP stack with registration, calls, worker-supervised
-recovery, deterministic liveness, real browser WebRTC audio, and verified packed
-ESM/CommonJS/TypeScript exports. The stack is split into a browser entry point
-(`sip-worker`), an environment-neutral core (`@sip-worker/core`), and Node
-transports (`@sip-worker/node`).
+recovery, deterministic liveness, real browser WebRTC audio, call controls and
+recovery, and verified packed ESM/CommonJS/TypeScript exports. The stack is
+split into a browser entry point (`sip-worker`), an environment-neutral core
+(`@sip-worker/core`), and Node transports (`@sip-worker/node`).
 
-**0.5.0 adds real browser WebRTC media**: `sip-worker` ships a `BrowserUserAgent`
-composition root with a `ua.media` facade (device listing, microphone
-selection, and remote-audio playback) over a real `RTCPeerConnection` audio
-session, one active call per user agent (a busy UA answers a second incoming
-call with **486 Busy Here**). This is a **real-media foundation, not a completed
-v1 product**: it still lacks interop evidence against production media stacks,
-multi-call concurrency, Trickle ICE, DTMF/SIP INFO/MSRP, SIPS, and
-observability. A real media adapter plus interop evidence gate the 1.0 framing —
-see the
+**0.7.0 adds the browser phone product surface**: `sip-worker` ships a
+`BrowserPhone` composition root with per-call ownership (`BrowserCall`,
+`OutgoingBrowserCall`, `IncomingBrowserCall`), bounded WSS/registration/call
+recovery, and real call controls — mute, hold/resume, and RFC 4733 DTMF — over
+the real `RTCPeerConnection` audio foundation added in 0.5.0. One phone owns at
+most one live call. This is an **internal-beta release, not a completed v1
+product**: it is suitable for an internal beta or a tightly controlled
+non-customer pilot, while PBX certification and soak remain v0.9 gates. See the
+[browser phone guide](docs/browser-phone.md) for the shipped surface,
+[docs/diagnostics.md](docs/diagnostics.md) for the diagnostics and resource
+counters, and the
 [browser v1.0 production roadmap](docs/superpowers/specs/2026-08-12-browser-v1-production-roadmap-design.md)
-and the [browser media guide](docs/browser-media.md) for the shipped surface and
-its exact limitations.
+for the remaining path to 1.0.
 
 Each staged release is a deliberate pre-1.0 break: 0.3.0 split the single 0.2
 package into the three workspaces (see the
-[migration guide](docs/migrations/0.2-to-0.3.md) for that import map), and 0.5.0
-adds the media surface (see the
+[migration guide](docs/migrations/0.2-to-0.3.md) for that import map), 0.5.0
+added the media surface (see the
 [0.3-to-0.5 migration](docs/migrations/0.3-to-0.5.md), notably
-`Invitation.answer()` no longer takes a local SDP).
+`Invitation.answer()` no longer takes a local SDP), and 0.7.0 adds the phone
+surface (see the
+[0.5-to-0.7 migration](docs/migrations/0.5-to-0.7.md) and the
+[0.7 compatibility note](docs/compatibility/0.7-browser-phone.md)).
 
 Every behavior documented here is exercised by the signaling smoke gate
 (`test/integration/release-smoke.test.ts`) against the public package root, and
@@ -86,12 +90,70 @@ await ua.unregister(); // Contact * / Expires 0; resolves when 'unregistered'
 await ua.disconnect();
 ```
 
-## Browser media use (ESM)
+## Browser phone use (ESM)
 
-A real-media call in the browser composes a `BrowserUserAgent` over a
-`BrowserWebSocketTransport` and drives audio through the `ua.media` facade. The
-transport, clock, and id generators are injected exactly as in Node; media runs
-over WebRTC with an app-owned `HTMLMediaElement`:
+The v0.7 preferred surface is a `BrowserPhone` over injected browser seams, with
+an explicit per-call handle. The phone owns the WSS transport, the reconnect
+policy, and the media environment; the app owns the `<audio>` element and the
+microphone selection.
+
+```js
+import { BrowserPhone, OutgoingBrowserCall, createBrowserMediaEnvironment } from 'sip-worker';
+
+const audio = document.querySelector('audio'); // your element
+const phone = new BrowserPhone({
+  options: {
+    signaling: { url: 'wss://sip.example.com/ws' }, // wss: required by default
+    account: {
+      registrarUri: 'sip:registrar.example.com',
+      aor: 'sip:alice@example.com',
+      contact: 'sip:alice@example.com',
+      username: 'alice',
+      password: 'your-password',
+    },
+    media: { holdDirection: 'sendonly' },
+  },
+  factory: (url, protocols) => new WebSocket(url, protocols),
+  lifecycle: {
+    isOnline: () => navigator.onLine,
+    subscribe: (event, listener) => {
+      window.addEventListener(event, listener);
+      return () => window.removeEventListener(event, listener);
+    },
+  },
+  mediaEnvironment: createBrowserMediaEnvironment(),
+});
+
+phone.on('incomingCall', ({ call }) => void call.answer());
+await phone.connect();  // WSS open and wired
+await phone.register(); // authenticated REGISTER, resolves when registered
+const call = phone.createCall('sip:bob@example.com') as OutgoingBrowserCall;
+call.on('remoteAudio', ({ stream }) => { audio.srcObject = stream; });
+await call.start();     // resolves when confirmed AND media connected
+call.setMuted(true);
+await call.hold();      // sendonly re-INVITE
+await call.sendDtmf('123#');
+await call.resume();
+await call.hangup();    // BYE, resolves on 2xx
+await phone.unregister();
+await phone.dispose();
+```
+
+The state unions, error codes, operation settlement points, recovery algorithm,
+TURN provider, and limitations are documented in
+[docs/browser-phone.md](docs/browser-phone.md); diagnostics and resource
+counters live in [docs/diagnostics.md](docs/diagnostics.md). The
+[reference softphone](examples/browser-softphone/) is the packed-artifact
+consumer that demonstrates the full v0.7 lifecycle and controls.
+
+## Browser media use (ESM, v0.5 surface)
+
+The v0.5 `BrowserUserAgent` + `ua.media` surface remains available as a
+**deprecated compatibility wrapper** over the same phone runtime. A real-media
+call composes a `BrowserUserAgent` over a `BrowserWebSocketTransport` and
+drives audio through the `ua.media` facade. The transport, clock, and id
+generators are injected exactly as in Node; media runs over WebRTC with an
+app-owned `HTMLMediaElement`:
 
 ```js
 import { BrowserUserAgent, BrowserWebSocketTransport } from 'sip-worker';
@@ -261,10 +323,13 @@ or published; the three workspaces are the release artifacts.
 - `npm test` – vitest suite (all virtual-clock deterministic; no real-time waits);
   `pretest` runs the documentation-contract gate
 - `npm run test:docs` – asserts README links resolve, documented scripts exist,
-  the 0.5.0 workspace framing stays honest, the migration map is complete, and
+  the 0.7.0 workspace framing stays honest, the migration map is complete, and
   the v0.5 browser-media contract (HTTP**S**/WSS, permissions, autoplay,
   Permissions Policy, TURN, every media code, `answer()` migration, tested
-  versions, limitations) is truthful
+  versions, limitations) and the v0.7 browser-phone contract (state lists,
+  error codes, WSS policy, reconnect defaults/caps, hold direction, DTMF
+  constraints, Safari truthfulness, migration signatures, limitations, links to
+  the new documents) are truthful
 - `npm run test:architecture` – asserts the workspace manifests define the
   approved dependency graph and import boundaries
 - `npm run build` – tsup across the core, browser, and Node workspaces emitting
@@ -274,17 +339,19 @@ or published; the three workspaces are the release artifacts.
 
 ## Security status
 
-0.5.0 is a **real browser WebRTC media foundation**, not a completed v1
-production product and not production-ready for general real-audio deployment.
-It ships **real WebRTC media** (microphone capture and remote audio over a real
-`RTCPeerConnection`) but still lacks no-`TLS/SIPS`, `auth-int` is refused, and
-there is no streaming/siren (no SIP INFO / DTMF / RFC 2833 / MSRP), no
+0.7.0 is an **internal-beta browser phone**, not a completed v1 product and not
+authorized for general customer production (PBX certification and soak are v0.9
+gates). It ships **real WebRTC media** and **per-call controls** over a real
+`RTCPeerConnection`, but still lacks TLS/SIPS, `auth-int` is refused, there is
+no SIP INFO / MSRP streaming/siren (DTMF is RFC 4733 telephone-event only), no
 observability, no high availability (no active/standby, shared state, or proxy
 failover), and no interop evidence against production media stacks (the media
-gate is a synthetic in-page peer across three browsers). Media security
+and recovery gate is a synthetic in-page peer across Chromium, Firefox, and
+Playwright WebKit; shipping Safari remains a macOS gate). Media security
 requirements for a working deployment — HTTPS, WSS, short-lived TURN
 credentials, Permissions Policy, and autoplay-gesture handling — are documented
-in [docs/browser-media.md](docs/browser-media.md). `AuthManager` nonce counters
+in [docs/browser-media.md](docs/browser-media.md) and
+[docs/browser-phone.md](docs/browser-phone.md). `AuthManager` nonce counters
 are capped at 64 and its per-exchange retry state settles, bounding challenge
 state; no claim of general memory safety is made beyond the tested lifecycle
 boundaries. See [SECURITY.md](SECURITY.md) and

@@ -74,6 +74,7 @@ export type {
   IceServerProvider,
   NormalizedBrowserPhoneOptions,
   NormalizedMediaPhoneOptions,
+  PhoneDiagnostics,
   ReconnectOptions,
   RegistrationState,
   RemoteIdentity,

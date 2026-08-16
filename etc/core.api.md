@@ -285,17 +285,24 @@ export class Invitation {
     get dialog(): Dialog | undefined;
     dispose(error: unknown): void;
     handleDuplicateInvite(transaction: ServerTransaction, request: SipRequestMessage): void;
+    handleIncomingAck(request: SipRequestMessage): void;
     // (undocumented)
     handleIncomingRequest(transaction: ServerTransaction, request: SipRequestMessage): void;
     handleStatelessRequest(request: SipRequestMessage): void;
+    hold(direction: 'sendonly' | 'inactive'): Promise<void>;
     matchesInvite(request: SipRequestMessage): boolean;
     get mediaSessionId(): string;
-    reject(statusCode: number, reason?: string): void;
+    reject(statusCode: number, reason?: string): Promise<void>;
+    get remoteHold(): boolean;
+    get remoteIdentity(): RemoteIdentity | undefined;
     restartIce(): Promise<void>;
+    resume(): Promise<void>;
     // (undocumented)
     readonly session: Session;
+    subscribeRemoteHold(listener: (held: boolean) => void): () => void;
     // (undocumented)
     readonly toTag: string;
+    validateDialog(): Promise<void>;
 }
 
 // Warning: (ae-missing-release-tag) "InvitationOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
@@ -314,6 +321,8 @@ export interface InvitationOptions {
     readonly layer: TransactionLayer;
     // (undocumented)
     readonly onDialogCreated?: (dialog: Dialog) => void;
+    // (undocumented)
+    readonly random?: () => number;
     // (undocumented)
     readonly request: SipRequestMessage;
     // (undocumented)
@@ -366,6 +375,66 @@ export class InviteClientTransaction {
     terminate(error?: TransportError): void;
 }
 
+// Warning: (ae-missing-release-tag) "Inviter" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public (undocumented)
+export class Inviter {
+    constructor(options: InviterOptions);
+    cancel(): Promise<void>;
+    get dialog(): Dialog | undefined;
+    get dialogs(): readonly Dialog[];
+    dispose(error: unknown): void;
+    handleIncomingAck(request: SipRequestMessage): void;
+    handleIncomingRequest(transaction: ServerTransaction, request: SipRequestMessage): void;
+    hangup(): Promise<void>;
+    hold(direction: 'sendonly' | 'inactive'): Promise<void>;
+    invite(): Promise<void>;
+    get mediaSessionId(): string;
+    get remoteHold(): boolean;
+    get remoteIdentity(): RemoteIdentity | undefined;
+    restartIce(): Promise<void>;
+    resume(): Promise<void>;
+    // (undocumented)
+    readonly session: Session;
+    subscribeRemoteHold(listener: (held: boolean) => void): () => void;
+    validateDialog(): Promise<void>;
+}
+
+// Warning: (ae-missing-release-tag) "InviterOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface InviterOptions {
+    // (undocumented)
+    readonly authManager?: AuthManager;
+    // (undocumented)
+    readonly clock: Clock;
+    // (undocumented)
+    readonly contact: string;
+    // (undocumented)
+    readonly controller: WorkerMediaController;
+    // (undocumented)
+    readonly credentials?: {
+        readonly username: string;
+        readonly password: string;
+    };
+    // (undocumented)
+    readonly from: string;
+    // (undocumented)
+    readonly idGenerator: IdGenerator;
+    // (undocumented)
+    readonly layer: TransactionLayer;
+    // (undocumented)
+    readonly onDialogCreated?: (dialog: Dialog) => void;
+    // (undocumented)
+    readonly onDialogReleased?: (dialog: Dialog) => void;
+    // (undocumented)
+    readonly random?: () => number;
+    // (undocumented)
+    readonly to: string;
+    readonly viaAddress: string;
+    readonly viaToken: TransportToken;
+}
+
 // Warning: (ae-missing-release-tag) "InviteState" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public (undocumented)
@@ -406,6 +475,11 @@ export function makeRequest(method: string, uri: string, headers?: Headers_2, bo
 // @public (undocumented)
 export function makeResponse(statusCode: number, reasonPhrase: string, headers?: Headers_2, body?: Uint8Array): SipResponseMessage;
 
+// Warning: (ae-missing-release-tag) "MAX_OPERATION_TIMEOUT_MS" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export const MAX_OPERATION_TIMEOUT_MS = 120000;
+
 // Warning: (ae-missing-release-tag) "MEDIA_ERROR_CODES" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public
@@ -418,13 +492,17 @@ export type MediaCommand =
 /**
 * Request a local SDP offer. `iceRestart`, when true, asks the media layer to
 * force an ICE restart on the next negotiation; omitted/false keeps the
-* current transport. Plain-data and structured-clone safe.
+* current transport. `direction`, when present, stages a directional
+* re-negotiation (the transceiver direction is set before the offer is
+* created); omitted keeps the current direction. Plain-data and
+* structured-clone safe.
 */
     {
     type: 'createOffer';
     requestId: string;
     sessionId: string;
     iceRestart?: boolean;
+    direction?: MediaDirection;
 } | {
     type: 'createAnswer';
     requestId: string;
@@ -437,6 +515,28 @@ export type MediaCommand =
     remoteSdp: string;
 }
 /**
+* Confirm a staged direction transaction after the remote description for the
+* negotiated offer has been applied. Clears the staging so the staged
+* direction becomes the confirmed direction. Plain-data and structured-clone
+* safe.
+*/
+| {
+    type: 'commitDirection';
+    requestId: string;
+    sessionId: string;
+}
+/**
+* Abort a staged direction transaction: revert the local signaling state
+* (`setLocalDescription({type:'rollback'})`), restore the confirmed
+* transceiver direction, and clear the staging. Plain-data and
+* structured-clone safe.
+*/
+| {
+    type: 'rollbackDirection';
+    requestId: string;
+    sessionId: string;
+}
+/**
 * Fire-and-forget notification that the session is done. Carries no
 * requestId and expects no reply: the main side releases per-session state.
 * Kept plain-data/structured-clone-safe like every other command.
@@ -445,6 +545,11 @@ export type MediaCommand =
     type: 'closeSession';
     sessionId: string;
 };
+
+// Warning: (ae-missing-release-tag) "MediaDirection" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export type MediaDirection = 'sendrecv' | 'sendonly' | 'inactive';
 
 // Warning: (ae-missing-release-tag) "MediaError" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
@@ -570,6 +675,37 @@ export class NonInviteClientTransaction {
 // @public (undocumented)
 export type NonInviteState = 'Trying' | 'Proceeding' | 'Completed' | 'Terminated';
 
+// Warning: (ae-missing-release-tag) "observeOperation" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export function observeOperation<T>(source: Promise<T>, config: ObserveOperationConfig): Promise<T>;
+
+// Warning: (ae-missing-release-tag) "ObserveOperationConfig" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface ObserveOperationConfig {
+    // (undocumented)
+    readonly clock: Clock;
+    // (undocumented)
+    readonly defaultTimeoutMs: number;
+    // (undocumented)
+    readonly onAbort?: () => void | Promise<void>;
+    // (undocumented)
+    readonly operation: string;
+    // (undocumented)
+    readonly options?: OperationOptions;
+}
+
+// Warning: (ae-missing-release-tag) "OperationOptions" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface OperationOptions {
+    // (undocumented)
+    readonly signal?: AbortSignal;
+    // (undocumented)
+    readonly timeoutMs?: number;
+}
+
 // Warning: (ae-missing-release-tag) "OptionsLiveness" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public
@@ -619,6 +755,11 @@ export class ParseError extends Error {
 // @public
 export function parseMessage(input: Uint8Array): ParseResult<SipMessage>;
 
+// Warning: (ae-missing-release-tag) "parseRemoteIdentity" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export function parseRemoteIdentity(address: string | undefined): RemoteIdentity | undefined;
+
 // Warning: (ae-missing-release-tag) "ParseResult" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public (undocumented)
@@ -633,7 +774,7 @@ export type ParseResult<T> = {
 // Warning: (ae-missing-release-tag) "RegisterState" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public
-export type RegisterState = 'unregistered' | 'registering' | 'registered' | 'unregistering' | 'failed';
+export type RegisterState = 'unregistered' | 'registering' | 'registered' | 'unregistering' | 'recovering' | 'failed';
 
 // Warning: (ae-missing-release-tag) "Registrar" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
@@ -641,8 +782,8 @@ export type RegisterState = 'unregistered' | 'registering' | 'registered' | 'unr
 export class Registrar {
     constructor(options: RegistrarOptions);
     dispose(error: unknown): void;
-    onTransportConnected(): void;
     onTransportDisconnected(): void;
+    recover(): Promise<void>;
     register(): Promise<void>;
     get state(): RegisterState;
     status(): RegistrarStatus;
@@ -752,6 +893,18 @@ export interface RegistrationStateChangedEvent {
     readonly type: 'registrationStateChanged';
 }
 
+// Warning: (ae-missing-release-tag) "RemoteIdentity" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+//
+// @public
+export interface RemoteIdentity {
+    // (undocumented)
+    readonly displayName?: string;
+    // (undocumented)
+    readonly tag?: string;
+    // (undocumented)
+    readonly uri: string;
+}
+
 // Warning: (ae-missing-release-tag) "renderAuthorization" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public (undocumented)
@@ -845,7 +998,7 @@ export class SipError extends Error {
 // Warning: (ae-missing-release-tag) "SipErrorCode" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
 // @public (undocumented)
-export type SipErrorCode = 'AUTHENTICATION_FAILED' | 'AUTHENTICATION_UNSUPPORTED' | 'CALL_FAILED' | 'CONNECTION_FAILED' | 'INVALID_STATE' | 'LIFECYCLE_ABORTED' | 'MEDIA_UNAVAILABLE' | 'PROTOCOL_ERROR' | 'REGISTRATION_FAILED' | 'TIMEOUT' | 'TRANSPORT_FAILED' | 'WORKER_CLOSED' | 'WORKER_REGISTRATION_FAILED' | 'WORKER_RESTARTED';
+export type SipErrorCode = 'AUTHENTICATION_FAILED' | 'AUTHENTICATION_UNSUPPORTED' | 'CALL_FAILED' | 'CONNECTION_FAILED' | 'CONNECTION_RECOVERY_EXHAUSTED' | 'DTMF_FAILED' | 'DTMF_UNSUPPORTED' | 'HOLD_NEGOTIATION_FAILED' | 'INVALID_STATE' | 'LIFECYCLE_ABORTED' | 'MEDIA_UNAVAILABLE' | 'OPERATION_ABORTED' | 'OPERATION_IN_PROGRESS' | 'OPERATION_TIMEOUT' | 'PROTOCOL_ERROR' | 'REGISTRATION_FAILED' | 'REGISTRATION_RECOVERY_FAILED' | 'SIGNALING_RECOVERY_FAILED' | 'TIMEOUT' | 'TRANSPORT_FAILED' | 'WORKER_CLOSED' | 'WORKER_REGISTRATION_FAILED' | 'WORKER_RESTARTED';
 
 // Warning: (ae-missing-release-tag) "SipIngress" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
@@ -916,6 +1069,7 @@ export const STUB_SDP: string;
 export class StubMainMediaHandler {
     constructor(port: MediaPort);
     closedSessions(): readonly string[];
+    direction(sessionId: string): MediaDirection | undefined;
     offers(sessionId: string): string | undefined;
     offersRestarted(sessionId: string): boolean;
     remoteSdp(sessionId: string): string | undefined;
@@ -990,6 +1144,7 @@ export class TransactionLayer implements MessageSink {
     receive(message: SipMessage): void;
     sendRequest(request: SipRequestMessage): ClientHandle;
     sendResponse(key: TransactionKey, response: SipResponseMessage): void;
+    sendResponseAwait(key: TransactionKey, response: SipResponseMessage): Promise<void>;
     subscribe(listener: (event: TransactionLayerEvent) => void): () => void;
     // (undocumented)
     subscribe(key: TransactionKey, listener: (event: TransactionLayerEvent) => void): () => void;
@@ -1126,13 +1281,18 @@ export class UserAgent extends TypedEventEmitter<UserAgentEventMap> implements U
     bye(): Promise<void>;
     get callState(): string;
     connect(): Promise<void>;
+    createOutgoingCall(target: string): Inviter;
     disconnect(): Promise<void>;
+    hold(direction: 'sendonly' | 'inactive'): Promise<void>;
     get identity(): RegistrationIdentity | undefined;
     invite(target: string): Promise<void>;
+    recoverRegistration(): Promise<void>;
     register(): Promise<void>;
     get registerState(): RegisterState;
     restartIce(): Promise<void>;
+    resume(): Promise<void>;
     unregister(): Promise<void>;
+    validateDialog(): Promise<void>;
 }
 
 // Warning: (ae-missing-release-tag) "UserAgentEventEmitter" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
@@ -1196,6 +1356,7 @@ export interface UserAgentOptions {
     readonly liveness?: LivenessStrategy;
     // (undocumented)
     readonly mediaController?: WorkerMediaController;
+    readonly random?: () => number;
     // (undocumented)
     readonly refreshFraction?: number;
     // (undocumented)
@@ -1204,6 +1365,12 @@ export interface UserAgentOptions {
     readonly transport: Transport;
     readonly viaAddress?: string;
 }
+
+// Warning: (ae-missing-release-tag) "validateOperationTimeout" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
+// Warning: (ae-unresolved-link) The @link reference could not be resolved: The package "@sip-worker/core" does not have an export "RangeError"
+//
+// @public
+export function validateOperationTimeout(value: number | undefined, fallback: number): number;
 
 // Warning: (ae-missing-release-tag) "ViaConfig" is part of the package's API, but it is missing a release tag (@alpha, @beta, @public, or @internal)
 //
@@ -1242,11 +1409,14 @@ export class WorkerMediaController {
     constructor(port: MediaPort, options?: WorkerMediaControllerOptions);
     close(): void;
     closeSession(sessionId: string): void;
+    commitDirection(sessionId: string): Promise<void>;
     createAnswer(sessionId: string, remoteSdp: string): Promise<string>;
     createOffer(sessionId: string, options?: {
         iceRestart?: boolean;
+        direction?: MediaDirection;
     }): Promise<string>;
     get pendingRequestCount(): number;
+    rollbackDirection(sessionId: string): Promise<void>;
     setRemote(sessionId: string, remoteSdp: string): Promise<void>;
     unsubscribe(): void;
 }
