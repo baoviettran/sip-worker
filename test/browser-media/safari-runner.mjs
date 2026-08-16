@@ -490,7 +490,16 @@ async function navigateAndRun() {
     // acceptance legitimately runs minutes, and invoking it per poll iteration
     // would pile up concurrent runs after each 60s WebDriver timeout.
     await wdExecute('window.__phoneAcceptanceResult = null; window.__phoneAcceptanceDone = false; window.runPhoneAcceptance().then((x) => { window.__phoneAcceptanceResult = x; window.__phoneAcceptanceDone = true; }).catch((e) => { window.__phoneAcceptanceResult = { passed: false, error: { name: e && e.name, message: e && e.message } }; window.__phoneAcceptanceDone = true; }); return true;');
+    let lastClickAt = Date.now();
     phoneResult = await poll(480000, async () => {
+      // Re-grant user activation every ~15s: Safari's autoplay grant from the
+      // initial click does not persist to AudioContexts created later (the
+      // recovery scenarios' fresh sources stayed suspended while the controls
+      // scenario's — created right after the click — resumed).
+      if (Date.now() - lastClickAt > 15000) {
+        await grantUserActivation();
+        lastClickAt = Date.now();
+      }
       const r = await wdExecute('return window.__phoneAcceptanceDone ? window.__phoneAcceptanceResult : null');
       return r;
     }, 'runPhoneAcceptance did not complete', true);
