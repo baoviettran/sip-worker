@@ -360,8 +360,13 @@
             libIce = libPc.iceConnectionState;
             libConn = libPc.connectionState;
             libSenders = libPc.getSenders().map((s) => `${s.track ? `${s.track.kind}@${s.track.readyState}` : 'no-track'}`);
-            const st = await libPc.getStats();
-            st.forEach((s) => { if (s.type === 'outbound-rtp' && s.kind === 'audio') libOut = { bytes: s.bytesSent ?? 0, packets: s.packetsSent ?? 0 }; });
+            // getStats can hang on Safari's phone page; bound it like
+            // sampleInboundAudio so a stalled PC cannot hang the diagnostic.
+            const st = await Promise.race([
+              libPc.getStats(),
+              new Promise((resolve) => setTimeout(() => resolve(null), 10000)),
+            ]);
+            if (st) st.forEach((s) => { if (s.type === 'outbound-rtp' && s.kind === 'audio') libOut = { bytes: s.bytesSent ?? 0, packets: s.packetsSent ?? 0 }; });
           }
         } catch {}
         result._muteDiag = {
@@ -389,6 +394,7 @@
       setStage('mute-rtp');
       const rtp = await waitForRtpGrowth(peerPc, 45000);
       if (!rtp) {
+        setStage('mute-diag');
         await captureMuteDiag(result, peerPc);
         throw new Error('no outbound RTP observed before mute calibration');
       }
