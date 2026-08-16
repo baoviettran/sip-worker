@@ -336,6 +336,22 @@
     async function runMuteMeasurements(call, result) {
       const peerPc = bridge.relayPeer.pc;
 
+      // TEMP DIAGNOSTIC: report the source AudioContext state and relay-peer
+      // state when outbound RTP is not observed, so a suspended source context
+      // (feeds silence) is distinguishable from a relay/ICE issue. Removed once
+      // the Safari phone-gate blocker is diagnosed.
+      try {
+        result._muteDiag = {
+          micContext: bridge._micContext ? bridge._micContext.state : 'n/a',
+          peerIce: peerPc.iceConnectionState,
+          peerConn: peerPc.connectionState,
+          inboundBytes: (await sampleInboundAudio(peerPc)).bytesReceived,
+          inboundPackets: (await sampleInboundAudio(peerPc)).packets,
+        };
+      } catch (error) {
+        result._muteDiag = { error: String(error && error.message) };
+      }
+
       // The ACTIVE baseline must be measured while outbound RTP is actually
       // flowing, not while media is still connecting on a slower runner —
       // otherwise the calibration reads the pre-flow silence and the muted
@@ -592,6 +608,7 @@
         ctx = createPhone(scenario);
         micSrc = makeSyntheticSource(scenario.freqB);
         ctx.micStreamRef.set(micSrc);
+        bridge._micContext = micSrc.context; // diagnostic: source AudioContext state
 
         await ctx.phone.connect();
         await waitFor(() => ctx.phone.connectionState === 'connected', 'phone connected', 20000);
