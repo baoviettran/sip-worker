@@ -763,15 +763,24 @@
           }
           result.credentialDisclosed = leaked;
         }
+        bridge.lastResult = result;
         return result;
       } catch (error) {
         bridge.errors.push(error);
         result.error = { name: error.name || 'Error', message: error.message || String(error) };
+        bridge.lastResult = result;
         return result;
       } finally {
+        // Each teardown step is stage-marked so a hang in one (e.g. a Safari
+        // call.hangup() that never settles) is identifiable from the runner's
+        // page diagnostic instead of reading as an opaque 'mute-*' stage.
+        setStage('finish-hangup');
         try { if (call && call.state === 'established') await call.hangup(); } catch {}
+        setStage('finish-phone');
         try { await finishPhone(ctx, result); } catch {}
+        setStage('finish-stop');
         if (micSrc) { try { micSrc.stop(); } catch {} }
+        setStage('finish-done');
       }
     }
 

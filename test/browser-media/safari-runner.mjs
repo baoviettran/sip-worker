@@ -457,9 +457,13 @@ async function navigateAndRun() {
     'browser-media harness did not boot the built bundle over HTTPS',
   );
   logProgress('safari: polling runMediaAcceptance (120s bound)');
+  // Fire-and-forget + flag poll: invoking runMediaAcceptance() from EVERY poll
+  // iteration would start a fresh acceptance after each 60s WebDriver timeout,
+  // piling up concurrent runs on the stuck one.
+  await wdExecute('window.__mediaAcceptanceResult = null; window.__mediaAcceptanceDone = false; window.runMediaAcceptance().then((x) => { window.__mediaAcceptanceResult = x; window.__mediaAcceptanceDone = true; }).catch((e) => { window.__mediaAcceptanceResult = { passed: false, error: { name: e && e.name, message: e && e.message } }; window.__mediaAcceptanceDone = true; }); return true;');
   const mediaResult = await poll(120000, async () => {
-    const r = await wdExecute('return window.runMediaAcceptance().then((x) => ({ __done: true, x }))');
-    return r?.__done ? r.x : null;
+    const r = await wdExecute('return window.__mediaAcceptanceDone ? window.__mediaAcceptanceResult : null');
+    return r;
   }, 'runMediaAcceptance did not complete', true);
   logProgress(`runMediaAcceptance result: ${JSON.stringify(mediaResult)}`);
   assertAcceptance(mediaResult, 'media');
@@ -482,16 +486,20 @@ async function navigateAndRun() {
   logProgress('safari: polling runPhoneAcceptance (8 minute bound)');
   let phoneResult;
   try {
+    // Fire-and-forget + flag poll (see the media acceptance above): the phone
+    // acceptance legitimately runs minutes, and invoking it per poll iteration
+    // would pile up concurrent runs after each 60s WebDriver timeout.
+    await wdExecute('window.__phoneAcceptanceResult = null; window.__phoneAcceptanceDone = false; window.runPhoneAcceptance().then((x) => { window.__phoneAcceptanceResult = x; window.__phoneAcceptanceDone = true; }).catch((e) => { window.__phoneAcceptanceResult = { passed: false, error: { name: e && e.name, message: e && e.message } }; window.__phoneAcceptanceDone = true; }); return true;');
     phoneResult = await poll(480000, async () => {
-      const r = await wdExecute('return window.runPhoneAcceptance().then((x) => ({ __done: true, x }))');
-      return r?.__done ? r.x : null;
+      const r = await wdExecute('return window.__phoneAcceptanceDone ? window.__phoneAcceptanceResult : null');
+      return r;
     }, 'runPhoneAcceptance did not complete', true);
   } catch (error) {
     // Surface what the page knew at the moment it stopped completing, so a
-    // stuck acceptance reports a cause (captured uncaught errors / rejections)
-    // instead of a bare timeout.
+    // stuck acceptance reports a cause (stage, last scenario result, captured
+    // uncaught errors / rejections) instead of a bare timeout.
     try {
-      const pageDiag = await wdExecute('return { booted: !!(window.__phoneRun && window.__phoneRun.booted), relayConnected: !!(window.__phoneRun && window.__phoneRun.relayConnected), stage: (window.__phoneRun && window.__phoneRun.stage) || null, errors: (window.__phoneRun && window.__phoneRun.errors) || [] }');
+      const pageDiag = await wdExecute('return { booted: !!(window.__phoneRun && window.__phoneRun.booted), relayConnected: !!(window.__phoneRun && window.__phoneRun.relayConnected), stage: (window.__phoneRun && window.__phoneRun.stage) || null, lastResult: (window.__phoneRun && window.__phoneRun.lastResult) || null, errors: (window.__phoneRun && window.__phoneRun.errors) || [] }');
       logProgress(`safari: phone acceptance page diagnostic: ${JSON.stringify(pageDiag)}`);
     } catch {}
     throw error;
