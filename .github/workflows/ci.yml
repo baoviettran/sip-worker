@@ -24,6 +24,10 @@ jobs:
         run: npm run typecheck
       - name: Documentation contract
         run: npm run test:docs
+      # vitest resolves the workspace subpath exports (e.g. `@sip-worker/core/transport`)
+      # against dist/ — a fresh checkout has none, so `npm test` requires the build first.
+      - name: Build / pack the browser package (built artifacts only)
+        run: npm run build
       - name: Test suite (incl. smoke gate)
         run: npm test
       - name: Packed-consumer gate

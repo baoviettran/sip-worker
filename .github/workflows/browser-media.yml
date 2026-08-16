@@ -35,7 +35,7 @@ jobs:
         # run the full three-engine suite, EXCLUDING every forced-TURN spec
         # (browser-media turn-relay + browser-phone call-controls TURN tests require
         # provisioned coturn and run in the forced-turn-relay job below).
-        run: npx playwright test --test-project=chromium --test-project=firefox --test-project=webkit --grep-invert "forced TURN relay"
+        run: npx playwright test --project=chromium --project=firefox --project=webkit --grep-invert "forced TURN relay"
       - name: Upload Playwright traces on failure
         if: failure()
         uses: actions/upload-artifact@v4
