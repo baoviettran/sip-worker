@@ -52,17 +52,18 @@ jobs:
           SIP_WSS_PORT: "4200"
           KEYCHAIN_DIR: "${{ runner.temp }}"
         run: node test/browser-media/safari-runner.mjs
-      - name: Remove ephemeral Safari CA trust from the System keychain
+      - name: Remove ephemeral Safari CA trust
         if: always()
         # The runner removes the trust in `finally`; this catches a hard crash
         # before teardown. Any surviving per-run CA bundle under runner.temp
-        # (signed CN=sipw-test-ca) has its System trust anchor removed. Safe
-        # only because this job is pinned to ephemeral GitHub-hosted macos
-        # runners — the trust anchor dies with the VM.
+        # (signed CN=sipw-test-ca) has its trust anchor removed from BOTH the
+        # user login keychain and the System keychain. Safe only because this
+        # job is pinned to ephemeral GitHub-hosted macos runners — the trust
+        # anchor dies with the VM.
         run: |
           for crt in "${{ runner.temp }}"/sipw-phone-*/ca.crt; do
             [ -e "$crt" ] || continue
-            sudo security remove-trusted-cert -d "$crt" >/dev/null 2>&1 || true
+            security remove-trusted-cert -d "$crt" >/dev/null 2>&1 || sudo security remove-trusted-cert -d "$crt" >/dev/null 2>&1 || true
           done
           true
       - name: Upload Safari runner logs and traces
