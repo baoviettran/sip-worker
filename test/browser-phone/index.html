@@ -1,0 +1,774 @@
+<!doctype html>
+<!--
+  Browser-phone harness (Task 16). Loads the BUILT/PACKED browser bundle and
+  drives a real BrowserPhone (real RTCPeerConnection media manager, synthetic
+  oscillator mic, real SIP signaling over wss://127.0.0.1:4200/sip) through
+  connect -> register -> call -> controls/recovery -> end cycles. The in-page
+  media relay (wss://127.0.0.1:4200/relay) bridges the library's offer/answer
+  SDP to a real SyntheticPeer in the SAME page so mute / hold / DTMF / ICE
+  restart operate on real WebRTC media.
+
+  The Node runner (harness.ts) only invokes `window.__runPhoneScenario` and
+  asserts on the returned plain-data result. No credentials, SDP, or candidate
+  strings ever leave the page in a result.
+
+  server.mjs FAILS (HTTP 503) when packages/browser/dist or packages/core/dist
+  is absent, so this page never silently serves stale/source code.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>sip-worker browser-phone harness</title>
+  <script type="importmap">{"imports":{"@sip-worker/core":"/assets/core/index.js"}}</script>
+</head>
+<body>
+  <pre id="status" style="font-family: monospace; color: #eee; background: #111; padding: 1rem;">loading built phone bundle…</pre>
+  <script type="module">
+    const harm = document.getElementById('status');
+    const bridge = (window.__phoneRun = {
+      booted: false,
+      errors: [],
+      pcs: [],
+      relayPeer: null,
+      relayPeerConfig: null,
+      relayConnected: false,
+    });
+    const fail = (msg, error) => {
+      harm.textContent = 'HARNESS_FATAL ' + msg + (error?.message ? ': ' + error.message : '');
+      throw error || new Error(msg);
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    // Capture uncaught errors so the default-clock regression (a detached
+    // setTimeout would throw `TypeError: Illegal invocation`) is observable even
+    // when the failure does not propagate through the awaited API.
+    window.addEventListener('error', (e) => { bridge.errors.push(String((e && e.message) || e.error || 'error')); });
+    window.addEventListener('unhandledrejection', (e) => {
+      const r = e && e.reason;
+      bridge.errors.push('unhandledrejection: ' + String((r && r.message) || r));
+    });
+
+    const { SyntheticPeer, makeSyntheticSource } = await import('/synthetic-peer.js');
+
+    let browserMod;
+    try {
+      browserMod = await import('/assets/browser/index.js');
+      harm.textContent = 'harness loaded: built bundle modules available';
+      bridge.booted = true;
+    } catch (error) {
+      fail('bundle-or-gate-error', error);
+    }
+    const { BrowserPhone, createBrowserMediaEnvironment } = browserMod;
+
+    const SIP_URL = 'wss://127.0.0.1:4200/sip';
+    const RELAY_URL = 'wss://127.0.0.1:4200/relay';
+
+    // -------------------------------------------------------------------------
+    // Relay: bridges SDP to a fresh SyntheticPeer per call (prepare-call), reuses
+    // it for re-INVITEs, closes it on end-call.
+    // -------------------------------------------------------------------------
+    const scenarioGathered = { library: new Set(), peer: new Set() };
+    const captureCandidates = (pc, side) => {
+      try {
+        pc.addEventListener('icecandidate', (e) => {
+          const m = e.candidate && e.candidate.candidate && e.candidate.candidate.match(/typ ([a-z]+)/);
+          if (m && m[1]) scenarioGathered[side].add(m[1]);
+        });
+      } catch {}
+    };
+
+    const relayWs = new WebSocket(RELAY_URL);
+    relayWs.onopen = () => {
+      bridge.relayConnected = true;
+      relayWs.send(JSON.stringify({ type: 'ready' }));
+    };
+    relayWs.onmessage = async (event) => {
+      let data;
+      try { data = JSON.parse(event.data); } catch { return; }
+      try {
+        if (data.type === 'prepare-call') {
+          try { bridge.relayPeer?.close(); } catch {}
+          const cfg = bridge.relayPeerConfig || {};
+          bridge.relayPeer = new SyntheticPeer({
+            ...cfg,
+            register: (pc) => captureCandidates(pc, 'peer'),
+          });
+          relayWs.send(JSON.stringify({ type: 'ready', id: data.id }));
+        } else if (data.type === 'offer') {
+          const sdp = await bridge.relayPeer.answerOffer(data.sdp);
+          relayWs.send(JSON.stringify({ type: 'answer', sdp, id: data.id }));
+        } else if (data.type === 'create-offer') {
+          const sdp = await bridge.relayPeer.createOffer();
+          relayWs.send(JSON.stringify({ type: 'offer', sdp, id: data.id }));
+        } else if (data.type === 'remote-answer') {
+          await bridge.relayPeer.applyAnswer(data.sdp);
+        } else if (data.type === 'end-call') {
+          try { bridge.relayPeer?.close(); } catch {}
+          bridge.relayPeer = null;
+        }
+      } catch (error) {
+        bridge.errors.push('relay: ' + (error && error.message ? error.message : String(error)));
+      }
+    };
+    relayWs.onclose = () => { bridge.relayConnected = false; };
+    relayWs.onerror = () => { bridge.errors.push('relay ws transport error'); };
+
+    // -------------------------------------------------------------------------
+    // Phone construction
+    // -------------------------------------------------------------------------
+    function createPhone(scenario) {
+      const base = createBrowserMediaEnvironment();
+      let micStream = null;
+      const env = {
+        mediaDevices: {
+          getUserMedia: async () => {
+            if (!micStream) throw new Error('no fake mic configured');
+            return micStream.stream;
+          },
+          enumerateDevices: async () => [
+            { deviceId: 'fake-mic', label: 'Synthetic Oscillator', groupId: 'g0', kind: 'audioinput' },
+            { deviceId: 'out-0', label: 'Output', groupId: 'g0', kind: 'audiooutput' },
+          ],
+          addEventListener: (type, listener, options) => base.mediaDevices.addEventListener(type, listener, options),
+          removeEventListener: (type, listener, options) => base.mediaDevices.removeEventListener(type, listener, options),
+        },
+        createPeerConnection: (cfg) => {
+          let finalCfg = cfg;
+          if (scenario.iceTransportPolicy) finalCfg = { ...cfg, iceTransportPolicy: scenario.iceTransportPolicy };
+          let pc;
+          try { pc = base.createPeerConnection(finalCfg); }
+          catch (error) {
+            bridge.errors.push('createPeerConnection: ' + (error && error.message ? error.message : String(error)));
+            throw error;
+          }
+          bridge.pcs.push(pc);
+          captureCandidates(pc, 'library');
+          return pc;
+        },
+        createMediaStream: (tracks) => base.createMediaStream(tracks),
+        getAudioCapabilities: () => base.getAudioCapabilities(),
+      };
+
+      const phone = new BrowserPhone({
+        options: {
+          signaling: { url: SIP_URL },
+          account: {
+            registrarUri: 'sip:example.com',
+            aor: 'sip:alice@example.com',
+            contact: 'sip:alice@example.com',
+            username: 'alice',
+            password: 'demo',
+          },
+          media: { holdDirection: 'sendonly', ...(scenario.media || {}) },
+          reconnect: scenario.reconnect,
+        },
+        factory: (url, protocols) => new WebSocket(url, protocols),
+        lifecycle: {
+          isOnline: () => navigator.onLine,
+          subscribe: (event, listener) => {
+            window.addEventListener(event, listener);
+            return () => window.removeEventListener(event, listener);
+          },
+        },
+        mediaEnvironment: env,
+      });
+
+      return {
+        phone,
+        env,
+        micStreamRef: { get: () => micStream, set: (s) => { micStream = s; } },
+      };
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+    async function waitFor(func, desc, timeoutMs = 20000) {
+      const start = Date.now();
+      for (;;) {
+        let v;
+        try { v = await func(); } catch { v = false; }
+        if (v) return v;
+        if (Date.now() - start > timeoutMs) {
+          const last = bridge.errors[bridge.errors.length - 1];
+          throw new Error('waitFor(' + desc + ') timed out' + (last ? ': ' + last : ''));
+        }
+        await sleep(100);
+      }
+    }
+
+    async function postControl(path, body) {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (!res.ok) throw new Error('control ' + path + ' -> ' + res.status);
+      return res.json();
+    }
+    async function getControl(path) {
+      const res = await fetch(path);
+      if (!res.ok) throw new Error('control ' + path + ' -> ' + res.status);
+      return res.json();
+    }
+
+    async function sampleInboundAudio(pc) {
+      const stats = await pc.getStats();
+      let bytes = 0;
+      let packets = 0;
+      stats.forEach((s) => {
+        if (s.type === 'inbound-rtp' && s.kind === 'audio') {
+          bytes = Math.max(bytes, s.bytesReceived ?? 0);
+          packets = Math.max(packets, s.packetsReceived ?? 0);
+        }
+      });
+      return { bytesReceived: bytes, packets };
+    }
+
+    async function waitForRtpGrowth(pc, timeoutMs = 15000) {
+      const baseline = await sampleInboundAudio(pc);
+      const start = Date.now();
+      for (;;) {
+        await sleep(400);
+        const s = await sampleInboundAudio(pc);
+        if (s.bytesReceived > baseline.bytesReceived && s.packets > baseline.packets) return { baseline, ...s };
+        if (Date.now() - start > timeoutMs) return null;
+      }
+    }
+
+    function collectSelectedTypes(pc) {
+      return new Promise((resolve) => {
+        pc.getStats().then((stats) => {
+          let pair = null;
+          stats.forEach((s) => {
+            if (s.type === 'candidate-pair' && s.state === 'succeeded' && (!pair || s.priority > pair.priority)) pair = s;
+          });
+          if (!pair) return resolve({ local: null, remote: null });
+          let local = null;
+          let remote = null;
+          stats.forEach((s) => {
+            if (s.type === 'local-candidate' && s.id === pair.localCandidateId) local = s.candidateType;
+            if (s.type === 'remote-candidate' && s.id === pair.remoteCandidateId) remote = s.candidateType;
+          });
+          resolve({ local, remote });
+        });
+      });
+    }
+
+    function normalizeScenario(opts) {
+      return {
+        scenario: opts.scenario ?? 'controls',
+        controls: opts.controls ?? {},
+        recovery: opts.recovery ?? null,
+        turn: opts.turn ?? null,
+        incoming: opts.incoming ?? 'none',
+        outgoingCancel: !!opts.outgoingCancel,
+        cycleIndex: opts.cycleIndex ?? 0,
+        freqA: opts.freqA ?? 523,
+        freqB: opts.freqB ?? 220,
+        target: opts.target ?? 'sip:bob@example.com',
+        reconnect: opts.reconnect,
+      };
+    }
+
+    async function finishPhone(ctx, result) {
+      if (!ctx || ctx._finished) return;
+      // Hang up first so the server tears the dialog down and the relay closes
+      // the peer BEFORE resource snapshots are taken.
+      try {
+        const active = ctx.phone.activeCall;
+        if (active && active.state === 'established') await active.hangup();
+      } catch {}
+      try { if (ctx.phone.connectionState === 'connected') await ctx.phone.unregister(); } catch {}
+      await sleep(100);
+      result.resourcesBeforeDispose = ctx.phone.diagnostics.resources();
+      try { await ctx.phone.dispose(); } catch {}
+      await sleep(150);
+      result.resourcesAfterCycle = ctx.phone.diagnostics.resources();
+      result.connectionStateAfterDispose = ctx.phone.connectionState;
+      ctx._finished = true;
+    }
+
+    // -------------------------------------------------------------------------
+    // Measurements
+    // -------------------------------------------------------------------------
+    async function runMuteMeasurements(call, result) {
+      const peerPc = bridge.relayPeer.pc;
+
+      // Calibrate the ACTIVE outbound byte rate (what the peer's inbound-rtp
+      // stats count as it receives the library's live audio).
+      const calStart = await sampleInboundAudio(peerPc);
+      await sleep(1200);
+      const calEnd = await sampleInboundAudio(peerPc);
+      const activeCalibration = Math.max(calEnd.bytesReceived - calStart.bytesReceived, 1);
+      result.activeThreshold = Math.max(Math.floor(activeCalibration * 0.4), 400);
+      result.mutedThreshold = Math.max(Math.floor(activeCalibration * 0.2), 150);
+
+      call.setMuted(true);
+      await waitFor(() => call.muted === true, 'muted', 5000);
+      // The track-disable transition is not instantaneous on every engine: after
+      // the flip, Firefox and WebKit keep shipping jitter-buffered audio. WebKit
+      // under sustained browser load has been measured still sending 1750B in a
+      // 1s window 2.5s after the flip; the stream only reaches its ~150B/s
+      // silence keepalive by ~4.5s. Settle PAST that worst case and take the
+      // LOWEST of two consecutive windows, so a late transient never inflates
+      // the muted rate. The threshold and assertion are untouched.
+      await sleep(4500);
+      const muteStartA = await sampleInboundAudio(peerPc);
+      await sleep(1000);
+      const muteEndA = await sampleInboundAudio(peerPc);
+      const muteStartB = await sampleInboundAudio(peerPc);
+      await sleep(1000);
+      const muteEndB = await sampleInboundAudio(peerPc);
+      result.outboundAudioAfterMute = Math.min(
+        Math.max(muteEndA.bytesReceived - muteStartA.bytesReceived, 0),
+        Math.max(muteEndB.bytesReceived - muteStartB.bytesReceived, 0),
+      );
+
+      call.setMuted(false);
+      await waitFor(() => call.muted === false, 'unmuted', 5000);
+      await sleep(700);
+      const unmuteStart = await sampleInboundAudio(peerPc);
+      await sleep(1500);
+      const unmuteEnd = await sampleInboundAudio(peerPc);
+      result.outboundAudioAfterUnmute = Math.max(unmuteEnd.bytesReceived - unmuteStart.bytesReceived, 0);
+    }
+
+    async function runHoldMeasurements(call, result) {
+      const peerPc = bridge.relayPeer.pc;
+      result.rtpEstablished = (await sampleInboundAudio(peerPc)).bytesReceived;
+      await call.hold();
+      await waitFor(() => call.holdState?.local === true, 'held', 20000);
+      const holdOffers = await getControl('/control/hold-offers');
+      result.holdOfferDirection = holdOffers.directions.at(-1) ?? null;
+      result.rtpBeforeResume = await sampleInboundAudio(peerPc);
+      result.peerConnectionStateBeforeResume = peerPc.connectionState;
+      result.peerIceStateBeforeResume = peerPc.iceConnectionState;
+      await call.resume();
+      await waitFor(() => call.holdState?.local === false, 'resumed', 20000);
+      await sleep(1500);
+      result.rtpAfterResume = await sampleInboundAudio(peerPc);
+      // Re-read the server-side re-INVITE log: the resume re-INVITE must flip the
+      // negotiated audio direction back to sendrecv after the sendonly hold.
+      result.holdDirectionAfterResume = (await getControl('/control/hold-offers')).directions.at(-1) ?? null;
+      result.peerConnectionStateAfterResume = peerPc.connectionState;
+      result.peerIceStateAfterResume = peerPc.iceConnectionState;
+    }
+
+    async function runDtmfMeasurements(call, libPc, result) {
+      await waitFor(() => {
+        const s = libPc.getSenders().find((s) => s.dtmf);
+        return s && s.dtmf.canInsertDTMF === true;
+      }, 'library dtmf available', 15000);
+      const sender = libPc.getSenders().find((s) => s.dtmf);
+      const dtmf = sender.dtmf;
+      const toneChanges = [];
+      dtmf.addEventListener('tonechange', () => { toneChanges.push(dtmf.toneBuffer); });
+      const peerDtmf = bridge.relayPeer.pc.getSenders().find((s) => s.dtmf)?.dtmf;
+      result.dtmfCanInsertLibrary = dtmf.canInsertDTMF === true;
+      result.dtmfCanInsertPeer = peerDtmf ? peerDtmf.canInsertDTMF === true : false;
+      result.telephoneEventInLibraryOffer = bridge.relayPeer.pc.remoteDescription?.sdp?.includes('telephone-event') ?? false;
+      result.telephoneEventInPeerAnswer = bridge.relayPeer.pc.localDescription?.sdp?.includes('telephone-event') ?? false;
+      await call.sendDtmf('1');
+      await sleep(200);
+      result.dtmfToneChanges = toneChanges;
+    }
+
+    async function runRecovery(ctx, call, scenario, result) {
+      const mode = scenario.recovery?.mode ?? 'fast';
+
+      if (mode === 'exhausted') {
+        // Deterministic exhausted path: the reconnect SUCCEEDS but the recovery
+        // re-REGISTER is refused, so the pipeline fails BOTH the connection and
+        // the registration (and therefore the call). Holding the next /sip
+        // upgrade open lets 'recovering' land before the refuse-register flag is
+        // armed, so the refused REGISTER is the recovery attempt, not the boot one.
+        await postControl('/control/delay-sip-connect-ms', { ms: 1200 });
+        await postControl('/control/drop-socket');
+        await waitFor(() => ctx.phone.connectionState === 'recovering', 'recovery armed', 8000);
+        await postControl('/control/refuse-register');
+        await waitFor(() => call.state === 'failed', 'call failed', 30000);
+        result.callState = call.state;
+        result.connectionState = ctx.phone.connectionState;
+        result.registrationState = ctx.phone.registrationState;
+        await postControl('/control/restore-wss');
+        return;
+      }
+
+      const beforeStatus = await getControl('/control/status');
+      result.callIdBeforeRecovery = beforeStatus.dialogs?.[0]?.callId ?? null;
+
+      if (mode === 'ice-restart') {
+        // Hold the next /sip upgrade open so 'offline' lands while the phone is
+        // `recovering` — that is what flips the ICE-restart branch.
+        await postControl('/control/delay-sip-connect-ms', { ms: 1200 });
+        await postControl('/control/drop-socket');
+        await waitFor(() => ctx.phone.connectionState === 'recovering', 'recovery armed', 8000);
+        window.dispatchEvent(new Event('offline'));
+        window.dispatchEvent(new Event('online'));
+      } else {
+        // fast: drop only the WSS; media stays up -> in-dialog OPTIONS validation
+        await postControl('/control/drop-socket');
+      }
+
+      await waitFor(() => ctx.phone.connectionState === 'connected', 'reconnected', 30000);
+      await waitFor(() => ctx.phone.registrationState === 'registered', 're-registered', 30000);
+      await waitFor(() => call.state === 'established' && call.signalingState === 'stable', 'call restored', 30000);
+
+      const libPc = bridge.pcs[bridge.pcs.length - 1] ?? null;
+      if (libPc) {
+        const growth = await waitForRtpGrowth(libPc, 20000);
+        result.rtpResumedAfterRecovery = !!growth;
+      } else {
+        result.rtpResumedAfterRecovery = false;
+      }
+
+      const afterStatus = await getControl('/control/status');
+      result.callIdAfterRecovery = afterStatus.dialogs?.[0]?.callId ?? null;
+      const regs = await getControl('/control/registrations');
+      result.registerCallIds = regs.records.map((r) => r.callId);
+      result.registerCSeqs = regs.records.map((r) => r.cseq);
+      const opt = await getControl('/control/in-dialog-options-count');
+      result.inDialogOptionsCount = opt.count;
+      const ice = await getControl('/control/ice-restarts');
+      result.iceRestartRecorded = ice.records.some((r) => r.iceRestart === true);
+      result.iceRestarts = ice.records;
+
+      result.connectionState = ctx.phone.connectionState;
+      result.registrationState = ctx.phone.registrationState;
+      result.callState = call.state;
+      result.signalingState = call.signalingState;
+    }
+
+    // -------------------------------------------------------------------------
+    // Scenario driver
+    // -------------------------------------------------------------------------
+    async function runPhoneScenario(opts) {
+      const scenario = normalizeScenario(opts);
+      const result = { cycleIndex: scenario.cycleIndex, scenario: scenario.scenario };
+      scenarioGathered.library.clear();
+      scenarioGathered.peer.clear();
+      let ctx = null;
+      let call = null;
+      let libPc = null;
+      let micSrc = null;
+      // Live TURN long-term credentials this scenario puts in play (the static
+      // pair for library + relay peer, plus any refreshed variants the provider
+      // hands out). The finished result must disclose NONE of them.
+      const turnCredentials = new Set();
+      try {
+        if (scenario.scenario === 'turn') {
+          const t = scenario.turn;
+          const libraryTurnUrl = 'turn:' + t.host + ':' + t.port;
+          const peerTurnUrl = 'turn:' + t.peerHost + ':' + t.port;
+          turnCredentials.add(t.username);
+          turnCredentials.add(t.password);
+          if (t.mode === 'refresh') {
+            let providerCalls = 0;
+            scenario.media = {
+              iceServerProvider: async ({ signal }) => {
+                providerCalls += 1;
+                return [{
+                  urls: libraryTurnUrl,
+                  username: t.username + '-' + providerCalls,
+                  credential: t.password + '-' + providerCalls,
+                }];
+              },
+              iceTransportPolicy: 'relay',
+            };
+            scenario.turnProviderCalls = () => providerCalls;
+            result.providerCalls = providerCalls;
+          } else {
+            scenario.media = {
+              iceServers: [{ urls: libraryTurnUrl, username: t.username, credential: t.password }],
+              iceTransportPolicy: 'relay',
+            };
+            result.providerCalls = 0;
+          }
+          scenario.iceTransportPolicy = 'relay';
+          bridge.relayPeerConfig = {
+            iceServers: [{ urls: peerTurnUrl, username: t.username, credential: t.password }],
+            iceTransportPolicy: 'relay',
+          };
+        }
+
+        ctx = createPhone(scenario);
+        micSrc = makeSyntheticSource(scenario.freqB);
+        ctx.micStreamRef.set(micSrc);
+
+        await ctx.phone.connect();
+        await waitFor(() => ctx.phone.connectionState === 'connected', 'phone connected', 20000);
+        await ctx.phone.register();
+        await waitFor(() => ctx.phone.registrationState === 'registered', 'phone registered', 20000);
+        await waitFor(() => bridge.relayConnected === true, 'relay connected', 20000);
+        result.connectionState = ctx.phone.connectionState;
+        result.registrationState = ctx.phone.registrationState;
+
+        if (scenario.incoming !== 'none') {
+          await runIncoming(ctx, scenario, result);
+          await finishPhone(ctx, result);
+          return result;
+        }
+
+        if (scenario.outgoingCancel) {
+          await postControl('/control/delay-invite-ms', { ms: 8000 });
+          const out = ctx.phone.createCall(scenario.target);
+          // start() only settles once media connects, so DON'T await it before
+          // observing the 'establishing' phase; the server holds the INVITE
+          // response open so cancel() deterministically targets an in-flight call.
+          const startP = out.start();
+          await waitFor(() => out.state === 'establishing', 'establishing', 10000);
+          result.callState = out.state;
+          await out.cancel();
+          await waitFor(() => out.state === 'terminated', 'cancelled', 10000);
+          result.callState = out.state;
+          await startP.catch(() => {});
+          await finishPhone(ctx, result);
+          return result;
+        }
+
+        call = ctx.phone.createCall(scenario.target);
+        await call.start();
+        await waitFor(() => call.state === 'established', 'call established', 20000);
+        libPc = bridge.pcs[bridge.pcs.length - 1] ?? null;
+        await waitFor(() => libPc && libPc.connectionState === 'connected', 'library pc connected', 20000);
+        await waitFor(() => bridge.relayPeer && bridge.relayPeer.pc && bridge.relayPeer.pc.connectionState === 'connected', 'peer pc connected', 20000);
+        await waitFor(() => call.signalingState === 'stable', 'signaling stable', 20000);
+        result.callState = call.state;
+        result.signalingState = call.signalingState;
+
+        if (scenario.scenario === 'controls' && scenario.controls.mute) await runMuteMeasurements(call, result);
+        if (scenario.scenario === 'controls' && scenario.controls.hold) await runHoldMeasurements(call, result);
+        if (scenario.scenario === 'controls' && scenario.controls.dtmf) await runDtmfMeasurements(call, libPc, result);
+
+        if (scenario.scenario === 'turn') {
+          await sleep(1000);
+          const growth = await waitForRtpGrowth(bridge.relayPeer.pc, 15000);
+          result.peerRtpGrew = !!growth;
+          result.librarySelectedTypes = await collectSelectedTypes(libPc);
+          result.peerSelectedTypes = await collectSelectedTypes(bridge.relayPeer.pc);
+          result.gatheredCandidateTypes = { library: [...scenarioGathered.library].sort(), peer: [...scenarioGathered.peer].sort() };
+          if (scenario.turn.mode === 'refresh') {
+            await runRecovery(ctx, call, { recovery: { mode: 'ice-restart' } }, result);
+            await sleep(1000);
+            const growth2 = await waitForRtpGrowth(bridge.relayPeer.pc, 15000);
+            result.peerRtpGrewAfterRestart = !!growth2;
+            result.librarySelectedTypesAfterRestart = await collectSelectedTypes(libPc);
+            result.peerSelectedTypesAfterRestart = await collectSelectedTypes(bridge.relayPeer.pc);
+            result.providerCalls = scenario.turnProviderCalls();
+          }
+        }
+
+        if (scenario.scenario === 'recovery') {
+          await runRecovery(ctx, call, scenario, result);
+        }
+
+        if (scenario.scenario === 'lifecycle') {
+          await runRecovery(ctx, call, { recovery: { mode: 'fast' } }, result);
+        }
+
+        await finishPhone(ctx, result);
+        if (scenario.scenario === 'turn') {
+          // Real credential-leak scan: serialize the finished result and prove it
+          // discloses NONE of the live TURN credentials — the static pair, nor any
+          // refreshed variant the provider served during the run.
+          const t = scenario.turn;
+          if (t.mode === 'refresh') {
+            const n = typeof result.providerCalls === 'number' ? result.providerCalls : 0;
+            for (let i = 1; i <= n; i += 1) {
+              turnCredentials.add(t.username + '-' + i);
+              turnCredentials.add(t.password + '-' + i);
+            }
+          }
+          const serialized = JSON.stringify(result);
+          let leaked = false;
+          for (const cred of turnCredentials) {
+            if (cred && serialized.includes(cred)) { leaked = true; break; }
+          }
+          result.credentialDisclosed = leaked;
+        }
+        return result;
+      } catch (error) {
+        bridge.errors.push(error);
+        result.error = { name: error.name || 'Error', message: error.message || String(error) };
+        return result;
+      } finally {
+        try { if (call && call.state === 'established') await call.hangup(); } catch {}
+        try { await finishPhone(ctx, result); } catch {}
+        if (micSrc) { try { micSrc.stop(); } catch {} }
+      }
+    }
+
+    async function runIncoming(ctx, scenario, result) {
+      const incomingPromise = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('no incoming call received')), 15000);
+        ctx.phone.on('incomingCall', ({ call }) => { clearTimeout(timer); resolve(call); });
+      });
+      await postControl('/control/incoming-call');
+      const incoming = await incomingPromise;
+
+      if (scenario.incoming === 'accept') {
+        await incoming.answer();
+        await waitFor(() => incoming.state === 'established', 'incoming established', 20000);
+        const libPc = bridge.pcs[bridge.pcs.length - 1] ?? null;
+        await waitFor(() => libPc && libPc.connectionState === 'connected', 'incoming library pc connected', 20000);
+        result.callState = incoming.state;
+        result.connectionState = ctx.phone.connectionState;
+        await postControl('/control/remote-bye');
+        await waitFor(() => incoming.state === 'terminated', 'terminated', 20000);
+        result.callState = incoming.state;
+      } else if (scenario.incoming === 'reject') {
+        await incoming.reject(486, 'Busy Here');
+        await waitFor(() => incoming.state === 'failed', 'incoming failed', 20000);
+        result.callState = incoming.state;
+        result.connectionState = ctx.phone.connectionState;
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Clock probe (Task 15 regression: no injected clock)
+    // -------------------------------------------------------------------------
+    async function runClockProbe() {
+      const result = { scenario: 'clock-probe' };
+      let ctx = null;
+      let micSrc = null;
+      try {
+        // Deliberately NO injected clock. If the default clock ever regresses to
+        // a detached `setTimeout`, the first scheduled timer throws
+        // `TypeError: Illegal invocation` on a native-function receiver.
+        ctx = createPhone({ scenario: 'clock-probe', media: {}, reconnect: undefined });
+        micSrc = makeSyntheticSource(220);
+        ctx.micStreamRef.set(micSrc);
+        await ctx.phone.connect();
+        await waitFor(() => ctx.phone.connectionState === 'connected', 'connected', 20000);
+        await ctx.phone.register();
+        await waitFor(() => ctx.phone.registrationState === 'registered', 'registered', 20000);
+        // The default SIP OPTIONS liveness schedules its first probe on the
+        // default clock; proving that probe actually arrives proves the default
+        // clock fired without throwing.
+        await waitFor(async () => (await getControl('/control/options-count')).count >= 1, 'liveness options', 45000);
+        result.optionsCount = (await getControl('/control/options-count')).count;
+        result.connectionState = ctx.phone.connectionState;
+        result.registrationState = ctx.phone.registrationState;
+        await finishPhone(ctx, result);
+      } catch (error) {
+        bridge.errors.push(error);
+        result.error = { name: error.name || 'Error', message: error.message || String(error) };
+      } finally {
+        try { await finishPhone(ctx, result); } catch {}
+        if (micSrc) { try { micSrc.stop(); } catch {} }
+      }
+      result.uncaughtErrors = bridge.errors.slice();
+      return result;
+    }
+
+    // -------------------------------------------------------------------------
+    // Public bridge
+    // -------------------------------------------------------------------------
+    window.__runPhoneScenario = (opts) => runPhoneScenario(opts);
+    window.__runClockProbe = () => runClockProbe();
+    bridge.resourceState = () => ({
+      openPcs: bridge.pcs.filter((p) => p.connectionState !== 'closed').length,
+      errors: bridge.errors.length,
+    });
+
+    // Shipping-Safari phone acceptance gate. Runs THREE full real cycles of the
+    // BUILT library — controls (mute/hold/DTMF), fast WSS-loss recovery, and a
+    // real offline/online ICE-restart recovery — and returns ONLY plain,
+    // non-sensitive boolean data. The checks map is FLAT (safari-runner asserts
+    // every value === true).
+    const zeroClean = (res) => !!res && !!res.resourcesAfterCycle && Object.values(res.resourcesAfterCycle).every((v) => v === 0);
+    window.runPhoneAcceptance = async () => {
+      try {
+        const r = await runPhoneScenario({
+          scenario: 'controls',
+          controls: { mute: true, hold: true, dtmf: true },
+          freqA: 523,
+          freqB: 220,
+        });
+        const controlsChecks = {
+          connected: r.connectionState === 'connected',
+          registered: r.registrationState === 'registered',
+          callEstablished: r.callState === 'established',
+          muted: typeof r.outboundAudioAfterMute === 'number' && r.outboundAudioAfterMute < r.mutedThreshold,
+          unmuted: typeof r.outboundAudioAfterUnmute === 'number' && r.outboundAudioAfterUnmute > r.activeThreshold,
+          holdDirection: r.holdOfferDirection === 'sendonly',
+          holdResumed: r.holdDirectionAfterResume === 'sendrecv',
+          dtmf: r.dtmfToneChanges?.at(-1) === '',
+          cleanup: zeroClean(r),
+        };
+        const controlsPassed = !r.error && Object.values(controlsChecks).every(Boolean);
+        if (!controlsPassed) {
+          return {
+            passed: false,
+            checks: controlsChecks,
+            error: r.error || null,
+            connectionState: r.connectionState ?? null,
+            callState: r.callState ?? null,
+          };
+        }
+
+        // Recovery leg, mirroring recovery.spec.ts: reset the server record so
+        // Call-ID/CSeq/OPTIONS/ICE-restart proof is attributable to THIS cycle.
+        await postControl('/control/reset');
+        const fast = await runPhoneScenario({
+          scenario: 'recovery',
+          recovery: { mode: 'fast' },
+          freqA: 523,
+          freqB: 220,
+        });
+        const fastChecks = {
+          fastCallRestored: fast.callState === 'established',
+          fastSignalingStable: fast.signalingState === 'stable',
+          fastCallIdSurvived: fast.callIdAfterRecovery === fast.callIdBeforeRecovery,
+          fastOptionsValidated: (fast.inDialogOptionsCount ?? 0) >= 1,
+          fastRtpResumed: fast.rtpResumedAfterRecovery === true,
+          fastRegisterCallIdReused: (fast.registerCallIds?.[1] ?? null) === (fast.registerCallIds?.[0] ?? null),
+          fastRegisterCSeqIncreased: (fast.registerCSeqs?.[1] ?? 0) > (fast.registerCSeqs?.[0] ?? 0),
+          fastCleanup: zeroClean(fast),
+        };
+        const fastPassed = !fast.error && Object.values(fastChecks).every(Boolean);
+
+        await postControl('/control/reset');
+        const ice = await runPhoneScenario({
+          scenario: 'recovery',
+          recovery: { mode: 'ice-restart' },
+          freqA: 523,
+          freqB: 220,
+        });
+        const iceChecks = {
+          iceCallRestored: ice.callState === 'established',
+          iceSignalingStable: ice.signalingState === 'stable',
+          iceCallIdSurvived: ice.callIdAfterRecovery === ice.callIdBeforeRecovery,
+          iceRestartRecorded: ice.iceRestartRecorded === true,
+          iceRtpResumed: ice.rtpResumedAfterRecovery === true,
+          iceRegisterCallIdReused: (ice.registerCallIds?.[1] ?? null) === (ice.registerCallIds?.[0] ?? null),
+          iceRegisterCSeqIncreased: (ice.registerCSeqs?.[1] ?? 0) > (ice.registerCSeqs?.[0] ?? 0),
+          iceCleanup: zeroClean(ice),
+        };
+        const icePassed = !ice.error && Object.values(iceChecks).every(Boolean);
+
+        const checks = { ...controlsChecks, ...fastChecks, ...iceChecks };
+        const passed = controlsPassed && fastPassed && icePassed;
+        const err = r.error || fast.error || ice.error || null;
+        return {
+          passed,
+          checks,
+          error: err,
+          connectionState: (r.connectionState ?? fast.connectionState ?? ice.connectionState) ?? null,
+          callState: (r.callState ?? fast.callState ?? ice.callState) ?? null,
+        };
+      } catch (error) {
+        return {
+          passed: false,
+          checks: {},
+          error: { name: error.name || 'Error', message: error.message || String(error) },
+          connectionState: null,
+          callState: null,
+        };
+      }
+    };
+  </script>
+</body>
+</html>

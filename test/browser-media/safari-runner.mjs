@@ -1,84 +1,143 @@
 #!/usr/bin/env node
 /**
- * Shipping-Safari media acceptance gate (macOS). Runs ONLY against the
- * BUILT/PACKED browser package served over a real HTTPS secure context.
+ * Shipping-Safari acceptance gate (macOS). Runs ONLY against the BUILT/PACKED
+ * browser package served over a real HTTPS secure context.
  *
- * The library's media acceptance in Safari is a MANDATORY release prerequisite.
- * This runner:
- *   1. serves the harness `index.html` + built bundles over a self-signed HTTPS
- *      server (Safari requires a true secure context — unlike Playwright it will
- *      NOT grant getUserMedia/AudioContext over plain HTTP), reusing the exact
- *      built-only handler from server.mjs so the 503-when-artifact-absent
- *      contract is inherited,
- *   2. creates a Safari WebDriver session via Node's built-in `fetch` against the
+ * Gates BOTH the v0.5 media acceptance AND the v0.7 phone controls/recovery
+ * acceptance — both MANDATORY release prerequisites. This runner:
+ *   1. mints a per-run local CA + leaf (openssl, never committed),
+ *   2. serves the browser-media harness over HTTPS (8443) AND the browser-phone
+ *      harness over HTTPS (8444) with that same leaf, plus the SIP WSS (4200)
+ *      carrying `/sip` + `/relay` — reusing the exact built-only handlers from
+ *      server.mjs and browser-phone/server.mjs so the 503-when-artifact-absent
+ *      contract is inherited (Safari requires a true secure context; unlike
+ *      Playwright it will NOT grant getUserMedia/AudioContext over plain HTTP),
+ *   3. imports the ephemeral CA into a temporary login keychain on macOS
+ *      (trusted as root) so Safari accepts the leaf on 127.0.0.1/localhost;
+ *      the keychain is deleted in `finally` and again by the workflow's
+ *      `if: always()` step,
+ *   4. creates a Safari WebDriver session via Node's built-in `fetch` against the
  *      W3C WebDriver /session endpoint of a locally-started `safaridriver`,
- *   3. navigates to the HTTPS harness, waits for it to boot the built bundle, and
- *      calls `window.runMediaAcceptance()`, asserting the structured result
- *      {passed, checks, ...}, and records Safari/OS versions,
- *   4. deletes the WebDriver session in `finally` (ALWAYS), terminates the
+ *   5. navigates to each HTTPS harness, waits for it to boot the built bundle,
+ *      and calls `window.runMediaAcceptance()` then `window.runPhoneAcceptance()`,
+ *      asserting the structured result {passed, checks, ...}, and records
+ *      Safari/OS versions,
+ *   6. deletes the WebDriver session in `finally` (ALWAYS), terminates the
  *      driver, and exits non-zero if Safari is unavailable, cannot launch, or any
- *      media check fails. There is NO skip path and NO `continue-on-error`.
+ *      media OR phone check fails. There is NO skip path and NO `continue-on-error`.
  *
  * Env:
  *   SAFARIDRIVER_URL   default http://localhost:4444
  *   SAFARIDRIVER_BIN   default safaridriver (searched on PATH)
  *   SAFARIDRIVER_PORT  default 4444 (only used when starting the driver)
- *   HARNESS_PORT       default 8443 (self-signed HTTPS harness)
+ *   HARNESS_PORT       default 8443 (browser-media HTTPS harness)
+ *   PHONE_HARNESS_PORT default 8444 (browser-phone HTTPS harness)
+ *   SIP_WSS_PORT       default 4200  (WSS for /sip + /relay)
  *   HARNESS_URL        default https://localhost:<HARNESS_PORT>/index.html
+ *   PHONE_HARNESS_URL  default https://localhost:<PHONE_HARNESS_PORT>/index.html
+ *   KEYCHAIN_DIR       default os.tmpdir() (where the temp keychain is created)
+ *   KEYCHAIN_NAME      default sipw-safari.keychain-db
+ *   KEYCHAIN_PASS      default per-run random (only used inside this process)
  */
 
 import { spawn, execFileSync } from 'node:child_process';
 import https from 'node:https';
-import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+
+import { createFakeServer, createPhoneHandler, startSipWss, makeCertBundle } from '../browser-phone/server.mjs';
+import { handler as mediaHandler } from './server.mjs';
 
 const DRIVER_URL = process.env.SAFARIDRIVER_URL || 'http://localhost:4444';
 const DRIVER_BIN = process.env.SAFARIDRIVER_BIN || 'safaridriver';
 const DRIVER_PORT = Number(process.env.SAFARIDRIVER_PORT || 4444);
 const HARNESS_PORT = Number(process.env.HARNESS_PORT || 8443);
-const HARNESS_URL = process.env.HARNESS_URL || `https://localhost:${HARNESS_PORT}/index.html`;
-const CERT_CN = 'localhost';
+const PHONE_HARNESS_PORT = Number(process.env.PHONE_HARNESS_PORT || 8444);
+const SIP_WSS_PORT = Number(process.env.SIP_WSS_PORT || 4200);
+const MEDIA_HARNESS_URL = process.env.HARNESS_URL || `https://localhost:${HARNESS_PORT}/index.html`;
+const PHONE_HARNESS_URL = process.env.PHONE_HARNESS_URL || `https://localhost:${PHONE_HARNESS_PORT}/index.html`;
+const KEYCHAIN_DIR = process.env.KEYCHAIN_DIR || tmpdir();
+const KEYCHAIN_NAME = process.env.KEYCHAIN_NAME || 'sipw-safari.keychain-db';
+const KEYCHAIN_PATH = join(KEYCHAIN_DIR, KEYCHAIN_NAME);
+const KEYCHAIN_PASS = process.env.KEYCHAIN_PASS || `sipw-${process.pid}-${Math.random().toString(36).slice(2)}`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const errors = [];
 
 let sessionId = null;
 let driver = null;
-let httpsServer = null;
-let certFiles = null;
+let httpsServers = [];
+let sipWss = null;
+let certs = null;
 
 // --- TLS ------------------------------------------------------------------
-// Safari needs a real secure context. The macOS runner has `openssl`; mint a
-// throwaway loopback cert (CN=localhost + IP:127.0.0.1 SAN). Node's runner-side
-// fetch is pointed at the SAME localhost the cert names, and the macOS workflow
-// runs it with NODE_TLS_REJECT_UNAUTHORIZED=0 (self-signed, throwaway, never in
-// the tree). No credentials ever pass over this link.
-function makeSelfSignedCert() {
-  const d = tmpdir();
-  const key = join(d, `sipw-${process.pid}-key.pem`);
-  const crt = join(d, `sipw-${process.pid}-crt.pem`);
-  execFileSync('openssl', [
-    'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
-    '-keyout', key, '-out', crt, '-days', '1',
-    '-subj', `/CN=${CERT_CN}`,
-    '-addext', 'subjectAltName=IP:127.0.0.1,DNS:localhost',
-  ], { stdio: 'ignore' });
-  return { key, crt };
+// Safari needs a real secure context for getusermedia/AudioContext and for WSS
+// (the SIP link is a real `wss://` per-run TLS service). The macOS runner has
+// `openssl`; mint a throwaway local CA + leaf (CN=localhost + IP:127.0.0.1 SAN)
+// covering BOTH HTTPS harnesses and the SIP WSS. The CA is imported into a
+// temporary login keychain below; Node's runner-side fetch is pointed at the
+// SAME localhost the cert names, and the macOS workflow runs it with
+// NODE_TLS_REJECT_UNAUTHORIZED=0 (throwaway, never in the tree). No credentials
+// ever pass over this link.
+
+function listen(server, port) {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', resolve);
+  });
 }
 
-async function startHttpsHarness() {
-  const { handler } = await import('./server.mjs');
-  certFiles = makeSelfSignedCert();
-  httpsServer = https.createServer(
-    { key: readFileSync(certFiles.key), cert: readFileSync(certFiles.crt) },
-    handler,
-  );
-  await new Promise((resolve, reject) => {
-    httpsServer.once('error', reject);
-    httpsServer.listen(HARNESS_PORT, '127.0.0.1', resolve);
-  });
+async function startHarnessServers() {
+  certs = await makeCertBundle(KEYCHAIN_DIR);
+  const tlsOpts = { key: readFileSync(certs.leafKey), cert: readFileSync(certs.leafCrt) };
+  const fakeServer = createFakeServer();
+
+  const mediaServer = https.createServer(tlsOpts, mediaHandler);
+  const phoneServer = https.createServer(tlsOpts, createPhoneHandler(fakeServer));
+  await Promise.all([
+    listen(mediaServer, HARNESS_PORT),
+    listen(phoneServer, PHONE_HARNESS_PORT),
+  ]);
+  httpsServers = [mediaServer, phoneServer];
+
+  // SIP WSS carrying /sip (signaling) + /relay (in-page media bridge). The same
+  // fake server backs the phone HTTPS control plane, so the runner's page can
+  // arm/drop/record the exact same controls the Playwright gate uses.
+  sipWss = await startSipWss(fakeServer, { bundle: certs, port: SIP_WSS_PORT });
+
+  console.log(`Safari harness: media https://localhost:${HARNESS_PORT}/  phone https://localhost:${PHONE_HARNESS_PORT}/  wss://127.0.0.1:${SIP_WSS_PORT}/sip`);
+}
+
+// --- macOS keychain trust --------------------------------------------------
+async function setupKeychainTrust() {
+  if (process.platform !== 'darwin') {
+    console.log('NOT macOS: skipping keychain import (the Safari job is macOS-only; this run cannot attest Safari)');
+    return;
+  }
+  const login = `${process.env.HOME}/Library/Keychains/login.keychain-db`;
+  execFileSync('security', ['create-keychain', '-p', KEYCHAIN_PASS, KEYCHAIN_PATH], { stdio: 'ignore' });
+  execFileSync('security', ['unlock-keychain', '-p', KEYCHAIN_PASS, KEYCHAIN_PATH], { stdio: 'ignore' });
+  // Put the temp keychain first in the user search list so Safari consults it.
+  execFileSync('security', ['list-keychains', '-d', 'user', '-s', KEYCHAIN_PATH, login], { stdio: 'ignore' });
+  execFileSync('security', ['import', certs.caCrt, '-k', KEYCHAIN_PATH, '-t', 'cert', '-A'], { stdio: 'ignore' });
+  // Allow Safari/WebKit to read the imported key without an interactive prompt.
+  execFileSync('security', ['set-key-partition-list', '-S', 'apple-tool:,apple:', '-k', KEYCHAIN_PASS, KEYCHAIN_PATH], { stdio: 'ignore' });
+  // Trust the ephemeral CA as a root anchor in the user domain.
+  execFileSync('security', ['add-trusted-cert', '-r', 'trustRoot', '-k', KEYCHAIN_PATH, certs.caCrt], { stdio: 'ignore' });
+  execFileSync('security', ['default-keychain', '-s', KEYCHAIN_PATH], { stdio: 'ignore' });
+  console.log('Imported ephemeral CA into temp keychain', KEYCHAIN_PATH);
+}
+
+function teardownKeychainTrust() {
+  if (process.platform !== 'darwin') return;
+  try {
+    execFileSync('security', ['default-keychain', '-s', `${process.env.HOME}/Library/Keychains/login.keychain-db`], { stdio: 'ignore' });
+  } catch {}
+  try {
+    execFileSync('security', ['delete-keychain', KEYCHAIN_PATH], { stdio: 'ignore' });
+  } catch {}
+  console.log('Removed temp keychain', KEYCHAIN_PATH);
 }
 
 // --- W3C WebDriver over Node fetch ----------------------------------------
@@ -111,8 +170,13 @@ async function startDriver() {
   });
   // Surface driver stderr to aid CI diagnosis if it fails to start.
   driver.stderr.on('data', (d) => process.stderr.write(`[safaridriver] ${d}`));
+  let spawnError = null;
+  driver.once('error', (e) => { spawnError = e; });
   const deadline = Date.now() + 20000;
   while (Date.now() < deadline) {
+    if (spawnError) {
+      throw new Error(`safaridriver failed to spawn: ${spawnError.message}; Safari unavailable on this runner`);
+    }
     if (driver.exitCode !== null) {
       throw new Error(`safaridriver exited early (code ${driver.exitCode}); Safari unavailable on this runner`);
     }
@@ -140,8 +204,7 @@ async function driverExited() {
 }
 
 // --- acceptance -------------------------------------------------------------
-async function navigateAndRun() {
-  // 2. create a Safari session
+async function createSafariSession() {
   const created = await wdFetch(`${DRIVER_URL}/session`, {
     method: 'POST',
     body: { capabilities: { alwaysMatch: { browserName: 'Safari' } } },
@@ -158,32 +221,60 @@ async function navigateAndRun() {
   const platformName = caps.platformName || 'unknown';
   console.log(`Safari session: browser=${browserVersion} os=${platformVersion} platform=${platformName}`);
   if (browserVersion === 'unknown') throw new Error('Safaridriver returned no browserVersion; cannot attest which Safari ran');
+}
 
-  // 3. navigate to the HTTPS harness
-  await wdFetch(`${DRIVER_URL}/session/${sessionId}/url`, { method: 'POST', body: { url: HARNESS_URL } });
-
-  // 4. wait for the built bundle to boot, then call the acceptance function
+async function navigateTo(url, bootScript, bootFailMsg) {
+  await wdFetch(`${DRIVER_URL}/session/${sessionId}/url`, { method: 'POST', body: { url } });
   const booted = await poll(30000, async () => {
-    const v = await wdExecute('return window.__webRtcMediaRun && window.__webRtcMediaRun.booted === true');
+    const v = await wdExecute(`return ${bootScript}`);
     return v === true;
-  }, 'harness did not boot the built bundle');
-  if (!booted) throw new Error('harness did not boot the built browser bundle over HTTPS');
+  }, bootFailMsg);
+  if (!booted) throw new Error(bootFailMsg);
+}
 
-  const result = await poll(120000, async () => {
+function assertAcceptance(result, gate) {
+  if (!result || result.passed !== true) {
+    throw new Error(`Safari ${gate} acceptance FAILED: ${JSON.stringify(result)}`);
+  }
+  const names = Object.keys(result.checks || {});
+  if (names.length === 0) throw new Error(`${gate} acceptance returned no checks`);
+  for (const name of names) {
+    if (result.checks[name] !== true) throw new Error(`${gate} check failed: ${name}`);
+  }
+  console.log(`Safari ${gate} acceptance PASSED. Verified: ${names.join(', ')}`);
+}
+
+async function navigateAndRun() {
+  await createSafariSession();
+
+  // 1. browser-media acceptance (v0.5): direct host path, real two-way RTP.
+  await navigateTo(
+    MEDIA_HARNESS_URL,
+    'window.__webRtcMediaRun && window.__webRtcMediaRun.booted === true',
+    'browser-media harness did not boot the built bundle over HTTPS',
+  );
+  const mediaResult = await poll(120000, async () => {
     const r = await wdExecute('return window.runMediaAcceptance().then((x) => ({ __done: true, x }))');
     return r?.__done ? r.x : null;
   }, 'runMediaAcceptance did not complete', true);
+  console.log('runMediaAcceptance result:', JSON.stringify(mediaResult));
+  assertAcceptance(mediaResult, 'media');
 
-  console.log('runMediaAcceptance result:', JSON.stringify(result));
-  if (!result || result.passed !== true) {
-    throw new Error(`Safari media acceptance FAILED: ${JSON.stringify(result)}`);
-  }
-  const names = Object.keys(result.checks || {});
-  if (names.length === 0) throw new Error('runMediaAcceptance returned no checks');
-  for (const name of names) {
-    if (result.checks[name] !== true) throw new Error(`media check failed: ${name}`);
-  }
-  console.log(`Safari media acceptance PASSED. Verified: ${names.join(', ')}`);
+  // 2. browser-phone acceptance (v0.7): connect -> register -> real call ->
+  //    mute / hold / DTMF -> cleanup, plus fast WSS-loss recovery and a real
+  //    offline/online ICE-restart recovery, of the BUILT library over the real
+  //    WSS. Three full cycles on Safari can run past 180s, so allow 5 minutes.
+  await navigateTo(
+    PHONE_HARNESS_URL,
+    'window.__phoneRun && window.__phoneRun.booted === true',
+    'browser-phone harness did not boot the built bundle over HTTPS',
+  );
+  const phoneResult = await poll(300000, async () => {
+    const r = await wdExecute('return window.runPhoneAcceptance().then((x) => ({ __done: true, x }))');
+    return r?.__done ? r.x : null;
+  }, 'runPhoneAcceptance did not complete', true);
+  console.log('runPhoneAcceptance result:', JSON.stringify(phoneResult));
+  assertAcceptance(phoneResult, 'phone');
 }
 
 async function poll(timeoutMs, fn, failMsg, allowNull = false) {
@@ -199,9 +290,18 @@ async function poll(timeoutMs, fn, failMsg, allowNull = false) {
 }
 
 // --- main ------------------------------------------------------------------
+// `server.close()` waits for lingering connections; bound every close so a
+// stuck relay/keep-alive socket can never hang the gate after the run.
+const closeWithTimeout = (fn, ms = 5000) =>
+  new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    Promise.resolve(fn()).then(() => { clearTimeout(t); resolve(); });
+  });
+
 async function main() {
-  await startHttpsHarness();
+  await startHarnessServers();
   try {
+    await setupKeychainTrust();
     await startDriver();
     await navigateAndRun();
     const exit = await driverExited();
@@ -211,8 +311,19 @@ async function main() {
   } finally {
     if (sessionId) await wdDelete(`${DRIVER_URL}/session/${sessionId}`);
     stopDriver();
-    if (httpsServer) await new Promise((r) => httpsServer.close(r));
-    if (certFiles) { try { unlinkSync(certFiles.key); } catch {} try { unlinkSync(certFiles.crt); } catch {} }
+    teardownKeychainTrust();
+    if (sipWss) await closeWithTimeout(() => sipWss.close());
+    for (const s of httpsServers) {
+      if (s) await closeWithTimeout(() => new Promise((r) => s.close(r)));
+    }
+    if (certs) {
+      for (const f of [certs.leafKey, certs.leafCrt, certs.caKey, certs.caCrt]) {
+        try { unlinkSync(f); } catch {}
+      }
+      for (const f of ['leaf.csr', 'leaf.ext', 'ca.srl']) {
+        try { unlinkSync(join(certs.certDir, f)); } catch {}
+      }
+    }
   }
   if (errors.length) { process.stderr.write(`Safari gate FAILED: ${errors.join(' | ')}\n`); process.exit(1); }
   console.log('Safari gate PASSED.');
