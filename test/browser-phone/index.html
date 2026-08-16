@@ -33,7 +33,11 @@
       relayPeer: null,
       relayPeerConfig: null,
       relayConnected: false,
+      // Which scenario phase is currently running; the Safari runner reads this
+      // when an acceptance hangs so the stuck phase is identifiable.
+      stage: null,
     });
+    const setStage = (s) => { bridge.stage = s; };
     const fail = (msg, error) => {
       harm.textContent = 'HARNESS_FATAL ' + msg + (error?.message ? ': ' + error.message : '');
       throw error || new Error(msg);
@@ -629,8 +633,10 @@
         ctx.micStreamRef.set(micSrc);
         bridge._micContext = micSrc.context; // diagnostic: source AudioContext state
 
+        setStage('connect');
         await ctx.phone.connect();
         await waitFor(() => ctx.phone.connectionState === 'connected', 'phone connected', 20000);
+        setStage('register');
         await ctx.phone.register();
         await waitFor(() => ctx.phone.registrationState === 'registered', 'phone registered', 20000);
         await waitFor(() => bridge.relayConnected === true, 'relay connected', 20000);
@@ -660,6 +666,7 @@
           return result;
         }
 
+        setStage('call');
         call = ctx.phone.createCall(scenario.target);
         await call.start();
         await waitFor(() => call.state === 'established', 'call established', 20000);
@@ -670,10 +677,11 @@
         result.callState = call.state;
         result.signalingState = call.signalingState;
 
-        if (scenario.scenario === 'controls' && scenario.controls.mute) await runMuteMeasurements(call, result);
-        if (scenario.scenario === 'controls' && scenario.controls.hold) await runHoldMeasurements(call, result);
-        if (scenario.scenario === 'controls' && scenario.controls.dtmf) await runDtmfMeasurements(call, libPc, result);
+        if (scenario.scenario === 'controls' && scenario.controls.mute) { setStage('mute'); await runMuteMeasurements(call, result); }
+        if (scenario.scenario === 'controls' && scenario.controls.hold) { setStage('hold'); await runHoldMeasurements(call, result); }
+        if (scenario.scenario === 'controls' && scenario.controls.dtmf) { setStage('dtmf'); await runDtmfMeasurements(call, libPc, result); }
         if (scenario.scenario === 'controls' && scenario.peerReinvite) {
+          setStage('reinvite');
           await runPeerReinvite(ctx, call, libPc, scenario, result);
         }
 
@@ -708,13 +716,16 @@
         }
 
         if (scenario.scenario === 'recovery') {
+          setStage('recovery');
           await runRecovery(ctx, call, scenario, result);
         }
 
         if (scenario.scenario === 'lifecycle') {
+          setStage('lifecycle');
           await runRecovery(ctx, call, { recovery: { mode: 'fast' } }, result);
         }
 
+        setStage('finish');
         await finishPhone(ctx, result);
         if (scenario.scenario === 'turn') {
           // Real credential-leak scan: serialize the finished result and prove it

@@ -491,7 +491,7 @@ async function navigateAndRun() {
     // stuck acceptance reports a cause (captured uncaught errors / rejections)
     // instead of a bare timeout.
     try {
-      const pageDiag = await wdExecute('return { booted: !!(window.__phoneRun && window.__phoneRun.booted), relayConnected: !!(window.__phoneRun && window.__phoneRun.relayConnected), errors: (window.__phoneRun && window.__phoneRun.errors) || [] }');
+      const pageDiag = await wdExecute('return { booted: !!(window.__phoneRun && window.__phoneRun.booted), relayConnected: !!(window.__phoneRun && window.__phoneRun.relayConnected), stage: (window.__phoneRun && window.__phoneRun.stage) || null, errors: (window.__phoneRun && window.__phoneRun.errors) || [] }');
       logProgress(`safari: phone acceptance page diagnostic: ${JSON.stringify(pageDiag)}`);
     } catch {}
     throw error;
