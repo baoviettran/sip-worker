@@ -5,6 +5,25 @@ import type {
 
 type DeviceListener = (event: Event) => void;
 
+/** The ICE username-fragment of an SDP string, or null when absent/unparseable. */
+function ufragOf(sdp: string | null | undefined): string | null {
+  if (typeof sdp !== 'string') return null;
+  const match = sdp.match(/^a=ice-ufrag:(\S+)$/m);
+  return match ? (match[1] ?? null) : null;
+}
+
+let ufragCounter = 0;
+let pwdCounter = 0;
+
+/** Deterministic fresh ICE credentials, so restarts are distinguishable. */
+function nextUfrag(): string {
+  return `u${(ufragCounter += 1).toString(36)}`;
+}
+
+function nextPwd(): string {
+  return `p${(pwdCounter += 1).toString(36)}`;
+}
+
 /**
  * Hand-rolled fake {@link BrowserMediaEnvironment} for deterministic media
  * tests. It exposes a scriptable `mediaDevices` and records each call so later
@@ -278,6 +297,9 @@ class FakeRtpTransceiver {
 export class FakePeerConnection {
   localDescription: RTCSessionDescription | null = null;
   remoteDescription: RTCSessionDescription | null = null;
+  /** The offerer's ufrag from the PREVIOUS remote description, so `createAnswer`
+   * can tell when the offerer restarted its own credentials (RFC 8445 §9). */
+  previousRemoteUfrag: string | null = null;
   iceGatheringState: RTCIceGatheringState = 'new';
   iceConnectionState: RTCIceConnectionState = 'new';
   connectionState: RTCPeerConnectionState = 'new';
@@ -307,30 +329,59 @@ export class FakePeerConnection {
 
   async createOffer(options?: RTCOfferOptions): Promise<RTCSessionDescriptionInit> {
     this.createOfferCalls.push(options);
-    if (options?.iceRestart === true) {
-      this.iceGatheringState = 'new';
-    } else if (this.localDescription !== null) {
-      // A re-negotiation on a session that already set a local description
-      // starts a fresh ICE gathering phase (matches browser behavior). The
-      // first offer keeps whatever gathering state the test pre-set.
+    // Faithful browser model of an ICE RESTART: createOffer({iceRestart:true})
+    // only signs the offer with fresh credentials — it does NOT change
+    // iceGatheringState, so the state still reports the PREVIOUS
+    // generation's 'complete'. The new gather begins at setLocalDescription
+    // time (modeled below). A non-restart renegotiation (hold/resume) starts a
+    // fresh gathering phase (browser re-runs gathering on every new local
+    // description), which the library waits on as before.
+    if (options?.iceRestart !== true && this.localDescription !== null) {
       this.iceGatheringState = 'new';
     }
+    const previousUfrag = ufragOf(this.localDescription?.sdp);
+    const restarted = options?.iceRestart === true;
+    const ufrag = restarted || previousUfrag === null ? nextUfrag() : previousUfrag;
     const sdp = `v=0\no=sip-worker ${++this.offerCounter} 0 IN IP4 0.0.0.0\n` +
       `s=-\nm=audio 49170 RTP/AVP 0 8 101\n` +
+      `a=ice-ufrag:${ufrag}\na=ice-pwd:${nextPwd()}\n` +
       `a=rtpmap:0 PCMU/8000\na=rtpmap:8 PCMA/8000\na=rtpmap:101 telephone-event/8000\n`;
     return { type: 'offer', sdp };
   }
 
   async createAnswer(): Promise<RTCSessionDescriptionInit> {
     this.createAnswerCalls.push(1);
-    const sdp = `v=0\no=answer ${++this.answerCounter} 0 IN IP4 0.0.0.0\ns=-\nm=audio 49172 RTP/AVP\n`;
+    // Faithful answerer model (RFC 8445 §9): the answerer mints fresh
+    // credentials only when the OFFERER restarted ITS OWN credentials — this
+    // offer's ufrag differs from the offerer's previous ufrag — or when it has
+    // none yet. A same-credential renegotiation (hold/resume) keeps the
+    // answerer's current credentials. Comparing against the answerer's own
+    // ufrag would be wrong: the two ICE agents' ufrags never match.
+    const remoteUfrag = ufragOf(this.remoteDescription?.sdp);
+    const localUfrag = ufragOf(this.localDescription?.sdp);
+    const offererRestarted = remoteUfrag !== null
+      && this.previousRemoteUfrag !== null
+      && remoteUfrag !== this.previousRemoteUfrag;
+    const ufrag = localUfrag === null || offererRestarted ? nextUfrag() : localUfrag;
+    const sdp = `v=0\no=answer ${++this.answerCounter} 0 IN IP4 0.0.0.0\ns=-\n` +
+      `m=audio 49172 RTP/AVP\n` +
+      `a=ice-ufrag:${ufrag}\na=ice-pwd:${nextPwd()}\n`;
     return { type: 'answer', sdp };
   }
 
   async setLocalDescription(description: RTCSessionDescriptionInit): Promise<void> {
     if (this.closed) throw new Error('InvalidStateError');
     this.setLocalCalls.push(description);
+    const previousUfrag = ufragOf(this.localDescription?.sdp);
+    const nextUfrag = ufragOf(description.sdp);
     this.localDescription = description as RTCSessionDescription;
+    // Applying a description with fresh ICE credentials starts the NEW gather
+    // here (matching browsers, where the stale 'complete' from the previous
+    // generation only turns over once the restart description is applied).
+    if (previousUfrag !== null && nextUfrag !== null && nextUfrag !== previousUfrag) {
+      this.iceGatheringState = 'new';
+      this._emitGatheringChange();
+    }
     if (this.autoCompleteIceGathering) this._completeGathering();
   }
 
@@ -341,6 +392,7 @@ export class FakePeerConnection {
       throw new Error('InvalidDescription');
     }
     this.setRemoteCalls.push(description);
+    this.previousRemoteUfrag = ufragOf(this.remoteDescription?.sdp);
     this.remoteDescription = description as RTCSessionDescription;
   }
 
@@ -378,6 +430,13 @@ export class FakePeerConnection {
     (this as unknown as Record<string, unknown>).rejectNextRemote = true;
   }
 
+  /** Fire the gathering-state observer with the current state. */
+  _emitGatheringChange(): void {
+    const handler = this.onicegatheringstatechange as
+      ((this: RTCPeerConnection, ev: Event) => unknown) | null;
+    handler?.call(this as unknown as RTCPeerConnection, new Event('icegatheringstatechange'));
+  }
+
   _completeGathering(): void {
     if (this.iceGatheringState === 'complete') return;
     this.iceGatheringState = 'complete';
@@ -388,9 +447,7 @@ export class FakePeerConnection {
         sdp: `${local.sdp}a=candidate:1 1 UDP 2122260223 192.0.2.10 49170 typ host\n`,
       } as RTCSessionDescription;
     }
-    const handler = this.onicegatheringstatechange as
-      ((this: RTCPeerConnection, ev: Event) => unknown) | null;
-    handler?.call(this as unknown as RTCPeerConnection, new Event('icegatheringstatechange'));
+    this._emitGatheringChange();
   }
 
   _setIceConnection(state: RTCIceConnectionState): void {

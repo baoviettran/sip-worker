@@ -311,6 +311,37 @@ describe('WebRtcMediaSession.createAnswer', () => {
   });
 });
 
+describe('FakePeerConnection answer credential lifecycle', () => {
+  const offer = (ufrag: string): { type: 'offer'; sdp: string } => ({
+    type: 'offer',
+    sdp: `v=0\no=r 1 1 IN IP4 0.0.0.0\ns=-\nm=audio 5004 RTP/AVP 0\na=ice-ufrag:${ufrag}\n`,
+  });
+  const answerUfrag = (sdp: string | undefined): string | null =>
+    (sdp?.match(/^a=ice-ufrag:(\S+)$/m) ?? [])[1] ?? null;
+
+  it('reuses answerer credentials on a same-credential re-INVITE and mints fresh ones when the offerer restarts', async () => {
+    const pc = new FakePeerConnection();
+
+    await pc.setRemoteDescription(offer('alpha'));
+    const first = await pc.createAnswer();
+    await pc.setLocalDescription(first);
+    const firstUfrag = answerUfrag(first.sdp);
+    expect(firstUfrag, 'first answer carries fresh credentials').not.toBeNull();
+
+    // Same-credential renegotiation (hold/resume): the offerer did NOT restart,
+    // so the answerer must REUSE its credentials — not mint a new pair. (A
+    // regression here silently hides a future re-INVITE restart bug.)
+    await pc.setRemoteDescription(offer('alpha'));
+    const second = await pc.createAnswer();
+    expect(answerUfrag(second.sdp), 'answerer reuses credentials on a same-credential re-INVITE').toBe(firstUfrag);
+
+    // The offerer restarted its own ICE credentials: the answerer mints fresh.
+    await pc.setRemoteDescription(offer('beta'));
+    const third = await pc.createAnswer();
+    expect(answerUfrag(third.sdp), 'answerer mints fresh credentials when the offerer restarts').not.toBe(firstUfrag);
+  });
+});
+
 describe('WebRtcMediaSession.setRemote', () => {
   it('applies a remote answer and treats rejection as REMOTE_DESCRIPTION_REJECTED', async () => {
     const env = new FakeMediaEnvironment([]);
@@ -389,6 +420,31 @@ describe('WebRtcMediaSession restartIce', () => {
     await restartPromise;
     // restartIce was never called on the absent-method path.
     expect((pc as unknown as { restartIceCalls: number[] }).restartIceCalls).toHaveLength(0);
+  });
+
+  it('does NOT resolve the ICE waiter on the stale previous-generation complete', async () => {
+    const { pc, session } = setup();
+    const first = await fullOffer(session, pc);
+    pc._setIceConnection('connected');
+    const firstUfrag = (first.match(/^a=ice-ufrag:(\S+)$/m) ?? [])[1] ?? null;
+    expect(firstUfrag, 'first offer carries ICE credentials').not.toBeNull();
+
+    let resolved = false;
+    const restartPromise = session.restartIce().then((sdp) => { resolved = true; return sdp; });
+    await flush();
+    // The waiter subscribes BEFORE setLocalDescription runs, while the pc still
+    // reports the FIRST gather's 'complete'. Resolving on it would ship a
+    // candidate-less restart offer (the real browser defect): that state belongs
+    // to the previous generation, and the fresh restart gather only begins once
+    // the restart description is applied. The ufrag discriminator marks this a
+    // restart and keeps the waiter pending until the fresh gather completes.
+    expect(resolved, 'restart must not settle on the stale previous-generation complete').toBe(false);
+
+    pc._completeGathering();
+    const sdp = await restartPromise;
+    expect(sdp, 'restart offer reflects the fresh gather').toContain('a=candidate:');
+    const restartUfrag = (sdp.match(/^a=ice-ufrag:(\S+)$/m) ?? [])[1] ?? null;
+    expect(restartUfrag, 'restart signs fresh ICE credentials').not.toBe(firstUfrag);
   });
 });
 

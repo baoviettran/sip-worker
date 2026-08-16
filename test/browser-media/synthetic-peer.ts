@@ -101,6 +101,13 @@ export function measureEnergy(stream, sampleMs = 600) {
   });
 }
 
+/** The ICE username-fragment of an SDP string, or null when absent. */
+function ufragOf(sdp) {
+  if (typeof sdp !== 'string') return null;
+  const match = sdp.match(/^a=ice-ufrag:(\S+)$/m);
+  return match ? match[1] : null;
+}
+
 /**
  * The controllable remote endpoint: owns ONE RTCPeerConnection and its
  * oscillator audio source. Supports both roles (it can answer the library's
@@ -120,6 +127,8 @@ export class SyntheticPeer {
     if (opts.iceTransportPolicy) cfg.iceTransportPolicy = opts.iceTransportPolicy;
     this.pc = new RTCPeerConnection(cfg);
     if (opts.register) opts.register(this.pc);
+    // ICE ufrag of the last generation whose gather was witnessed complete.
+    this._lastGatheredUfrag = null;
     this.source = makeSyntheticSource(opts.freqHz ?? 880);
     for (const track of this.source.stream.getTracks()) {
       this.pc.addTrack(track, this.source.stream);
@@ -157,9 +166,16 @@ export class SyntheticPeer {
     return this.createOffer();
   }
 
-  /** Resolve once this peer's ICE gathering has completed (complete SDP). */
+  /**
+   * Resolve once THIS ICE generation's gathering has completed (complete SDP).
+   * A `'complete'` left over from a previous generation (an ICE RESTART whose
+   * fresh gather only begins once the restart description is applied) must not
+   * satisfy the wait — the SDP would go out candidate-less. The current
+   * generation is only done once its ufrag has been witnessed complete.
+   */
   async gather(timeoutMs = 15000) {
-    if (this.pc.iceGatheringState === 'complete') return;
+    const ufrag = ufragOf(this.pc.localDescription?.sdp);
+    if (ufrag !== null && this.pc.iceGatheringState === 'complete' && this._lastGatheredUfrag === ufrag) return;
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pc.onicegatheringstatechange = null;
@@ -168,9 +184,15 @@ export class SyntheticPeer {
       this.pc.onicegatheringstatechange = () => {
         if (this.pc.iceGatheringState === 'complete') {
           clearTimeout(timer);
+          this.pc.onicegatheringstatechange = null;
+          this._lastGatheredUfrag = ufragOf(this.pc.localDescription?.sdp);
           resolve();
         }
       };
+      // The subscriber attaches synchronously within the same microtask turn as
+      // setLocalDescription's continuation, so a gather that completed in that
+      // gap still delivers its 'complete' event to this handler (state-change
+      // events fire as tasks, after this synchronous block).
     });
   }
 

@@ -895,7 +895,7 @@ export class WebRtcMediaSession {
    * completion cannot be missed.
    */
   private async setLocalAndWait(description: RTCSessionDescriptionInit): Promise<void> {
-    const wait = this.waitForIceComplete();
+    const wait = this.waitForIceComplete(description);
     // Observe immediately so a synchronous teardown rejection is never orphaned.
     void wait.catch(() => undefined);
     try {
@@ -911,11 +911,21 @@ export class WebRtcMediaSession {
   }
 
   /**
-   * Resolve when `iceGatheringState === 'complete'` (immediately when already
-   * complete), or fail closed with `ICE_GATHERING_TIMEOUT` on the deadline. The
+   * Resolve when `iceGatheringState === 'complete'` for the description being
+   * applied, or fail closed with `ICE_GATHERING_TIMEOUT` on the deadline. The
    * observer and its deadline timer are always cleared.
+   *
+   * The observer is subscribed BEFORE `setLocalDescription`, so a synchronous
+   * completion cannot be missed — but that also means the state may still
+   * report the PREVIOUS description's `'complete'`. For an ICE RESTART (the
+   * applied description signs fresh ICE credentials) that stale `'complete'`
+   * must NOT resolve the waiter: the fresh gather only begins once the restart
+   * description is applied, and resolving early would ship a candidate-less
+   * offer/answer. A same-credential renegotiation (hold/resume) reuses the
+   * completed gather, so the existing `'complete'` stays valid and resolves at
+   * once.
    */
-  private waitForIceComplete(): Promise<void> {
+  private waitForIceComplete(description: RTCSessionDescriptionInit): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const pc = this.pc;
       if (this.closed || pc === null) {
@@ -924,6 +934,14 @@ export class WebRtcMediaSession {
       }
       const waiterEpoch = ++this.waitSeq;
       let settled = false;
+      const offeredUfrag = iceUfragOf(description.sdp);
+      const currentUfrag = iceUfragOf(pc.localDescription?.sdp);
+      const restartsIce = offeredUfrag !== null
+        && currentUfrag !== null
+        && offeredUfrag !== currentUfrag;
+      // A restart's 'complete' observed before the fresh gather begins is
+      // stale; require witnessing the gather leave 'complete' first.
+      let freshGatherSeen = !restartsIce;
 
       const finish = (error: null | MediaError, result?: () => void): void => {
         if (settled) return;
@@ -939,8 +957,12 @@ export class WebRtcMediaSession {
       };
 
       const onState = (): void => {
-        if (settled || pc.iceGatheringState !== 'complete') return;
-        finish(null);
+        if (settled) return;
+        if (pc.iceGatheringState !== 'complete') {
+          if (restartsIce) freshGatherSeen = true; // the fresh gather has begun
+          return;
+        }
+        if (freshGatherSeen) finish(null);
       };
 
       const cancel = (): void => {
@@ -1029,6 +1051,20 @@ export class WebRtcMediaSession {
       'negotiation',
     );
   }
+}
+
+/**
+ * The ICE username-fragment of an SDP string, or null when absent. A fresh
+ * ufrag between consecutive local descriptions is what marks an ICE RESTART
+ * (RFC 8445 §9) — a same-ufrag renegotiation reuses the completed gather.
+ * Reads the first `m=` section only: the session is single-audio-media, so
+ * every m-section carries the same credentials; a future multi-media session
+ * must compare every section's ufrag to detect a restart reliably.
+ */
+function iceUfragOf(sdp: string | null | undefined): string | null {
+  if (typeof sdp !== 'string') return null;
+  const match = sdp.match(/^a=ice-ufrag:(\S+)$/m);
+  return match ? (match[1] ?? null) : null;
 }
 
 /**

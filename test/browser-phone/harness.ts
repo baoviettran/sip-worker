@@ -156,8 +156,10 @@ export interface PhoneScenarioResult {
   peerRtpGrewAfterRestart?: boolean;
   librarySelectedTypes?: { local: string | null; remote: string | null };
   peerSelectedTypes?: { local: string | null; remote: string | null };
-  librarySelectedTypesAfterRestart?: { local: string | null; remote: string | null };
-  peerSelectedTypesAfterRestart?: { local: string | null; remote: string | null };
+  // Post-restart relay retention: whether a relay/relay candidate pair was
+  // observed (any pair state) after the ICE restart.
+  libraryRelayPairAfterRestart?: boolean;
+  peerRelayPairAfterRestart?: boolean;
   gatheredCandidateTypes?: { library: string[]; peer: string[] };
 
   // lifecycle
