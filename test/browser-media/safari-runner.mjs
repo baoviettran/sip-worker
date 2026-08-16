@@ -136,6 +136,18 @@ async function startHarnessServers() {
   // arm/drop/record the exact same controls the Playwright gate uses.
   sipWss = await startSipWss(fakeServer, { bundle: certs, port: SIP_WSS_PORT });
 
+  // Preserve the exact certs macOS generated (uploaded with the artifact on any
+  // outcome) so a trust failure can be diagnosed from the actual bytes.
+  try {
+    writeFileSync(join(process.cwd(), 'safari-ca.crt'), readFileSync(certs.caCrt));
+    writeFileSync(join(process.cwd(), 'safari-leaf.crt'), readFileSync(certs.leafCrt));
+    const leafTxt = execFileSync('openssl', ['x509', '-in', certs.leafCrt, '-noout', '-text']).toString();
+    const i = leafTxt.indexOf('X509v3 extensions');
+    logProgress(`safari: leaf extensions: ${leafTxt.slice(i, i + 350).replace(/\n+/g, ' | ')}`);
+  } catch (error) {
+    logProgress(`safari: could not preserve/dump certs -> ${error.message}`);
+  }
+
   console.log(`Safari harness: media https://localhost:${HARNESS_PORT}/  phone https://localhost:${PHONE_HARNESS_PORT}/  wss://127.0.0.1:${SIP_WSS_PORT}/sip`);
   // Pre-flight the harness servers from Node (runs with NODE_TLS_REJECT_UNAUTHORIZED=0)
   // so a dead port or an artifact-absent 503 is attributed to the server, not to
@@ -195,7 +207,21 @@ function verifyLeafTrust() {
     return true;
   } catch (error) {
     logProgress(`safari: verify-cert for the leaf FAILED -> ${error.message}`);
+    dumpTrustSettings();
     return false;
+  }
+}
+
+/** Log the admin and user trust-settings entries matching the per-run CA. */
+function dumpTrustSettings() {
+  for (const [domain, flag] of [['system', '-d'], ['user', '-u']]) {
+    try {
+      const out = execFileSync('security', ['dump-trust-settings', flag], { encoding: 'utf8', timeout: 20000 });
+      const hits = out.split('\n').filter((l) => /sipw|sipw-test-ca|cert|root/i.test(l)).slice(0, 15);
+      logProgress(`safari: ${domain} trust settings: ${hits.join(' | ') || '(no matching entries)'}`);
+    } catch (error) {
+      logProgress(`safari: dump-trust-settings ${flag} FAILED -> ${error.message}`);
+    }
   }
 }
 

@@ -75,5 +75,7 @@ jobs:
             test-results/
             safari-runner.log
             safari-boot-failure-*.png
+            safari-ca.crt
+            safari-leaf.crt
           if-no-files-found: ignore
           retention-days: 7
