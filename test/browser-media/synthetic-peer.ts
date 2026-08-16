@@ -28,7 +28,27 @@ export function makeSyntheticSource(freqHz) {
   osc.frequency.value = freqHz;
   osc.connect(dest);
   osc.start();
-  return { stream: dest.stream, stop: () => { try { ac.close(); } catch {} } };
+  // Headless engines create the context suspended (see measureEnergy below); a
+  // suspended context feeds SILENCE into the track, so the relay peer would read
+  // only the ~150 B/s silence keepalive and the mute gate's active calibration
+  // would collapse onto its 150 B/s floor. Resume explicitly and keep nudging
+  // until the context renders (browsers may defer resume until the output clock
+  // is up). Idempotent on engines that already auto-resume.
+  const resume = () => { if (ac.state === 'running') return; try { ac.resume().catch(() => {}); } catch {} };
+  resume();
+  let suspendedAttempts = 0;
+  const nudge = setInterval(() => {
+    if (ac.state === 'running' || suspendedAttempts >= 10) {
+      clearInterval(nudge);
+      return;
+    }
+    resume();
+    suspendedAttempts += 1;
+  }, 100);
+  return {
+    stream: dest.stream,
+    stop: () => { try { clearInterval(nudge); ac.close(); } catch {} },
+  };
 }
 
 /**
