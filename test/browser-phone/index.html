@@ -562,8 +562,31 @@
 
       const libPc = bridge.pcs[bridge.pcs.length - 1] ?? null;
       if (libPc) {
-        const growth = await waitForRtpGrowth(libPc, 20000);
+        // RTP resumption after recovery can take tens of seconds on Safari
+        // (like the source-context resume in the mute calibration), so allow
+        // 45s. If it still does not resume, capture the library PC's audio path.
+        const growth = await waitForRtpGrowth(libPc, 45000);
         result.rtpResumedAfterRecovery = !!growth;
+        if (!growth) {
+          try {
+            const libSenders = libPc.getSenders().map((s) => `${s.track ? `${s.track.kind}@${s.track.readyState}` : 'no-track'}`);
+            let libOut = { bytes: 0, packets: 0 };
+            const st = await Promise.race([
+              libPc.getStats(),
+              new Promise((resolve) => setTimeout(() => resolve(null), 10000)),
+            ]);
+            if (st) st.forEach((s) => { if (s.type === 'outbound-rtp' && s.kind === 'audio') libOut = { bytes: s.bytesSent ?? 0, packets: s.packetsSent ?? 0 }; });
+            result._recoveryDiag = {
+              mode,
+              libIce: libPc.iceConnectionState,
+              libConn: libPc.connectionState,
+              libSenders,
+              outboundBytes: libOut.bytes,
+              outboundPackets: libOut.packets,
+              micContext: bridge._micContext ? bridge._micContext.state : 'n/a',
+            };
+          } catch {}
+        }
       } else {
         result.rtpResumedAfterRecovery = false;
       }
@@ -943,6 +966,8 @@
           error: err,
           connectionState: (r.connectionState ?? fast.connectionState ?? ice.connectionState) ?? null,
           callState: (r.callState ?? fast.callState ?? ice.callState) ?? null,
+          fastDiag: fast._recoveryDiag ?? null,
+          iceDiag: ice._recoveryDiag ?? null,
         };
       } catch (error) {
         return {
