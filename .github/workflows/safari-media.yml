@@ -65,13 +65,13 @@ jobs:
             sudo security remove-trusted-cert -d "$crt" >/dev/null 2>&1 || true
           done
           true
-      - name: Upload Safari runner logs on failure
-        if: failure()
+      - name: Upload Safari runner logs and traces
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: safari-media-${{ github.run_id }}
           path: |
             test-results/
-            console-*.log
+            safari-runner.log
           if-no-files-found: ignore
           retention-days: 7

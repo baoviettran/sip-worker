@@ -42,7 +42,7 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import https from 'node:https';
-import { readFileSync, unlinkSync } from 'node:fs';
+import { appendFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -58,6 +58,19 @@ const SIP_WSS_PORT = Number(process.env.SIP_WSS_PORT || 4200);
 const MEDIA_HARNESS_URL = process.env.HARNESS_URL || `https://localhost:${HARNESS_PORT}/index.html`;
 const PHONE_HARNESS_URL = process.env.PHONE_HARNESS_URL || `https://localhost:${PHONE_HARNESS_PORT}/index.html`;
 const KEYCHAIN_DIR = process.env.KEYCHAIN_DIR || tmpdir();
+// Bound every WebDriver HTTP call. A Safari stuck on a page-side operation
+// (dialog, never-resolving script) otherwise holds a /execute open until the
+// job timeout, and the gate dies as a silent 40-minute hang with no retained
+// log. Each bounded call instead surfaces a warning naming the URL.
+const WD_TIMEOUT_MS = 60000;
+// Mirror every progress/warning line to a workspace file so a cancelled or
+// timed-out run (whose step log GitHub retains nothing for) still leaves its
+// partial trail in the uploaded artifact.
+const LOG_PATH = join(process.cwd(), 'safari-runner.log');
+function logProgress(line) {
+  process.stdout.write(`${line}\n`);
+  try { appendFileSync(LOG_PATH, `${new Date().toISOString()} ${line}\n`); } catch {}
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const errors = [];
@@ -129,7 +142,7 @@ async function setupKeychainTrust() {
     ['security', 'add-trusted-cert', '-d', '-r', 'trustRoot', '-k', '/Library/Keychains/System.keychain', certs.caCrt],
     { stdio: 'inherit' },
   );
-  console.log('Installed ephemeral CA as a System keychain trust root:', certs.caCrt);
+  logProgress(`Installed ephemeral CA as a System keychain trust root: ${certs.caCrt}`);
 }
 
 function teardownKeychainTrust() {
@@ -137,26 +150,32 @@ function teardownKeychainTrust() {
   if (!certs) return;
   try {
     execFileSync('sudo', ['security', 'remove-trusted-cert', '-d', certs.caCrt], { stdio: 'inherit' });
-    console.log('Removed ephemeral CA trust from the System keychain');
+    logProgress('Removed ephemeral CA trust from the System keychain');
   } catch (error) {
     trustRemovalFailed = true;
-    console.warn(`Failed to remove System keychain trust; leaving the CA file for the workflow cleanup step: ${error.message}`);
+    logProgress(`Failed to remove System keychain trust; leaving the CA file for the workflow cleanup step: ${error.message}`);
   }
 }
 
 // --- W3C WebDriver over Node fetch ----------------------------------------
 async function wdFetch(url, { method = 'GET', body } = {}) {
-  const res = await fetch(url, {
-    method,
-    headers: body ? { 'content-type': 'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const json = await res.json().catch(() => ({}));
-  return { status: res.status, json };
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: body ? { 'content-type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(WD_TIMEOUT_MS),
+    });
+    const json = await res.json().catch(() => ({}));
+    return { status: res.status, json };
+  } catch (error) {
+    logProgress(`[wd] ${method} ${url} -> ${error && error.name}: ${error && error.message}`);
+    throw error;
+  }
 }
 
 async function wdDelete(url) {
-  try { await fetch(url, { method: 'DELETE' }); } catch {}
+  try { await fetch(url, { method: 'DELETE', signal: AbortSignal.timeout(WD_TIMEOUT_MS) }); } catch {}
 }
 
 async function wdExecute(script, args = []) {
@@ -223,7 +242,7 @@ async function createSafariSession() {
   const browserVersion = caps.browserVersion || 'unknown';
   const platformVersion = caps.platformVersion || 'unknown';
   const platformName = caps.platformName || 'unknown';
-  console.log(`Safari session: browser=${browserVersion} os=${platformVersion} platform=${platformName}`);
+  logProgress(`Safari session: browser=${browserVersion} os=${platformVersion} platform=${platformName}`);
   if (browserVersion === 'unknown') throw new Error('Safaridriver returned no browserVersion; cannot attest which Safari ran');
 }
 
@@ -245,39 +264,56 @@ function assertAcceptance(result, gate) {
   for (const name of names) {
     if (result.checks[name] !== true) throw new Error(`${gate} check failed: ${name}`);
   }
-  console.log(`Safari ${gate} acceptance PASSED. Verified: ${names.join(', ')}`);
+  logProgress(`Safari ${gate} acceptance PASSED. Verified: ${names.join(', ')}`);
 }
 
 async function navigateAndRun() {
+  logProgress('safari: creating WebDriver session');
   await createSafariSession();
 
   // 1. browser-media acceptance (v0.5): direct host path, real two-way RTP.
+  logProgress('safari: navigating to the browser-media harness');
   await navigateTo(
     MEDIA_HARNESS_URL,
     'window.__webRtcMediaRun && window.__webRtcMediaRun.booted === true',
     'browser-media harness did not boot the built bundle over HTTPS',
   );
+  logProgress('safari: polling runMediaAcceptance (120s bound)');
   const mediaResult = await poll(120000, async () => {
     const r = await wdExecute('return window.runMediaAcceptance().then((x) => ({ __done: true, x }))');
     return r?.__done ? r.x : null;
   }, 'runMediaAcceptance did not complete', true);
-  console.log('runMediaAcceptance result:', JSON.stringify(mediaResult));
+  logProgress(`runMediaAcceptance result: ${JSON.stringify(mediaResult)}`);
   assertAcceptance(mediaResult, 'media');
 
   // 2. browser-phone acceptance (v0.7): connect -> register -> real call ->
   //    mute / hold / DTMF -> cleanup, plus fast WSS-loss recovery and a real
   //    offline/online ICE-restart recovery, of the BUILT library over the real
   //    WSS. Three full cycles on Safari can run past 180s, so allow 5 minutes.
+  logProgress('safari: navigating to the browser-phone harness');
   await navigateTo(
     PHONE_HARNESS_URL,
     'window.__phoneRun && window.__phoneRun.booted === true',
     'browser-phone harness did not boot the built bundle over HTTPS',
   );
-  const phoneResult = await poll(300000, async () => {
-    const r = await wdExecute('return window.runPhoneAcceptance().then((x) => ({ __done: true, x }))');
-    return r?.__done ? r.x : null;
-  }, 'runPhoneAcceptance did not complete', true);
-  console.log('runPhoneAcceptance result:', JSON.stringify(phoneResult));
+  logProgress('safari: polling runPhoneAcceptance (5 minute bound)');
+  let phoneResult;
+  try {
+    phoneResult = await poll(300000, async () => {
+      const r = await wdExecute('return window.runPhoneAcceptance().then((x) => ({ __done: true, x }))');
+      return r?.__done ? r.x : null;
+    }, 'runPhoneAcceptance did not complete', true);
+  } catch (error) {
+    // Surface what the page knew at the moment it stopped completing, so a
+    // stuck acceptance reports a cause (captured uncaught errors / rejections)
+    // instead of a bare timeout.
+    try {
+      const pageDiag = await wdExecute('return { booted: !!(window.__phoneRun && window.__phoneRun.booted), relayConnected: !!(window.__phoneRun && window.__phoneRun.relayConnected), errors: (window.__phoneRun && window.__phoneRun.errors) || [] }');
+      logProgress(`safari: phone acceptance page diagnostic: ${JSON.stringify(pageDiag)}`);
+    } catch {}
+    throw error;
+  }
+  logProgress(`runPhoneAcceptance result: ${JSON.stringify(phoneResult)}`);
   assertAcceptance(phoneResult, 'phone');
 }
 
