@@ -33,12 +33,15 @@ export function makeSyntheticSource(freqHz) {
   // only the ~150 B/s silence keepalive and the mute gate's active calibration
   // would collapse onto its 150 B/s floor. Resume explicitly and keep nudging
   // until the context renders (browsers may defer resume until the output clock
-  // is up). Idempotent on engines that already auto-resume.
+  // is up, and Safari on a second navigation can take many seconds to grant
+  // autoplay — observed suspended with zero peer packets at ~15s). Idempotent
+  // on engines that already auto-resume. Bounded (60s) and cleared by stop(),
+  // so a permanently-blocked context cannot leak a running interval.
   const resume = () => { if (ac.state === 'running') return; try { ac.resume().catch(() => {}); } catch {} };
   resume();
   let suspendedAttempts = 0;
   const nudge = setInterval(() => {
-    if (ac.state === 'running' || suspendedAttempts >= 10) {
+    if (ac.state === 'running' || suspendedAttempts >= 600) {
       clearInterval(nudge);
       return;
     }
