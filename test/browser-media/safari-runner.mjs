@@ -157,6 +157,20 @@ async function startHarnessServers() {
       logProgress(`safari: preflight ${label} ${u} FAILED -> ${error && error.name}: ${error && error.message}`);
     }
   }
+  // Pre-flight the module URLs the harness pages import, so a missing or
+  // 503-ing artifact is attributed to the server, not to Safari.
+  for (const u of [
+    `https://127.0.0.1:${HARNESS_PORT}/synthetic-peer.js`,
+    `https://127.0.0.1:${HARNESS_PORT}/assets/browser/media/index.js`,
+    `https://127.0.0.1:${HARNESS_PORT}/assets/core/index.js`,
+  ]) {
+    try {
+      const res = await fetch(u, { signal: AbortSignal.timeout(10000) });
+      logProgress(`safari: preflight module ${u} -> HTTP ${res.status}`);
+    } catch (error) {
+      logProgress(`safari: preflight module ${u} FAILED -> ${error && error.name}: ${error && error.message}`);
+    }
+  }
 }
 
 // --- macOS keychain trust --------------------------------------------------
@@ -335,7 +349,7 @@ async function navigateTo(url, bootScript, bootFailMsg) {
   if (nav.status >= 300) {
     logProgress(`safari: /url ${url} -> HTTP ${nav.status} ${JSON.stringify(nav.json)}`);
   }
-  const booted = await poll(30000, async () => {
+  const booted = await poll(60000, async () => {
     const v = await wdExecute(`return ${bootScript}`);
     return v === true;
   }, bootFailMsg);
@@ -358,6 +372,8 @@ async function captureBootFailure(url) {
       statusText: (document.getElementById('status') && document.getElementById('status').textContent) || null,
       bodyText: document.body.innerText.slice(0, 400),
       bridge: window.__webRtcMediaRun || window.__phoneRun || null,
+      resources: performance.getEntriesByType('resource').slice(0, 40).map((e) =>
+        (e.initiatorType || '?') + ' ' + e.name + ' ' + (e.responseStatus ?? '') + ' ' + Math.round(e.duration) + 'ms').join(' | '),
     }`);
     logProgress(`safari: boot failure on ${url} — ${JSON.stringify(diag)}`);
   } catch (error) {
