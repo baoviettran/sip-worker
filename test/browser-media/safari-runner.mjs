@@ -42,7 +42,7 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import https from 'node:https';
-import { appendFileSync, readFileSync, unlinkSync } from 'node:fs';
+import { appendFileSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -276,7 +276,41 @@ async function navigateTo(url, bootScript, bootFailMsg) {
     const v = await wdExecute(`return ${bootScript}`);
     return v === true;
   }, bootFailMsg);
-  if (!booted) throw new Error(bootFailMsg);
+  if (!booted) {
+    await captureBootFailure(url);
+    throw new Error(bootFailMsg);
+  }
+}
+
+/**
+ * When a harness page fails to boot, capture what the page actually shows and
+ * a screenshot so the gate reports a cause (cert-interstitial, fatal harness
+ * error, build absent) instead of a bare "did not boot".
+ */
+async function captureBootFailure(url) {
+  try {
+    const diag = await wdExecute(`return {
+      href: location.href,
+      readyState: document.readyState,
+      statusText: (document.getElementById('status') && document.getElementById('status').textContent) || null,
+      bodyText: document.body.innerText.slice(0, 400),
+      bridge: window.__webRtcMediaRun || window.__phoneRun || null,
+    }`);
+    logProgress(`safari: boot failure on ${url} — ${JSON.stringify(diag)}`);
+  } catch (error) {
+    logProgress(`safari: boot failure on ${url} — could not read page: ${error.message}`);
+  }
+  try {
+    const { json } = await wdFetch(`${DRIVER_URL}/session/${sessionId}/screenshot`, { method: 'POST', body: {} });
+    const b64 = json && json.value;
+    if (typeof b64 === 'string') {
+      const shotPath = join(process.cwd(), `safari-boot-failure-${sessionId}.png`);
+      writeFileSync(shotPath, Buffer.from(b64, 'base64'));
+      logProgress(`safari: wrote boot-failure screenshot to ${shotPath}`);
+    }
+  } catch (error) {
+    logProgress(`safari: screenshot failed: ${error.message}`);
+  }
 }
 
 function assertAcceptance(result, gate) {

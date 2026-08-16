@@ -73,5 +73,6 @@ jobs:
           path: |
             test-results/
             safari-runner.log
+            safari-boot-failure-*.png
           if-no-files-found: ignore
           retention-days: 7
