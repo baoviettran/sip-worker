@@ -414,6 +414,12 @@ export async function makeCertBundle(baseDir = tmpdir()) {
     'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
     '-keyout', caKey, '-out', caCrt, '-days', '1',
     '-subj', '/CN=sipw-test-ca',
+    // A chain-capable CA must assert the CA basic constraint; without it
+    // Safari/WebKit's evaluator can reject the leaf even when the CA is in a
+    // trust store (the real-Safari gate boots nothing on a cert-interstitial).
+    '-addext', 'basicConstraints=critical,CA:TRUE',
+    '-addext', 'keyUsage=keyCertSign,cRLSign',
+    '-addext', 'subjectKeyIdentifier=hash',
   ], { stdio: 'ignore' });
   execFileSync('openssl', [
     'req', '-newkey', 'rsa:2048', '-nodes',
