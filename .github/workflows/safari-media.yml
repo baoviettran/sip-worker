@@ -62,7 +62,11 @@ jobs:
         run: |
           for crt in "${{ runner.temp }}"/sipw-phone-*/ca.crt; do
             [ -e "$crt" ] || continue
-            sudo security remove-trusted-cert -d "$crt" >/dev/null 2>&1 || true
+            # Bounded: `security remove-trusted-cert` can hang on the runner's
+            # keychain daemon; an unbounded call here would stall the job to the
+            # 40-minute timeout and cancel the run (losing its logs). perl's
+            # alarm bounds the call (macOS ships no GNU timeout).
+            perl -e 'alarm shift; exec @ARGV' 25 sudo security remove-trusted-cert -d "$crt" >/dev/null 2>&1 || true
           done
           true
       - name: Upload Safari runner logs and traces

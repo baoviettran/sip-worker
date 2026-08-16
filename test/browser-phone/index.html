@@ -397,8 +397,13 @@
       result.peerIceStateBeforeResume = peerPc.iceConnectionState;
       await call.resume();
       await waitFor(() => call.holdState?.local === false, 'resumed', 20000);
-      await sleep(1500);
-      result.rtpAfterResume = await sampleInboundAudio(peerPc);
+      // Wait for outbound RTP to flow again after the sendrecv resume instead of
+      // sampling after a fixed sleep — on a loaded runner the resumed RTP may not
+      // register in a fixed window (observed as a flaky 0-growth gate failure).
+      const resumed = await waitForRtpGrowth(peerPc);
+      result.rtpAfterResume = resumed
+        ? { bytesReceived: resumed.bytesReceived, packets: resumed.packets }
+        : await sampleInboundAudio(peerPc);
       // Re-read the server-side re-INVITE log: the resume re-INVITE must flip the
       // negotiated audio direction back to sendrecv after the sendonly hold.
       result.holdDirectionAfterResume = (await getControl('/control/hold-offers')).directions.at(-1) ?? null;
