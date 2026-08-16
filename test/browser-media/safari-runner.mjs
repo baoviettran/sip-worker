@@ -167,6 +167,21 @@ async function setupKeychainTrust() {
     { stdio: 'inherit', timeout: 30000 },
   );
   logProgress(`Installed ephemeral CA as a System keychain trust root: ${certs.caCrt}`);
+  // Verify the trust is actually effective for the leaf, so a silent trust
+  // failure (System keychain locked/protected on the runner) is visible as the
+  // cause of an about:blank Safari navigation instead of a baffling boot error.
+  try {
+    execFileSync('security', ['find-certificate', '-c', 'sipw-test-ca', '-Z', '/Library/Keychains/System.keychain'], { stdio: 'ignore', timeout: 20000 });
+    logProgress('safari: CA sipw-test-ca present in the System keychain');
+  } catch (error) {
+    logProgress(`safari: CA sipw-test-ca NOT found in the System keychain -> ${error.message}`);
+  }
+  try {
+    execFileSync('security', ['verify-cert', '-p', 'ssl', '-c', certs.leafCrt], { stdio: 'inherit', timeout: 20000 });
+    logProgress('safari: security verify-cert PASSED for the leaf');
+  } catch (error) {
+    logProgress(`safari: security verify-cert FAILED for the leaf -> ${error.message}`);
+  }
 }
 
 function teardownKeychainTrust() {
