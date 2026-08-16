@@ -189,7 +189,12 @@ async function wdExecute(script, args = []) {
 // --- driver lifecycle -------------------------------------------------------
 async function startDriver() {
   logProgress(`safari: starting ${DRIVER_BIN} (readiness bound ${20}s)`);
-  driver = spawn(DRIVER_BIN, ['--enable', '-p', String(DRIVER_PORT)], {
+  // NOTE: no `--enable` flag here. `--enable` requires admin authorization and,
+  // run as the unprivileged runner user, makes safaridriver PROMPT FOR A
+  // PASSWORD (which fails — no interactive user on the runner) before it ever
+  // starts its HTTP server. Remote Automation was already granted by the
+  // workflow's `sudo safaridriver --enable` step.
+  driver = spawn(DRIVER_BIN, ['-p', String(DRIVER_PORT)], {
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   // Surface driver stderr to aid CI diagnosis if it fails to start.
