@@ -338,15 +338,30 @@
 
       // TEMP DIAGNOSTIC: report the source AudioContext state and relay-peer
       // state when outbound RTP is not observed, so a suspended source context
-      // (feeds silence) is distinguishable from a relay/ICE issue. Removed once
-      // the Safari phone-gate blocker is diagnosed.
+      // (feeds silence) is distinguishable from a relay/ICE issue, and whether
+      // the LIBRARY PC even attaches/sends its audio track. Removed once the
+      // Safari phone-gate blocker is diagnosed.
       try {
+        const libPc = bridge.pcs[bridge.pcs.length - 1] ?? null;
+        let libOut = { bytes: 0, packets: 0 };
+        let libIce = 'n/a', libConn = 'n/a', libSenders = [];
+        try {
+          if (libPc) {
+            libIce = libPc.iceConnectionState;
+            libConn = libPc.connectionState;
+            libSenders = libPc.getSenders().map((s) => `${s.track ? `${s.track.kind}@${s.track.readyState}` : 'no-track'}`);
+            const st = await libPc.getStats();
+            st.forEach((s) => { if (s.type === 'outbound-rtp' && s.kind === 'audio') libOut = { bytes: s.bytesSent ?? 0, packets: s.packetsSent ?? 0 }; });
+          }
+        } catch {}
         result._muteDiag = {
           micContext: bridge._micContext ? bridge._micContext.state : 'n/a',
           peerIce: peerPc.iceConnectionState,
           peerConn: peerPc.connectionState,
           inboundBytes: (await sampleInboundAudio(peerPc)).bytesReceived,
           inboundPackets: (await sampleInboundAudio(peerPc)).packets,
+          peerReceivers: bridge.relayPeer ? bridge.relayPeer.pc.getReceivers().map((r) => `${r.track ? `${r.track.kind}@${r.track.readyState}` : 'no-track'}`) : [],
+          libPc: { ice: libIce, conn: libConn, senders: libSenders, outboundBytes: libOut.bytes, outboundPackets: libOut.packets },
         };
       } catch (error) {
         result._muteDiag = { error: String(error && error.message) };
