@@ -336,6 +336,16 @@
     async function runMuteMeasurements(call, result) {
       const peerPc = bridge.relayPeer.pc;
 
+      // The ACTIVE baseline must be measured while outbound RTP is actually
+      // flowing, not while media is still connecting on a slower runner —
+      // otherwise the calibration reads the pre-flow silence and the muted
+      // floor (150 B/s) equals the silence keepalive. Wait for real inbound
+      // growth first (same helper the relay gate uses); if it never grows the
+      // calibration is impossible and the gate must fail loudly, not measure
+      // a meaningless baseline.
+      const rtp = await waitForRtpGrowth(peerPc);
+      if (!rtp) throw new Error('no outbound RTP observed before mute calibration');
+
       // Calibrate the ACTIVE outbound byte rate (what the peer's inbound-rtp
       // stats count as it receives the library's live audio).
       const calStart = await sampleInboundAudio(peerPc);
