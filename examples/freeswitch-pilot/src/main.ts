@@ -184,9 +184,7 @@ function buildMediaEnvironment(): SelectableMediaEnvironment {
 function createPhone(): BrowserPhone {
   const formValues = readFormValues();
   const config = parsePilotConfig(formValues);
-  const micId = selectedMedia?.environment !== undefined
-    ? undefined // microphone handled by selectable media
-    : undefined;
+  const micId = undefined;
 
   secrets.length = 0;
   secrets.push(...collectSecrets());
@@ -386,9 +384,9 @@ async function handleReject(): Promise<void> {
   await runOperation('reject', () => incomingCall!.reject(486, 'Busy Here'));
 }
 
-function handleMute(): void {
+async function handleMute(): Promise<void> {
   if (currentCall === undefined) return;
-  currentCall.setMuted(!currentCall.muted);
+  await runOperation('mute', async () => { currentCall!.setMuted(!currentCall!.muted); });
 }
 
 async function handleHold(): Promise<void> {
@@ -609,7 +607,20 @@ function renderControls(): boolean {
   mustGet<HTMLButtonElement>('register').disabled = !controls.register;
   mustGet<HTMLButtonElement>('call').disabled = !controls.call;
   mustGet<HTMLButtonElement>('cancel').disabled = !controls.cancel;
-  mustGet<HTMLButtonElement>('hangup').disabled = !controls.hangup;
+  const hangupBtn = mustGet<HTMLButtonElement>('hangup');
+  hangupBtn.disabled = !controls.hangup;
+  if (controls.incomingHangupUnsupported) {
+    hangupBtn.title = 'Incoming established calls cannot be locally hung up (INVALID_STATE)';
+  } else {
+    hangupBtn.title = '';
+  }
+  const hangupNote = document.getElementById('hangup-note');
+  if (hangupNote !== null) {
+    hangupNote.textContent = controls.incomingHangupUnsupported
+      ? 'Local hangup unsupported on established incoming calls (INVALID_STATE)'
+      : '';
+    hangupNote.hidden = !controls.incomingHangupUnsupported;
+  }
   mustGet<HTMLButtonElement>('answer').disabled = !controls.answer;
   mustGet<HTMLButtonElement>('reject').disabled = !controls.reject;
   mustGet<HTMLButtonElement>('mute-toggle').disabled = !controls.mute;
@@ -654,6 +665,7 @@ function render(): void {
     if (active !== undefined) {
       lastKnown.callState = active.state;
       lastKnown.signalingState = active.signalingState;
+      lastKnown.mediaState = active.mediaState;
       lastKnown.muted = active.muted ? 'muted' : 'active';
       lastKnown.hold = active.holdState.local ? 'held' : 'active';
       if (active.remoteIdentity?.uri !== undefined) {
