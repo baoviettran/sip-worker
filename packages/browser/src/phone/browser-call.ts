@@ -427,9 +427,9 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
     if (this.sessionState === 'confirmed' && !this.mediaConnected) {
       // Signaling is confirmed but media is not yet connected; stay in
       // `establishing` (per the isolate-until-media-connected contract).
-      if (this.stateValue === 'established') {
-        // A media `connected` already advanced us; keep the committed state.
-      } else {
+      // Skip when already there so a confirmed-before-media answer never
+      // emits a spurious establishing -> establishing self-transition.
+      if (this.stateValue !== 'established' && this.stateValue !== 'establishing') {
         this.setStateValue('establishing');
       }
       return;

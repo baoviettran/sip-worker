@@ -254,6 +254,41 @@ describe('BrowserCall — per-call lifecycle', () => {
     expect(incoming!.state).toBe('established');
     await phone.dispose();
   });
+
+  it('incoming answer before media does not re-emit establishing', async () => {
+    const { phone, pc } = buildPhone();
+    await phone.connect();
+
+    let incoming: IncomingBrowserCall | undefined;
+    const selfTransitions: string[] = [];
+    phone.on('incomingCall', (event) => {
+      incoming = event.call as IncomingBrowserCall;
+      (event.call as IncomingBrowserCall).on('stateChanged', (e) => {
+        // A committed transition must always move (or settle the same target
+        // exactly once) — a 'establishing' -> 'establishing' re-emission is a
+        // spurious self-transition from the confirmed-before-media gate.
+        if (e.previous === e.state) selfTransitions.push(e.state);
+      });
+    });
+    emitIncoming(buildIncomingHeaders('<sip:bob@example.com>;tag=bob-tag'));
+    await settle();
+    expect(incoming).toBeInstanceOf(IncomingBrowserCall);
+
+    const answer = incoming!.answer();
+    await settle();
+    sendAck();
+    await settle();
+    // Core confirmed, media still not connected: the media gate must keep
+    // 'establishing' WITHOUT re-emitting it (it was committed at attach).
+    expect(incoming!.state).toBe('establishing');
+    expect(selfTransitions).toEqual([]);
+
+    pc._setIceConnection('connected');
+    await settle();
+    await answer;
+    expect(incoming!.state).toBe('established');
+    await phone.dispose();
+  });
 });
 
 describe('BrowserCall — setMuted (exact microphone mute ownership)', () => {
