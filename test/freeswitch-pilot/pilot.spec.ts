@@ -194,10 +194,10 @@ test('4. incoming call identity, answer, hangup disabled, and remote BYE', async
 });
 
 // ---------------------------------------------------------------------------
-// 5. Incoming Reject produces documented failed state
+// 5. Incoming Reject produces the documented failed state
 // ---------------------------------------------------------------------------
 
-test('5. incoming reject produces terminal state', async ({ page, request }) => {
+test('5. incoming reject produces the failed state', async ({ page, request }) => {
   await createConnectRegister(page);
   await waitForRelay(request);
 
@@ -206,9 +206,11 @@ test('5. incoming reject produces terminal state', async ({ page, request }) => 
   await expect(page.locator('#call-state')).not.toHaveText('new', { timeout: 10_000 });
 
   await page.locator('#reject').click();
-  // Reject transitions the session to 'failed', then cleanup moves it to
-  // 'terminated'. Both are terminal states — verify the call ends.
-  await expect(page.locator('#call-state')).toHaveText('terminated', { timeout: 15_000 });
+  // Reject sends a final 4xx: the call never establishes, so the session
+  // transitions to 'failed' (mapCallState('failed') === 'failed'). The render
+  // loop must preserve that committed terminal state, never synthesize
+  // 'terminated' for a call that failed to establish.
+  await expect(page.locator('#call-state')).toHaveText('failed', { timeout: 15_000 });
 });
 
 // ---------------------------------------------------------------------------

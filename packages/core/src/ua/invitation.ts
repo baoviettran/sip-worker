@@ -215,10 +215,6 @@ export class Invitation {
         this.fail(event.error);
       }
     });
-
-    // Transition session to ringing so BrowserCall state advances from 'new'
-    // to 'establishing' immediately on incoming INVITE (not waiting for ACK).
-    this.session.transition('ringing');
   }
 
   /**

@@ -515,9 +515,9 @@ export class BrowserCall extends TypedEventEmitter<BrowserCallEventMap> {
     session: { on(listener: (event: SessionEvent) => void): void; state: string },
   ): void {
     // Commit the current session state immediately so BrowserCall advances
-    // from 'new' even when the session already transitioned before listener
-    // attachment (e.g. incoming INVITE transitions to 'ringing' in the
-    // Invitation constructor before IncomingBrowserCall attaches).
+    // from 'new' even when the session already held a state at listener
+    // attachment — an incoming INVITE stays 'initial' in the Invitation
+    // constructor until answer/reject, and no further event fires until then.
     this._commitState(session.state);
     session.on((event: SessionEvent) => {
       this._commitState(event.state, event.error);

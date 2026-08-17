@@ -117,7 +117,7 @@ complete without error.
 | 1  | authenticated-registration      | Register succeeds, status shows "registered"        |
 | 2  | outgoing-two-way-audio          | Both sides hear audio after answer                  |
 | 3  | incoming-answer-remote-bye      | Answer incoming call, remote hangs up               |
-| 4  | incoming-reject                 | Reject incoming call, status shows terminal state   |
+| 4  | incoming-reject                 | Reject incoming call, status shows failed           |
 | 5  | outgoing-cancel                 | Cancel outgoing INVITE before answer                |
 | 6  | local-and-remote-hangup         | Both local and remote hangup work                   |
 | 7  | mute-unmute                     | Mute silences local, unmute restores                |

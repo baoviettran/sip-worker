@@ -133,7 +133,7 @@ All states are immutable, orthogonal unions committed before observers run.
 
 | State | Meaning |
 | --- | --- |
-| `new` | Call handle created, INVITE not yet sent (or not yet answered). |
+| `new` | Internal initial value before the call's session state is committed at construction; a returned call already reports `establishing`. |
 | `establishing` | INVITE/answer exchange in progress. |
 | `established` | Confirmed (2xx + ACK) AND media connected. |
 | `terminating` | BYE in flight. |

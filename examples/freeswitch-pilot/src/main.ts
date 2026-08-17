@@ -676,8 +676,14 @@ function render(): void {
       }
       previousActiveCall = active;
     } else if (previousActiveCall !== undefined) {
-      // Active call transitioned to undefined — mark terminated.
-      lastKnown.callState = 'terminated';
+      // The active call ended. Its terminal state was already committed by the
+      // stateChanged listener BEFORE release removed it from phone.activeCall
+      // (releaseCall runs first in setStateValue), so lastKnown already holds
+      // 'failed' or 'terminated' here. Only synthesize 'terminated' when no
+      // terminal state was observed (e.g. a dispose that cleared the set).
+      if (lastKnown.callState !== 'failed' && lastKnown.callState !== 'terminated') {
+        lastKnown.callState = 'terminated';
+      }
       previousActiveCall = undefined;
     }
   }
