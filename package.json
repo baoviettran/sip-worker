@@ -32,7 +32,10 @@
     "test:package": "node test/package/workspace-pack.test.mjs",
     "test:compatibility": "node test/compatibility/packed-compatibility.test.mjs",
     "test:docs": "node test/package/documentation-contract.test.mjs",
-    "verify": "npm run test:docs && npm run typecheck && npm run build && npm test && npm run test:architecture && npm run test:api && npm run test:bundle && npm run test:package && npm run test:compatibility"
+    "verify": "npm run test:docs && npm run typecheck && npm run build && npm test && npm run test:architecture && npm run test:api && npm run test:bundle && npm run test:package && npm run test:compatibility",
+    "pilot:typecheck": "npm run build -w @sip-worker/core && npm run build -w sip-worker && tsc --project examples/freeswitch-pilot/tsconfig.json --noEmit",
+    "pilot:build": "node test/freeswitch-pilot/build-pilot.mjs",
+    "pilot:dev": "node test/freeswitch-pilot/serve-pilot.mjs"
   },
   "devDependencies": {
     "@microsoft/api-extractor": "7.58.12",
