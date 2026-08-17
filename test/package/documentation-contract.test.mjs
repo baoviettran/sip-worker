@@ -434,4 +434,27 @@ assert.match(migration07, /restartIce\(\)/);
 assert.match(compat07, /BrowserUserAgent/);
 assert.match(compat07, /deprecated/i);
 
-console.error(`documentation contract OK: ${links} README links resolve, scripts present, 0.7.0 workspace framing honest, migration map complete, v0.5 browser-media contract complete and honest, v0.7 browser-phone contract complete and honest`);
+// ---- (9) FreeSWITCH pilot runbook ----
+const pilotReadme = readProject('examples/freeswitch-pilot/README.md');
+for (const pattern of [
+  /npm run pilot:dev/, /npm run pilot:build/, /npm run test:pilot/,
+  /wss:\/\//i, /HTTPS|localhost/i, /memory only|in memory/i,
+  /FreeSWITCH/i, /manual evidence/i, /not.*certification|not.*production/i,
+  /incoming.*hangup.*not supported|incoming.*INVALID_STATE/i,
+  /register.*expir|refresh/i, /20 consecutive/i, /ResourceSnapshot|resource counters/i,
+]) {
+  assert.match(pilotReadme, pattern, `pilot README should match ${pattern}`);
+}
+
+// root README links to the pilot runbook
+assert.match(readme, /examples\/freeswitch-pilot\/README\.md/);
+
+// all six pilot scripts exist
+for (const script of ['pilot:typecheck', 'pilot:build', 'pilot:dev', 'test:pilot:unit', 'test:pilot:browser', 'test:pilot']) {
+  assert.ok(
+    typeof pkg.scripts[script] === 'string',
+    `root package.json should define script "${script}"`,
+  );
+}
+
+console.error(`documentation contract OK: ${links} README links resolve, scripts present, 0.7.0 workspace framing honest, migration map complete, v0.5 browser-media contract complete and honest, v0.7 browser-phone contract complete and honest, pilot runbook present`);

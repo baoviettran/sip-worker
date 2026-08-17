@@ -144,7 +144,9 @@ TURN provider, and limitations are documented in
 [docs/browser-phone.md](docs/browser-phone.md); diagnostics and resource
 counters live in [docs/diagnostics.md](docs/diagnostics.md). The
 [reference softphone](examples/browser-softphone/) is the packed-artifact
-consumer that demonstrates the full v0.7 lifecycle and controls.
+consumer that demonstrates the full v0.7 lifecycle and controls. The
+[FreeSWITCH pilot](examples/freeswitch-pilot/README.md) adds a single-page operator
+runbook for manual interop testing against a real FreeSWITCH deployment.
 
 ## Browser media use (ESM, v0.5 surface)
 
