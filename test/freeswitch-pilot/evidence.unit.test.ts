@@ -3,7 +3,6 @@ import {
   SCENARIOS,
   EvidenceRecorder,
   type ScenarioId,
-  type EvidenceReport,
 } from '../../examples/freeswitch-pilot/src/evidence.js';
 import type { ResourceSnapshot } from 'sip-worker';
 

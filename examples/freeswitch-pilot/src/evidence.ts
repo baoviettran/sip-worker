@@ -1,4 +1,4 @@
-import type { ResourceSnapshot, DiagnosticRecord } from 'sip-worker';
+import type { ResourceSnapshot } from 'sip-worker';
 import { safeError } from './redaction.js';
 
 // ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ interface TransitionEvent {
 
 interface DiagnosticEvent {
   readonly kind: 'diagnostic';
-  readonly severity: string;
+  readonly severity: FindingSeverity;
   readonly subsystem: string;
   readonly code: string;
   readonly context?: Readonly<Record<string, string | number | boolean>>;
@@ -202,7 +202,7 @@ export class EvidenceRecorder {
   }
 
   diagnostic(
-    severity: string,
+    severity: FindingSeverity,
     subsystem: string,
     code: string,
     context?: Readonly<Record<string, string | number | boolean>>,
