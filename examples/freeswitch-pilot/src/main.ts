@@ -51,6 +51,7 @@ let outgoingCall: OutgoingBrowserCall | undefined;
 let incomingCall: IncomingBrowserCall | undefined;
 let remoteAudioStream: MediaStream | undefined;
 let callDirection: 'outgoing' | 'incoming' | undefined;
+let previousActiveCall: BrowserCall | undefined;
 let renderTimer: number | undefined;
 let selectedMedia: SelectableMediaEnvironment | undefined;
 let evidence: EvidenceRecorder | undefined;
@@ -242,6 +243,7 @@ function wirePhoneEvents(p: BrowserPhone): void {
   p.on('incomingCall', ({ call }) => {
     callDirection = 'incoming';
     incomingCall = call;
+    currentCall = call;
     wireCallEvents(call);
   });
 
@@ -261,6 +263,7 @@ function wireCallEvents(call: BrowserCall): void {
     if (evidence !== undefined) {
       evidence.transition(previous as string, state as string);
     }
+    lastKnown.callState = state as string;
   });
 
   call.on('signalingStateChanged', ({ previous, state }) => {
@@ -671,6 +674,11 @@ function render(): void {
       if (active.remoteIdentity?.uri !== undefined) {
         lastKnown.remoteIdentity = active.remoteIdentity.uri;
       }
+      previousActiveCall = active;
+    } else if (previousActiveCall !== undefined) {
+      // Active call transitioned to undefined — mark terminated.
+      lastKnown.callState = 'terminated';
+      previousActiveCall = undefined;
     }
   }
 

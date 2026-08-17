@@ -239,7 +239,7 @@ describe('BrowserCall — per-call lifecycle', () => {
     emitIncoming(buildIncomingHeaders('<sip:bob@example.com>;tag=bob-tag'));
     await settle();
     expect(incoming).toBeInstanceOf(IncomingBrowserCall);
-    expect(incoming!.state).toBe('new');
+    expect(incoming!.state).toBe('establishing');
 
     const answer = incoming!.answer();
     await settle();

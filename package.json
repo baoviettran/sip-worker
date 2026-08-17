@@ -35,7 +35,10 @@
     "verify": "npm run test:docs && npm run typecheck && npm run build && npm test && npm run test:architecture && npm run test:api && npm run test:bundle && npm run test:package && npm run test:compatibility",
     "pilot:typecheck": "npm run build -w @sip-worker/core && npm run build -w sip-worker && tsc --project examples/freeswitch-pilot/tsconfig.json --noEmit",
     "pilot:build": "node test/freeswitch-pilot/build-pilot.mjs",
-    "pilot:dev": "node test/freeswitch-pilot/serve-pilot.mjs"
+    "pilot:dev": "node test/freeswitch-pilot/serve-pilot.mjs",
+    "test:pilot:unit": "vitest run test/freeswitch-pilot/*.unit.test.ts",
+    "test:pilot:browser": "playwright test --config=test/freeswitch-pilot/playwright.config.ts",
+    "test:pilot": "npm run pilot:typecheck && npm run test:pilot:unit && npm run test:pilot:browser"
   },
   "devDependencies": {
     "@microsoft/api-extractor": "7.58.12",

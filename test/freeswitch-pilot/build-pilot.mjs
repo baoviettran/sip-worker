@@ -117,7 +117,7 @@ export async function buildPilot({ outputDirectory = distDir, testMode = false }
       );
       // Copy relay and synthetic-peer assets into webRoot.
       await cp(
-        join(packageRoot, 'test', 'example', 'relay.js'),
+        join(packageRoot, 'test', 'freeswitch-pilot', 'relay.js'),
         join(webRoot, 'relay.js'),
       );
       await cp(
