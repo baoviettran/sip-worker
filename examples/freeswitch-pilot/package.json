@@ -1,0 +1,8 @@
+{
+  "name": "freeswitch-pilot",
+  "version": "0.7.0",
+  "private": true,
+  "type": "module",
+  "description": "Packed-artifact FreeSWITCH interoperability pilot for sip-worker.",
+  "dependencies": { "sip-worker": "^0.7.0" }
+}
