@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FreeSWITCH Pilot</title>
+  <link rel="stylesheet" href="src/styles.css">
+</head>
+<body>
+  <header>
+    <h1>FreeSWITCH Pilot</h1>
+  </header>
+
+  <main>
+    <!-- ── Configuration ─────────────────────────────────────────── -->
+    <section aria-labelledby="config-heading">
+      <h2 id="config-heading">Configuration</h2>
+      <form id="pilot-config">
+        <fieldset>
+          <legend>SIP Signalling</legend>
+
+          <label for="wss-url">WSS Endpoint</label>
+          <input id="wss-url" type="url" required
+                 placeholder="wss://host:7443/ws">
+
+          <label for="sip-domain">SIP Domain</label>
+          <input id="sip-domain" type="text" required
+                 placeholder="tenant.example.com">
+
+          <label for="extension">Extension</label>
+          <input id="extension" type="text" required
+                 placeholder="1001">
+
+          <label for="sip-password">SIP Password</label>
+          <input id="sip-password" type="password" autocomplete="off"
+                 data-secret="true" required>
+
+          <label for="tester-label">
+            Tester Label
+            <small class="hint">(local only &mdash; not sent in SIP)</small>
+          </label>
+          <input id="tester-label" type="text"
+                 placeholder="dev-freeswitch">
+        </fieldset>
+
+        <fieldset>
+          <legend>ICE / TURN</legend>
+
+          <div id="ice-servers" class="ice-server-list">
+            <!-- ICE server entries are added dynamically -->
+          </div>
+          <button id="add-ice-server" type="button">Add ICE server</button>
+
+          <label class="toggle">
+            <input id="relay-only" type="checkbox">
+            Relay only
+          </label>
+        </fieldset>
+      </form>
+    </section>
+
+    <!-- ── Phone lifecycle ──────────────────────────────────────── -->
+    <section aria-labelledby="lifecycle-heading">
+      <h2 id="lifecycle-heading">Phone lifecycle</h2>
+      <div class="btn-row">
+        <button id="create-phone" type="button">Create</button>
+        <button id="connect" type="button">Connect</button>
+        <button id="register" type="button">Register</button>
+        <button id="unregister" type="button">Unregister</button>
+        <button id="disconnect" type="button">Disconnect</button>
+        <button id="dispose" type="button">Dispose</button>
+        <button id="reset" type="button">Reset</button>
+      </div>
+    </section>
+
+    <!-- ── Call controls ────────────────────────────────────────── -->
+    <section aria-labelledby="call-heading">
+      <h2 id="call-heading">Call controls</h2>
+      <div class="call-row">
+        <label for="destination">Destination</label>
+        <input id="destination" type="text"
+               placeholder="1002">
+        <button id="call" type="button">Call</button>
+        <button id="cancel" type="button">Cancel</button>
+        <button id="answer" type="button">Answer</button>
+        <button id="reject" type="button">Reject</button>
+        <button id="hangup" type="button">Hangup</button>
+      </div>
+      <div class="btn-row">
+        <button id="mute-toggle" type="button">Mute</button>
+        <button id="hold" type="button">Hold</button>
+        <button id="resume" type="button">Resume</button>
+        <button id="restart-ice" type="button">Restart ICE</button>
+        <button id="dtmf-pad" type="button">DTMF Pad</button>
+      </div>
+    </section>
+
+    <!-- ── Media ────────────────────────────────────────────────── -->
+    <section aria-labelledby="media-heading">
+      <h2 id="media-heading">Media</h2>
+      <div class="media-row">
+        <label for="microphone">Microphone</label>
+        <select id="microphone"><option value="">Default</option></select>
+      </div>
+      <div class="media-row">
+        <label for="play-audio">Play audio</label>
+        <select id="play-audio"><option value="">None</option></select>
+      </div>
+    </section>
+
+    <!-- ── Live status ──────────────────────────────────────────── -->
+    <section aria-labelledby="status-heading">
+      <h2 id="status-heading">Live status</h2>
+      <dl class="status-grid" aria-live="polite">
+        <div class="status-chip">
+          <dt>Connection</dt>
+          <dd id="connection-state">—</dd>
+        </div>
+        <div class="status-chip">
+          <dt>Registration</dt>
+          <dd id="registration-state">—</dd>
+        </div>
+        <div class="status-chip">
+          <dt>Call</dt>
+          <dd id="call-state">—</dd>
+        </div>
+        <div class="status-chip">
+          <dt>Signalling</dt>
+          <dd id="signaling-state">—</dd>
+        </div>
+        <div class="status-chip">
+          <dt>Media</dt>
+          <dd id="media-state">—</dd>
+        </div>
+        <div class="status-chip">
+          <dt>Mute</dt>
+          <dd id="mute-state">—</dd>
+        </div>
+        <div class="status-chip">
+          <dt>Hold</dt>
+          <dd id="hold-state">—</dd>
+        </div>
+        <div class="status-chip">
+          <dt>Remote</dt>
+          <dd id="remote-identity">—</dd>
+        </div>
+      </dl>
+
+      <div role="alert" id="typed-error" class="error-box" hidden></div>
+
+      <div class="resources-box">
+        <h3>Resources</h3>
+        <pre id="resources"></pre>
+      </div>
+
+      <div class="event-log-box">
+        <h3>Event Log</h3>
+        <ol id="event-log"></ol>
+      </div>
+    </section>
+
+    <!-- ── Evidence ─────────────────────────────────────────────── -->
+    <section aria-labelledby="evidence-heading">
+      <h2 id="evidence-heading">Evidence</h2>
+
+      <div id="scenario-checklist" class="scenario-checklist">
+        <div class="scenario-row">
+          <label for="scenario-basic-call">Basic call</label>
+          <select id="scenario-basic-call" data-scenario="basic-call">
+            <option value="not-run">not run</option>
+            <option value="pass">pass</option>
+            <option value="fail">fail</option>
+            <option value="blocked">blocked</option>
+          </select>
+          <input type="text" data-scenario-note="basic-call"
+                 placeholder="Notes" class="scenario-note">
+        </div>
+        <div class="scenario-row">
+          <label for="scenario-ice-restart">ICE restart</label>
+          <select id="scenario-ice-restart" data-scenario="ice-restart">
+            <option value="not-run">not run</option>
+            <option value="pass">pass</option>
+            <option value="fail">fail</option>
+            <option value="blocked">blocked</option>
+          </select>
+          <input type="text" data-scenario-note="ice-restart"
+                 placeholder="Notes" class="scenario-note">
+        </div>
+        <div class="scenario-row">
+          <label for="scenario-re-register">Re-register</label>
+          <select id="scenario-re-register" data-scenario="re-register">
+            <option value="not-run">not run</option>
+            <option value="pass">pass</option>
+            <option value="fail">fail</option>
+            <option value="blocked">blocked</option>
+          </select>
+          <input type="text" data-scenario-note="re-register"
+                 placeholder="Notes" class="scenario-note">
+        </div>
+        <div class="scenario-row">
+          <label for="scenario-dtmf">DTMF</label>
+          <select id="scenario-dtmf" data-scenario="dtmf">
+            <option value="not-run">not run</option>
+            <option value="pass">pass</option>
+            <option value="fail">fail</option>
+            <option value="blocked">blocked</option>
+          </select>
+          <input type="text" data-scenario-note="dtmf"
+                 placeholder="Notes" class="scenario-note">
+        </div>
+      </div>
+
+      <div class="evidence-preview-box">
+        <h3>Evidence Preview</h3>
+        <pre id="evidence-preview"></pre>
+      </div>
+
+      <div class="btn-row">
+        <button id="copy-evidence" type="button">Copy Evidence</button>
+        <button id="download-evidence" type="button">Download Evidence</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- PILOT_TEST_HOOK -->
+  <script defer src="/main.js"></script>
+</body>
+</html>
