@@ -166,6 +166,14 @@ test('3. outgoing established call: mute/unmute, hold/resume, DTMF, ICE restart,
   // Hangup
   await page.locator('#hangup').click();
   await expect(page.locator('#call-state')).toHaveText('terminated', { timeout: 15_000 });
+
+  // A second cycle can start immediately after a terminal call: the Call
+  // control re-enables without dispose/reset/reconnect between cycles (the
+  // 20-cycle manual workflow depends on this).
+  await expect(page.locator('#call')).toBeEnabled();
+  await startOutgoingCall(page);
+  await page.locator('#hangup').click();
+  await expect(page.locator('#call-state')).toHaveText('terminated', { timeout: 15_000 });
 });
 
 // ---------------------------------------------------------------------------

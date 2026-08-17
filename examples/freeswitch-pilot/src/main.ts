@@ -264,6 +264,14 @@ function wireCallEvents(call: BrowserCall): void {
       evidence.transition(previous as string, state as string);
     }
     lastKnown.callState = state as string;
+    if (state === 'terminated' || state === 'failed') {
+      // Release the pilot's call refs so the next cycle can start immediately
+      // without dispose/reset (the #call-state chip keeps lastKnown).
+      if (currentCall === call) currentCall = undefined;
+      if (outgoingCall === call) outgoingCall = undefined;
+      if (incomingCall === call) incomingCall = undefined;
+      callDirection = undefined;
+    }
   });
 
   call.on('signalingStateChanged', ({ previous, state }) => {
