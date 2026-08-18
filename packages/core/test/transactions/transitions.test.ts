@@ -23,3 +23,17 @@ describe('assertTransition', () => {
     expect(() => assertTransition({} as TransitionTable<'A'>, 'A', 'B')).toThrow(/invalid transaction state transition: A -> B/);
   });
 });
+
+import { INVITE_CLIENT_TRANSITIONS } from '../../src/transactions/invite-client.js';
+
+describe('INVITE_CLIENT_TRANSITIONS', () => {
+  it('contains exactly the RFC edges', () => {
+    expect(INVITE_CLIENT_TRANSITIONS).toEqual({
+      Calling: ['Proceeding', 'Accepted', 'Completed', 'Terminated'],
+      Proceeding: ['Accepted', 'Completed', 'Terminated'],
+      Accepted: ['Terminated'],
+      Completed: ['Terminated'],
+      Terminated: [],
+    });
+  });
+});

@@ -4,6 +4,7 @@ import { serializeMessage } from '../messages/serializer.js';
 import type { Clock, Transport } from '../transport/transport.js';
 import { cseqMethod } from './ack.js';
 import { cancel, schedule } from './timers.js';
+import { assertTransition, type TransitionTable } from './transitions.js';
 import type {
   ClientTransaction,
   DerivedTimers,
@@ -12,6 +13,15 @@ import type {
 } from './types.js';
 
 export type InviteState = 'Calling' | 'Proceeding' | 'Accepted' | 'Completed' | 'Terminated';
+
+/** RFC 3261 figure 5 / RFC 6026 §8.4. Terminated is reachable from every state. */
+export const INVITE_CLIENT_TRANSITIONS: TransitionTable<InviteState> = {
+  Calling: ['Proceeding', 'Accepted', 'Completed', 'Terminated'],
+  Proceeding: ['Accepted', 'Completed', 'Terminated'],
+  Accepted: ['Terminated'],
+  Completed: ['Terminated'],
+  Terminated: [],
+};
 
 export interface InviteClientOptions {
   readonly request: SipRequestMessage;
@@ -73,6 +83,11 @@ export class InviteClientTransaction {
     return this.currentState;
   }
 
+  private setState(next: InviteState): void {
+    assertTransition(INVITE_CLIENT_TRANSITIONS, this.currentState, next);
+    this.currentState = next;
+  }
+
   /** Send the request once, then arm the timeout and (unreliable) retransmit timers. */
   start(): void {
     if (this.started) return;
@@ -111,7 +126,7 @@ export class InviteClientTransaction {
   private onProvisional(response: SipResponseMessage): void {
     if (this.currentState === 'Calling') {
       this.cancelTimerA();
-      this.currentState = 'Proceeding';
+      this.setState('Proceeding');
       this.emitResponse(response);
     } else if (this.currentState === 'Proceeding') {
       this.emitResponse(response);
@@ -122,7 +137,7 @@ export class InviteClientTransaction {
     if (this.currentState === 'Calling' || this.currentState === 'Proceeding') {
       this.cancelTimerA();
       this.cancelTimerB();
-      this.currentState = 'Accepted';
+      this.setState('Accepted');
       this.emitResponse(response);
       if (this.currentState !== 'Accepted') return;
       this.armTimerM();
@@ -138,7 +153,7 @@ export class InviteClientTransaction {
       this.cancelTimerB();
       const ack = this.buildNon2xxAck(this.request, response);
       this.ackBytes = serializeMessage(ack);
-      this.currentState = 'Completed';
+      this.setState('Completed');
       this.sendBytes(this.ackBytes);
       if (this.currentState !== 'Completed') return;
       this.emitResponse(response);
@@ -230,7 +245,7 @@ export class InviteClientTransaction {
 
   private terminateInternal(): void {
     if (this.currentState === 'Terminated') return;
-    this.currentState = 'Terminated';
+    this.setState('Terminated');
     this.clearAllTimers();
     this.emit({ type: 'terminated', key: this.key });
   }
