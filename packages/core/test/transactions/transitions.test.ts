@@ -37,3 +37,17 @@ describe('INVITE_CLIENT_TRANSITIONS', () => {
     });
   });
 });
+
+import { INVITE_SERVER_TRANSITIONS } from '../../src/transactions/invite-server.js';
+
+describe('INVITE_SERVER_TRANSITIONS', () => {
+  it('contains exactly the RFC edges', () => {
+    expect(INVITE_SERVER_TRANSITIONS).toEqual({
+      Proceeding: ['Accepted', 'Completed', 'Terminated'],
+      Accepted: ['Terminated'],
+      Completed: ['Confirmed', 'Terminated'],
+      Confirmed: ['Terminated'],
+      Terminated: [],
+    });
+  });
+});

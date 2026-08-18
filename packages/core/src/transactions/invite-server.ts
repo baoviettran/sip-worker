@@ -3,6 +3,7 @@ import type { SipRequestMessage, SipResponseMessage } from '../messages/message.
 import { serializeMessage } from '../messages/serializer.js';
 import type { Clock, Transport } from '../transport/transport.js';
 import { cancel, schedule } from './timers.js';
+import { assertTransition, type TransitionTable } from './transitions.js';
 import type {
   DerivedTimers,
   ServerTransaction,
@@ -11,6 +12,15 @@ import type {
 } from './types.js';
 
 type InviteServerState = 'Proceeding' | 'Accepted' | 'Completed' | 'Confirmed' | 'Terminated';
+
+/** RFC 3261 figure 7 / RFC 6026 §8.5-8.7. Terminated is reachable from every state. */
+export const INVITE_SERVER_TRANSITIONS: TransitionTable<InviteServerState> = {
+  Proceeding: ['Accepted', 'Completed', 'Terminated'],
+  Accepted: ['Terminated'],
+  Completed: ['Confirmed', 'Terminated'],
+  Confirmed: ['Terminated'],
+  Terminated: [],
+};
 
 export interface InviteServerOptions {
   readonly request: SipRequestMessage;
@@ -71,6 +81,11 @@ export class InviteServerTransaction {
     return this.currentState;
   }
 
+  private setState(next: InviteServerState): void {
+    assertTransition(INVITE_SERVER_TRANSITIONS, this.currentState, next);
+    this.currentState = next;
+  }
+
   /** Deliver an incoming request (the initial INVITE or a duplicate / ACK). */
   receiveRequest(request: SipRequestMessage): void {
     if (this.currentState === 'Terminated') return;
@@ -114,7 +129,7 @@ export class InviteServerTransaction {
       return Promise.resolve();
     } else if (code <= 299) {
       if (this.currentState === 'Proceeding') {
-        this.currentState = 'Accepted';
+        this.setState('Accepted');
         const send = this.sendAwait(serializeMessage(response));
         if (this.currentState !== 'Accepted') return send;
         this.armTimerL();
@@ -125,7 +140,7 @@ export class InviteServerTransaction {
       return Promise.resolve();
     } else {
       if (this.currentState === 'Proceeding') {
-        this.currentState = 'Completed';
+        this.setState('Completed');
         this.cachedResponse = serializeMessage(response);
         const send = this.sendAwait(this.cachedResponse);
         if (this.currentState !== 'Completed') return send;
@@ -160,7 +175,7 @@ export class InviteServerTransaction {
   private onAck(): void {
     this.cancelTimerG();
     this.cancelTimerH();
-    this.currentState = 'Confirmed';
+    this.setState('Confirmed');
     this.armTimerI();
   }
 
@@ -277,7 +292,7 @@ export class InviteServerTransaction {
 
   private terminateInternal(): void {
     if (this.currentState === 'Terminated') return;
-    this.currentState = 'Terminated';
+    this.setState('Terminated');
     this.clearAllTimers();
     this.emit({ type: 'terminated', key: this.key });
   }
