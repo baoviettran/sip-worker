@@ -422,8 +422,9 @@ export class TransactionLayer implements MessageSink {
   sendResponse(key: TransactionKey, response: SipResponseMessage): void {
     void this.sendResponseAwait(key, response).catch((error: unknown) => {
       if (error instanceof TransportError) return;
-      // Any non-TransportError rejection (e.g. a synchronous throw) is already
-      // surfaced as a transportError by the transaction; swallow the rest.
+      // Swallow the rest: a synchronous throw is surfaced as a transportError by
+      // the transaction, and a non-100 provisional on a non-INVITE is rejected
+      // by the RFC 4320 guard without a wire send (nothing to surface).
     });
   }
 

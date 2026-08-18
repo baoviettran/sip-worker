@@ -92,6 +92,8 @@ export class NonInviteServerTransaction {
    *
    * The transaction state commits BEFORE the transport send, and the returned
    * promise settles with THAT exact send (rejecting when the send rejects).
+   * A provisional response in 101-199 additionally rejects (RFC 4320 §4.1)
+   * with a `SipError` before any state change or wire send.
    * Retransmissions and cached resends use `sendBytes`, which stays
    * fire-and-forget and emits a transportError only via the existing path.
    */
