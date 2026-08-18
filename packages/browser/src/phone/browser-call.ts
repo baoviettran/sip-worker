@@ -578,6 +578,8 @@ function toSignalingRecoveryError(error: unknown): Error {
 
 function mapCallState(sessionState: string): CallState {
   switch (sessionState) {
+    case 'initial':
+      return 'new';
     case 'confirmed':
       return 'established';
     case 'terminating':

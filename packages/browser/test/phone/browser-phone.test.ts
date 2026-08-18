@@ -36,7 +36,7 @@ describe('BrowserPhone — lifecycle and ownership', () => {
 
     const call = phone.createCall('sip:bob@example.com') as OutgoingBrowserCall;
     expect(call).toBeInstanceOf(OutgoingBrowserCall);
-    expect(call.state).toBe('establishing');
+    expect(call.state).toBe('new');
     expect(sentRequests('INVITE')).toHaveLength(0);
     const start = call.start();
     await answerInviteAndConnectMedia();
@@ -69,7 +69,7 @@ describe('BrowserPhone — lifecycle and ownership', () => {
     const call = received[0];
     expect(call).toBeInstanceOf(IncomingBrowserCall);
     const incoming = call as IncomingBrowserCall;
-    expect(incoming.state).toBe('establishing');
+    expect(incoming.state).toBe('new');
 
     const answerPromise = incoming.answer();
     await settle();
