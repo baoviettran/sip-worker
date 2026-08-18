@@ -4,6 +4,7 @@ import { serializeMessage } from '../messages/serializer.js';
 import type { Clock, Transport } from '../transport/transport.js';
 import { cseqMethod } from './ack.js';
 import { cancel, schedule } from './timers.js';
+import { assertTransition, type TransitionTable } from './transitions.js';
 import type {
   ClientTransaction,
   DerivedTimers,
@@ -12,6 +13,14 @@ import type {
 } from './types.js';
 
 export type NonInviteState = 'Trying' | 'Proceeding' | 'Completed' | 'Terminated';
+
+/** RFC 3261 figure 6. Terminated is reachable from every state. */
+export const NON_INVITE_CLIENT_TRANSITIONS: TransitionTable<NonInviteState> = {
+  Trying: ['Proceeding', 'Completed', 'Terminated'],
+  Proceeding: ['Completed', 'Terminated'],
+  Completed: ['Terminated'],
+  Terminated: [],
+};
 
 export interface NonInviteClientOptions {
   readonly request: SipRequestMessage;
@@ -68,6 +77,11 @@ export class NonInviteClientTransaction {
     return this.currentState;
   }
 
+  private setState(next: NonInviteState): void {
+    assertTransition(NON_INVITE_CLIENT_TRANSITIONS, this.currentState, next);
+    this.currentState = next;
+  }
+
   /** Send the request once, then arm the timeout and (unreliable) retransmit timers. */
   start(): void {
     if (this.started) return;
@@ -104,7 +118,7 @@ export class NonInviteClientTransaction {
 
   private onProvisional(response: SipResponseMessage): void {
     if (this.currentState === 'Trying') {
-      this.currentState = 'Proceeding';
+      this.setState('Proceeding');
       this.retransmitInterval = this.timers.T2;
       if (!this.reliable) this.armTimerE(this.timers.T2);
       this.emitResponse(response);
@@ -117,7 +131,7 @@ export class NonInviteClientTransaction {
     if (this.currentState === 'Trying' || this.currentState === 'Proceeding') {
       this.cancelTimerE();
       this.cancelTimerF();
-      this.currentState = 'Completed';
+      this.setState('Completed');
       this.emitResponse(response);
       if (this.currentState !== 'Completed') return;
       this.armTimerK();
@@ -200,7 +214,7 @@ export class NonInviteClientTransaction {
 
   private terminateInternal(): void {
     if (this.currentState === 'Terminated') return;
-    this.currentState = 'Terminated';
+    this.setState('Terminated');
     this.clearAllTimers();
     this.emit({ type: 'terminated', key: this.key });
   }
