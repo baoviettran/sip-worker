@@ -122,7 +122,7 @@ export class NonInviteServerTransaction {
       this.setState('Completed');
       this.cachedResponse = serializeMessage(response);
       const send = this.sendAwait(this.cachedResponse);
-      if (this.currentState !== 'Completed') return send;
+      if ((this.currentState as string) !== 'Completed') return send;
       this.armTimerJ();
       return send;
     }

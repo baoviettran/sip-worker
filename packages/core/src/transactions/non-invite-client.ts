@@ -133,7 +133,7 @@ export class NonInviteClientTransaction {
       this.cancelTimerF();
       this.setState('Completed');
       this.emitResponse(response);
-      if (this.currentState !== 'Completed') return;
+      if ((this.currentState as string) !== 'Completed') return;
       this.armTimerK();
     }
   }

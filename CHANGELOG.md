@@ -6,6 +6,20 @@ All notable changes to this project are documented in this file, following
 
 ## [Unreleased]
 
+### Fixed
+
+- **RFC 4320 compliance.** A non-INVITE request (e.g. `OPTIONS`, `BYE`,
+  `CANCEL`) is no longer answered with a provisional response other than
+  `100 Trying`; the non-INVITE server transaction rejects `101-199` responses
+  from the TU with a `PROTOCOL_ERROR` `SipError` and sends nothing.
+
+### Changed
+
+- **Asserted transaction transitions.** The four RFC 3261 transaction state
+  machines now route every state change through a transition table check
+  (RFC 3261 figures 5-8, RFC 6026), so an illegal transition throws instead of
+  silently corrupting transaction state. No behavioral change in valid flows.
+
 ## [0.7.0] - 2026-08-18
 
 ### Added

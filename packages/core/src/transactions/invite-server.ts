@@ -131,7 +131,7 @@ export class InviteServerTransaction {
       if (this.currentState === 'Proceeding') {
         this.setState('Accepted');
         const send = this.sendAwait(serializeMessage(response));
-        if (this.currentState !== 'Accepted') return send;
+        if ((this.currentState as string) !== 'Accepted') return send;
         this.armTimerL();
         return send;
       } else if (this.currentState === 'Accepted') {
@@ -143,9 +143,9 @@ export class InviteServerTransaction {
         this.setState('Completed');
         this.cachedResponse = serializeMessage(response);
         const send = this.sendAwait(this.cachedResponse);
-        if (this.currentState !== 'Completed') return send;
+        if ((this.currentState as string) !== 'Completed') return send;
         if (!this.reliable) this.startG();
-        if (this.currentState !== 'Completed') return send;
+        if ((this.currentState as string) !== 'Completed') return send;
         this.armTimerH();
         return send;
       }

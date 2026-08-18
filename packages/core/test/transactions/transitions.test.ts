@@ -20,7 +20,7 @@ describe('assertTransition', () => {
   });
 
   it('throws when the source row is missing', () => {
-    expect(() => assertTransition({} as TransitionTable<'A'>, 'A', 'B')).toThrow(/invalid transaction state transition: A -> B/);
+    expect(() => assertTransition({} as TransitionTable<'A' | 'B'>, 'A', 'B')).toThrow(/invalid transaction state transition: A -> B/);
   });
 });
 

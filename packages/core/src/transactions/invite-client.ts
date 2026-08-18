@@ -139,7 +139,7 @@ export class InviteClientTransaction {
       this.cancelTimerB();
       this.setState('Accepted');
       this.emitResponse(response);
-      if (this.currentState !== 'Accepted') return;
+      if ((this.currentState as string) !== 'Accepted') return;
       this.armTimerM();
     } else if (this.currentState === 'Accepted') {
       // Emit every 2xx; do not restart Timer M.
@@ -155,9 +155,9 @@ export class InviteClientTransaction {
       this.ackBytes = serializeMessage(ack);
       this.setState('Completed');
       this.sendBytes(this.ackBytes);
-      if (this.currentState !== 'Completed') return;
+      if ((this.currentState as string) !== 'Completed') return;
       this.emitResponse(response);
-      if (this.currentState !== 'Completed') return;
+      if ((this.currentState as string) !== 'Completed') return;
       this.armTimerD();
     } else if (this.currentState === 'Completed') {
       // Repeated final response: resend the cached ACK without emitting.
