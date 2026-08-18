@@ -64,3 +64,16 @@ describe('NON_INVITE_CLIENT_TRANSITIONS', () => {
     });
   });
 });
+
+import { NON_INVITE_SERVER_TRANSITIONS } from '../../src/transactions/non-invite-server.js';
+
+describe('NON_INVITE_SERVER_TRANSITIONS', () => {
+  it('contains exactly the RFC edges', () => {
+    expect(NON_INVITE_SERVER_TRANSITIONS).toEqual({
+      Trying: ['Proceeding', 'Completed', 'Terminated'],
+      Proceeding: ['Completed', 'Terminated'],
+      Completed: ['Terminated'],
+      Terminated: [],
+    });
+  });
+});

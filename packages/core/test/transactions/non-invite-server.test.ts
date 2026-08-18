@@ -64,10 +64,18 @@ describe('NonInviteServerTransaction', () => {
     expect(h.events.filter((e) => e.type === 'request')).toHaveLength(1);
   });
 
-  it('1xx from Trying sends, moves to Proceeding', () => {
+  it('rejects a non-100 provisional (RFC 4320 §4.1), sends nothing', async () => {
     const h = setup();
     start(h);
-    h.tx.sendResponse(response(180));
+    await expect(h.tx.sendResponseAwait(response(180))).rejects.toThrow(/non-INVITE/);
+    expect(h.tx.state).toBe('Trying');
+    expect(h.transport.sent.length).toBe(0);
+  });
+
+  it('100 from Trying sends, moves to Proceeding', () => {
+    const h = setup();
+    start(h);
+    h.tx.sendResponse(response(100));
     expect(h.tx.state).toBe('Proceeding');
     expect(h.transport.sent.length).toBe(1);
   });
@@ -89,7 +97,7 @@ describe('NonInviteServerTransaction', () => {
   it('duplicate in Trying/Proceeding/Completed resends the latest response when present', () => {
     const h = setup();
     start(h);
-    h.tx.sendResponse(response(180));
+    h.tx.sendResponse(response(100));
     expect(h.transport.sent.length).toBe(1);
     // Duplicate in Proceeding resends the cached 1xx.
     h.tx.receiveRequest(h.tx.request);

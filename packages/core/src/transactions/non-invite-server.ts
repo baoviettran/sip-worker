@@ -1,8 +1,9 @@
-import { TransportError } from '../errors.js';
+import { SipError, TransportError } from '../errors.js';
 import type { SipRequestMessage, SipResponseMessage } from '../messages/message.js';
 import { serializeMessage } from '../messages/serializer.js';
 import type { Clock, Transport } from '../transport/transport.js';
 import { cancel, schedule } from './timers.js';
+import { assertTransition, type TransitionTable } from './transitions.js';
 import type {
   DerivedTimers,
   ServerTransaction,
@@ -11,6 +12,14 @@ import type {
 } from './types.js';
 
 type NonInviteServerState = 'Trying' | 'Proceeding' | 'Completed' | 'Terminated';
+
+/** RFC 3261 figure 8. Terminated is reachable from every state. */
+export const NON_INVITE_SERVER_TRANSITIONS: TransitionTable<NonInviteServerState> = {
+  Trying: ['Proceeding', 'Completed', 'Terminated'],
+  Proceeding: ['Completed', 'Terminated'],
+  Completed: ['Terminated'],
+  Terminated: [],
+};
 
 export interface NonInviteServerOptions {
   readonly request: SipRequestMessage;
@@ -61,6 +70,11 @@ export class NonInviteServerTransaction {
     return this.currentState;
   }
 
+  private setState(next: NonInviteServerState): void {
+    assertTransition(NON_INVITE_SERVER_TRANSITIONS, this.currentState, next);
+    this.currentState = next;
+  }
+
   /** Deliver an incoming request (the initial request or a duplicate). */
   receiveRequest(request: SipRequestMessage): void {
     if (this.currentState === 'Terminated') return;
@@ -85,9 +99,18 @@ export class NonInviteServerTransaction {
     if (this.currentState === 'Terminated') return Promise.resolve();
     const code = response.statusCode;
     if (code < 100 || code > 699) return Promise.resolve();
+    // RFC 4320 §4.1: a non-INVITE request MUST NOT receive a provisional
+    // response other than 100. Reject loudly so the TU learns the misuse
+    // (mirrors SIP.js's throw); the fire-and-forget sendResponse wrapper
+    // consumes the rejection.
+    if (code > 100 && code <= 199) {
+      return Promise.reject(
+        new SipError(0, 'non-INVITE provisional response other than 100 is not allowed (RFC 4320 §4.1)'),
+      );
+    }
     if (code <= 199) {
       if (this.currentState === 'Trying') {
-        this.currentState = 'Proceeding';
+        this.setState('Proceeding');
         this.cachedResponse = serializeMessage(response);
         return this.sendAwait(this.cachedResponse);
       } else if (this.currentState === 'Proceeding') {
@@ -96,7 +119,7 @@ export class NonInviteServerTransaction {
       }
       return Promise.resolve();
     } else if (this.currentState === 'Trying' || this.currentState === 'Proceeding') {
-      this.currentState = 'Completed';
+      this.setState('Completed');
       this.cachedResponse = serializeMessage(response);
       const send = this.sendAwait(this.cachedResponse);
       if (this.currentState !== 'Completed') return send;
@@ -170,7 +193,7 @@ export class NonInviteServerTransaction {
 
   private terminateInternal(): void {
     if (this.currentState === 'Terminated') return;
-    this.currentState = 'Terminated';
+    this.setState('Terminated');
     this.clearAllTimers();
     this.emit({ type: 'terminated', key: this.key });
   }
