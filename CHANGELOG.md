@@ -6,7 +6,7 @@ All notable changes to this project are documented in this file, following
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-08-16
+## [0.7.0] - 2026-08-18
 
 ### Added
 
@@ -56,6 +56,15 @@ All notable changes to this project are documented in this file, following
   [migration guide](docs/migrations/0.5-to-0.7.md) for the signature map.
 - The v0.5 `BrowserUserAgent` + `ua.media` surface remains available as a
   **deprecated compatibility wrapper** over the same phone runtime.
+
+### Fixed
+
+- **No spurious `establishing` self-transition on confirmed-before-media
+  answers.** When an incoming call's signaling confirmed before its media
+  connected, the answer path re-emitted `establishing` after that state was
+  already committed, surfacing an `establishing → establishing` self-transition
+  event. The gate now skips the transition when the call is already
+  `establishing` or `established`.
 
 ### Security
 
