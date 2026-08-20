@@ -654,6 +654,19 @@ describe('Registrar', () => {
     expect(h.registrar.state).toBe('failed');
   });
 
+  it('maps a received 408 to REGISTRATION_FAILED, distinct from the local Timer F timeout', async () => {
+    // Deliberate divergence (RFC 4320): sip-worker passes a received 408 to the
+    // TU as a normal final response instead of suppressing it. The registrar
+    // surfaces it as REGISTRATION_FAILED (the server saw the request) rather
+    // than the TIMEOUT a local Timer F expiry produces.
+    const h = setup();
+    const registration = h.registrar.register();
+    await flush();
+    respond(h, 408);
+    await expect(registration).rejects.toMatchObject({ code: 'REGISTRATION_FAILED' });
+    expect(h.registrar.state).toBe('failed');
+  });
+
   it('rejects an in-flight register when the transport disconnects', async () => {
     const h = setup();
     const registration = h.registrar.register();

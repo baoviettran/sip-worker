@@ -20,6 +20,18 @@ All notable changes to this project are documented in this file, following
   (RFC 3261 figures 5-8, RFC 6026), so an illegal transition throws instead of
   silently corrupting transaction state. No behavioral change in valid flows.
 
+### Verified
+
+- **Dialog-layer 2xx ownership confirmed against the SIP.js comparison.**
+  The three items the SIP.js transaction diff flagged as dialog-layer
+  confirmations are now verified: a retransmitted INVITE while a 2xx is
+  outstanding re-sends the 2xx (end-to-end integration test); forked 2xx
+  branches are tracked per To tag with a cached, tag-matched ACK re-sent on
+  repeated 2xx; and a received 408 on a non-INVITE exchange is surfaced to the
+  TU (`REGISTRATION_FAILED` for REGISTER, liveness-proving for OPTIONS) rather
+  than suppressed — a deliberate RFC 4320 divergence from SIP.js. See
+  [docs/2026-08-18-sipjs-transaction-diff.md](docs/2026-08-18-sipjs-transaction-diff.md).
+
 ## [0.7.0] - 2026-08-18
 
 ### Added

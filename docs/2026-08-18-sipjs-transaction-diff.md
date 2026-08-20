@@ -161,11 +161,35 @@ RFC default T1=500, T2=4000, T4=5000.
    a 408 to the same outcome as the local Timer F timeout; if it already does,
    the transaction-level suppression is optional polish.
 
+   **Resolution (2026-08-20): verified as a deliberate divergence, kept.** The
+   two non-INVITE consumers both treat a received 408 as more informative than
+   a local timeout, which is the RFC 4320 intent:
+   - `Registrar`: a received 408 fails the exchange with
+     `REGISTRATION_FAILED` (the server saw the request); a local Timer F
+     expiry fails it with `TIMEOUT`. Locked in by
+     `packages/core/test/ua/registrar.test.ts` ("maps a received 408 to
+     REGISTRATION_FAILED, distinct from the local Timer F timeout").
+   - `OptionsLiveness`: any final response — including 408 — proves peer
+     liveness and schedules the next probe; only a transaction timeout or
+     transport error reports a liveness failure. A 408 therefore cannot be
+     conflated with "peer dead".
+   Transaction-level suppression (SIP.js) would discard exactly the evidence
+   the TU uses; pass-through stays.
+
 4. **Per-`to-tag` 2xx ACK tracking.** The `ackRetransmissionCache` (Map of
    to-tag → ACK) is SIP.js's answer to forked INVITEs: multiple 2xx branches
    each get their own ACK. sip-worker's dialog layer needs the same
    per-`to-tag` bookkeeping when it re-ACKs retransmitted 2xx responses — worth
    confirming it keys ACKs by to-tag, not by dialog/CSeq alone.
+
+   **Resolution (2026-08-20): already implemented.** `DialogSet`
+   (`packages/core/src/ua/dialog-set.ts`) keys every fork by its remote To
+   tag, serializes a per-dialog ACK once (its To header carries that fork's
+   tag, `createAck` on the fork's own `Dialog`), caches the bytes, and re-sends
+   the cached ACK on a repeated 2xx for the same tag (`handleSuccess`). Extra
+   forks are BYE-cleaned once. Covered by
+   `packages/core/test/ua/dialog-set.test.ts` and the forked-INVITE cases in
+   `packages/core/test/ua/inviter.test.ts`.
 
 ### Deliberate divergences to keep (sip-worker is ahead)
 
@@ -193,6 +217,17 @@ RFC default T1=500, T2=4000, T4=5000.
    duplicate in the transaction and expose a `retransmitAcceptedResponse()`
    equivalent.
 
+   **Resolution (2026-08-20): already implemented and proven.** The
+   forwarding + TU-resend contract holds: `InviteServerTransaction` emits the
+   duplicate in `Accepted`, the UA routes it to the existing `Invitation`
+   (same initial-INVITE identity), and `Invitation.handleDuplicateInvite`
+   (`packages/core/src/ua/invitation.ts`) re-sends the cached 2xx with a fresh
+   Via for the new request — the accepted fork of this finding. Proven
+   end-to-end by `packages/core/test/integration/call.test.ts` ("reuses an
+   accepted Invitation for a duplicate INVITE on a new transaction"), which
+   asserts a second 200 OK with the invitation's To tag on the duplicate
+   transaction.
+
 10. **Provisional retransmission (RFC 13.3.1.1).** SIP.js carries a 60 s
     `setInterval` resending the last non-100 provisional (self-flagged as
     misplaced in the transaction). sip-worker has nothing. Only matters for
@@ -200,3 +235,10 @@ RFC default T1=500, T2=4000, T4=5000.
     silent INVITE). Low priority given hold is a sendonly re-INVITE, but worth
     a deliberate decision — it is a UAS-core concern, not a transaction one,
     so the fix belongs above the transaction layer in sip-worker.
+
+    **Resolution (2026-08-20): consciously deferred.** Agreed it is a
+    UAS-core concern (the last sent provisional lives above the transaction),
+    and no current sip-worker flow (hold/resume re-INVITE, immediate answer)
+    leaves a call in early-media long enough for a proxy to treat it as
+    silent. Track as a UAS-core enhancement if the FreeSWITCH/softswitch pilot
+    surfaces a need; not a transaction-layer change.
