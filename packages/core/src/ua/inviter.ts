@@ -1039,6 +1039,9 @@ export class Inviter {
   }
 
   private failHangup(reason: unknown): void {
+    // Terminate the INVITE client transaction to clear Timer M (RFC 6026)
+    // even when BYE fails — the transaction layer must not linger.
+    this.terminateInviteTransaction();
     this.teardownHangup();
     const deferred = this.hangupDeferred;
     this.hangupDeferred = undefined;
