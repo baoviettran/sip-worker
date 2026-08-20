@@ -33,3 +33,36 @@ describe('core soak', () => {
     expect(result.stateTrace).toContain('terminated');
   });
 });
+
+const soakDurationMs = Number(process.env.SOAK_DURATION_MS ?? 0);
+const interCycleMs = Number(process.env.SOAK_INTER_CYCLE_MS ?? 500);
+
+it.skipIf(soakDurationMs <= 0)(
+  'runs the configured soak window without upward trends or leaks',
+  { timeout: soakDurationMs + 60_000 },
+  async () => {
+    const cycles = Math.max(1, Math.ceil(soakDurationMs / interCycleMs) * 2);
+    const result = await runCoreSoak({ cycles, interCycleMs, maxDurationMs: soakDurationMs });
+
+    const tolerance = Math.max(1, Math.floor(0.001 * result.samples.length));
+    expect(result.callFailures, `${result.callFailures} call failures across ${result.samples.length} cycles`).toBeLessThanOrEqual(tolerance);
+
+    expect(result.zeroTimers).toBe(0);
+    expect(result.zeroListeners).toBe(0);
+
+    assertNoUpwardTrend(result.samples.map((s) => ({ tMs: s.tMs, value: s.timers })), {
+      max: 8,
+      maxSlopePerHour: 1,
+      maxTailGrowth: 1,
+    });
+    assertNoUpwardTrend(result.samples.map((s) => ({ tMs: s.tMs, value: s.listeners })), {
+      max: 12,
+      maxSlopePerHour: 1,
+      maxTailGrowth: 1,
+    });
+
+    // The soak actually exercised the full call lifecycle.
+    expect(result.invitesHandled).toBeGreaterThan(0);
+    expect(result.byesHandled).toBeGreaterThan(0);
+  },
+);
