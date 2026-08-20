@@ -9,6 +9,7 @@ on:
 jobs:
   core-soak:
     runs-on: ubuntu-latest
+    timeout-minutes: 500
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -31,6 +32,7 @@ jobs:
 
   browser-soak:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
