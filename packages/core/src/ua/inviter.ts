@@ -86,6 +86,8 @@ export class Inviter {
   private inviteDeferred: { resolve: () => void; reject: (reason: unknown) => void } | undefined;
   private currentRequest: SipRequestMessage | undefined;
   private unsubscribe: (() => void) | undefined;
+  /** Dispose the INVITE client transaction only (clears Timer M); leaves the stateless fork listener alive. */
+  private unsubscribeInviteTxn: (() => void) | undefined;
   private dialogSet: DialogSet | undefined;
   private hangingUp = false;
   private hangupDeferred: { resolve: () => void; reject: (reason: unknown) => void } | undefined;
@@ -598,6 +600,7 @@ export class Inviter {
           disposeRequest();
           return;
         }
+        this.unsubscribeInviteTxn = disposeOwned;
         this.unsubscribe = disposeRequest;
       },
       (event: TransactionLayerEvent) => {
@@ -1024,6 +1027,10 @@ export class Inviter {
 
   private settleHangup(): void {
     this.disposeNegotiator(new SipError(0, 'call terminated', 'LIFECYCLE_ABORTED'));
+    // Terminate the INVITE client transaction to clear Timer M (RFC 6026
+    // 2xx-absorption timer) without tearing down the stateless fork listener,
+    // which must remain alive to absorb late forked 2xx after hangup.
+    this.terminateInviteTransaction();
     this.teardownHangup();
     const deferred = this.hangupDeferred;
     this.hangupDeferred = undefined;
@@ -1051,6 +1058,20 @@ export class Inviter {
     if (this.unsubscribe !== undefined) {
       this.unsubscribe();
       this.unsubscribe = undefined;
+    }
+    this.unsubscribeInviteTxn = undefined;
+  }
+
+  /**
+   * Terminate the INVITE client transaction to clear its timers (notably Timer M,
+   * the RFC 6026 2xx-absorption timer) without tearing down the stateless fork
+   * listener. Used by settleHangup() after BYE completes so late forked 2xx can
+   * still be ACKed and cleaned up.
+   */
+  private terminateInviteTransaction(): void {
+    if (this.unsubscribeInviteTxn !== undefined) {
+      this.unsubscribeInviteTxn();
+      this.unsubscribeInviteTxn = undefined;
     }
   }
 
