@@ -38,6 +38,9 @@
     "pilot:dev": "node test/freeswitch-pilot/serve-pilot.mjs",
     "test:pilot:unit": "vitest run test/freeswitch-pilot/*.unit.test.ts",
     "test:pilot:browser": "playwright test --config=test/freeswitch-pilot/playwright.config.ts",
+    "test:soak": "npm run test:soak:core && npm run test:soak:browser",
+    "test:soak:core": "vitest run test/soak/core-soak.test.ts",
+    "test:soak:browser": "playwright test --config=test/soak/playwright.config.ts",
     "test:pilot": "npm run pilot:typecheck && npm run test:pilot:unit && npm run test:pilot:browser"
   },
   "devDependencies": {

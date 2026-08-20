@@ -1,0 +1,54 @@
+name: soak
+
+on:
+  schedule:
+    # Nightly 8h soak — the v0.9 release gate. Off the :00/:30 marks.
+    - cron: '23 4 * * *'
+  pull_request:
+
+jobs:
+  core-soak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Core soak (8h)
+        if: github.event_name == 'schedule'
+        run: npm run test:soak:core
+        env:
+          SOAK_DURATION_MS: '28800000'
+          SOAK_INTER_CYCLE_MS: '500'
+      - name: Core soak (PR bounded slice)
+        if: github.event_name == 'pull_request'
+        run: npm run test:soak:core
+        env:
+          SOAK_DURATION_MS: '900000'
+          SOAK_INTER_CYCLE_MS: '250'
+
+  browser-soak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install chromium
+        run: npx playwright install --with-deps chromium
+      - name: Build / pack the browser package (built artifacts only)
+        run: npm run build
+      - name: Browser soak (8h)
+        if: github.event_name == 'schedule'
+        run: npm run test:soak:browser
+        env:
+          SOAK_CYCLES: '2000'
+      - name: Browser soak (PR bounded slice)
+        if: github.event_name == 'pull_request'
+        run: npm run test:soak:browser
+        env:
+          SOAK_CYCLES: '25'
