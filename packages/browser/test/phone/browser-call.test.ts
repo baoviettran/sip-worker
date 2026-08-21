@@ -605,7 +605,9 @@ describe('BrowserCall — sendDtmf (RFC 4733)', () => {
     await hangup;
     await settle();
     await expect(op).rejects.toMatchObject({ code: 'ABORTED' });
-    expect(h.clock.pendingCount).toBe(before); // DTMF deadline cleared on terminal
+    // DTMF deadline cleared on terminal; settleHangup() also terminates the
+    // INVITE transaction (Timer M), removing one baseline timer.
+    expect(h.clock.pendingCount).toBe(before - 1);
     expect(sender.dtmf.tonechangeListenerCount).toBe(0);
     await h.phone.dispose();
   });

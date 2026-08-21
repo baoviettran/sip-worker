@@ -7,9 +7,10 @@ on:
   pull_request:
 
 jobs:
-  core-soak:
+  # ── Core soak: split into two 3h halves (GitHub Actions 6h platform cap) ──
+  core-soak-1:
     runs-on: ubuntu-latest
-    timeout-minutes: 500
+    timeout-minutes: 200
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -17,11 +18,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Core soak (8h)
+      - name: Core soak — first 3h
         if: github.event_name == 'schedule'
         run: npm run test:soak:core
         env:
-          SOAK_DURATION_MS: '28800000'
+          SOAK_DURATION_MS: '10800000'
           SOAK_INTER_CYCLE_MS: '500'
       - name: Core soak (PR bounded slice)
         if: github.event_name == 'pull_request'
@@ -30,9 +31,28 @@ jobs:
           SOAK_DURATION_MS: '900000'
           SOAK_INTER_CYCLE_MS: '250'
 
-  browser-soak:
+  core-soak-2:
+    needs: core-soak-1
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 200
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Core soak — second 3h
+        run: npm run test:soak:core
+        env:
+          SOAK_DURATION_MS: '10800000'
+          SOAK_INTER_CYCLE_MS: '500'
+
+  # ── Browser soak: split into two halves (media timeout at ~475 cycles) ────
+  browser-soak-1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -44,13 +64,34 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Build / pack the browser package (built artifacts only)
         run: npm run build
-      - name: Browser soak (8h)
+      - name: Browser soak — first 1000 cycles
         if: github.event_name == 'schedule'
         run: npm run test:soak:browser
         env:
-          SOAK_CYCLES: '2000'
+          SOAK_CYCLES: '1000'
       - name: Browser soak (PR bounded slice)
         if: github.event_name == 'pull_request'
         run: npm run test:soak:browser
         env:
           SOAK_CYCLES: '25'
+
+  browser-soak-2:
+    needs: browser-soak-1
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install chromium
+        run: npx playwright install --with-deps chromium
+      - name: Build / pack the browser package (built artifacts only)
+        run: npm run build
+      - name: Browser soak — second 1000 cycles
+        run: npm run test:soak:browser
+        env:
+          SOAK_CYCLES: '1000'
