@@ -170,7 +170,7 @@ export class SipFakeServer {
   _onRequest(socket, msg) {
     switch (msg.method) {
       case 'REGISTER': return this._onRegister(socket, msg);
-      case 'INVITE': return this._onInvite(socket, msg);
+      case 'INVITE': return this._onInvite(socket, msg).catch(() => this._respond(socket, msg, 500, 'Server Internal Error'));
       case 'ACK': return this._onAck(msg);
       case 'CANCEL': return this._onCancel(socket, msg);
       case 'BYE': return this._onBye(socket, msg);
