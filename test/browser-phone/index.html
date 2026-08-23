@@ -157,6 +157,15 @@
             throw error;
           }
           bridge.pcs.push(pc);
+          // Closed PCs must not accumulate here: Chromium caps live
+          // RTCPeerConnections per renderer (500) and a closed PC still counts
+          // against that cap until it is garbage-collected, so retaining every
+          // per-call PC deterministically kills `new RTCPeerConnection` around
+          // cycle ~495 of the soak. Keep only recent history for diagnostics;
+          // consumers only read the LAST entry or count non-closed PCs.
+          if (bridge.pcs.length >= 16) {
+            bridge.pcs = bridge.pcs.filter((p) => p === pc || p.connectionState !== 'closed');
+          }
           captureCandidates(pc, 'library');
           return pc;
         },
