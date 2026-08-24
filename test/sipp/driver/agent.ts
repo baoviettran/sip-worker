@@ -144,6 +144,16 @@ async function runOutgoingCall(ctx: Ctx): Promise<void> {
   await ctx.waitFor(() => traceHas(ctx.trace, 'call', 'terminated'), "call 'terminated'");
 }
 
+async function runByeTimeout(ctx: Ctx): Promise<void> {
+  const inviter = ctx.ua!.createOutgoingCall(`sip:sipp@${ctx.env.host}:${ctx.env.sippPort}`);
+  inviter.session.on((event) => ctx.record({ type: 'call', detail: event.state }));
+  await inviter.invite();
+  await ctx.waitFor(() => traceHas(ctx.trace, 'call', 'confirmed'), "call 'confirmed'");
+  // BYE is unanswered; after Timer F (32 s) hangup() rejects with TIMEOUT and
+  // failHangup reverts the session from 'terminating' back to 'confirmed'.
+  await ctx.hangup(inviter);
+}
+
 async function runIncomingAnswered(ctx: Ctx): Promise<void> {
   const invitation = await ctx.waitForIncoming();
   invitation.session.on((event) => {
@@ -184,6 +194,8 @@ export async function runScenarioAction(scenario: string, ctx: Ctx): Promise<voi
       return runCancelRace(ctx);
     case 'retransmissions':
       return runOutgoingCall(ctx);
+    case 'bye-timeout':
+      return runByeTimeout(ctx);
     default:
       throw new Error(`scenario action not wired: ${scenario}`);
   }
