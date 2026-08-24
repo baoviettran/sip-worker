@@ -46,3 +46,15 @@ driver's UA-level assertions pass (fail-not-skip).
 | bye-timeout | UAS | udp | BYE unanswered → F-timer → hangup rejects, session reverts to confirmed |
 | malformed | UAS | udp | garbage → `PROTOCOL_ERROR` event; registration still succeeds |
 | reconnect | UAS | udp | new transport + fresh REGISTER restores registration, monotonic CSeq |
+
+## Fail-not-skip
+
+`npm run test:sipp` fails (exit nonzero) on any missing XML, image pull failure,
+or driver assertion failure. There is no skip path. `sipp.yml` runs the full
+corpus on PR and nightly.
+
+## Static gates (no docker)
+
+```sh
+npm run test:sipp:infra   # config shape, XML presence, image pin, no-src-imports
+```

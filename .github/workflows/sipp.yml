@@ -1,0 +1,23 @@
+name: sipp-corpus
+
+on:
+  pull_request:
+  schedule:
+    - cron: '23 6 * * *'   # nightly, off the :00/:30 marks
+  workflow_dispatch:
+
+jobs:
+  sipp-corpus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # Full corpus: packs tarballs, boots docker SIPp, aggregates verdicts.
+      # Any missing XML, docker pull failure, or driver crash exits nonzero —
+      # there is no skip path (fail-not-skip is structural).
+      - run: npm run test:sipp
