@@ -135,6 +135,15 @@ async function runRefresh(ctx: Ctx): Promise<void> {
   ctx.ua = null;
 }
 
+async function runOutgoingCall(ctx: Ctx): Promise<void> {
+  const inviter = ctx.ua!.createOutgoingCall(`sip:sipp@${ctx.env.host}:${ctx.env.sippPort}`);
+  inviter.session.on((event) => ctx.record({ type: 'call', detail: event.state }));
+  await inviter.invite();
+  await ctx.waitFor(() => traceHas(ctx.trace, 'call', 'confirmed'), "call 'confirmed'");
+  await ctx.hangup(inviter);
+  await ctx.waitFor(() => traceHas(ctx.trace, 'call', 'terminated'), "call 'terminated'");
+}
+
 /** Dispatch the per-scenario driver action. Scenario tasks add their cases here. */
 export async function runScenarioAction(scenario: string, ctx: Ctx): Promise<void> {
   switch (scenario) {
@@ -146,6 +155,8 @@ export async function runScenarioAction(scenario: string, ctx: Ctx): Promise<voi
         : runRegister(ctx);
     case 'register-refresh':
       return runRefresh(ctx);
+    case 'invite-outgoing':
+      return runOutgoingCall(ctx);
     default:
       throw new Error(`scenario action not wired: ${scenario}`);
   }

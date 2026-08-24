@@ -178,7 +178,7 @@ export class NodeTcpTransport implements Transport {
       const settle = (error?: Error): void => {
         if (settled) return;
         settled = true;
-        if (error === undefined) resolve();
+        if (error == null) resolve();
         else reject(new TransportError('TCP write failed', error));
       };
       try {
