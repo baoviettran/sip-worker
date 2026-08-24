@@ -191,10 +191,10 @@ export class NodeUdpTransport implements Transport {
     const outbound = data.slice();
     return new Promise<void>((resolve, reject) => {
       let settled = false;
-      const settle = (error?: Error): void => {
+      const settle = (error?: Error | null): void => {
         if (settled) return;
         settled = true;
-        if (error === undefined) resolve();
+        if (error == null) resolve();
         else reject(new TransportError('UDP send failed', error));
       };
       try {
