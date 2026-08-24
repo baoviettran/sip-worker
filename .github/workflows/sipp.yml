@@ -17,6 +17,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - run: npm run test:sipp:infra
+      - run: npm run test:sipp:unit
       # Full corpus: packs tarballs, boots docker SIPp, aggregates verdicts.
       # Any missing XML, docker pull failure, or driver crash exits nonzero —
       # there is no skip path (fail-not-skip is structural).

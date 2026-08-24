@@ -156,13 +156,8 @@ async function runByeTimeout(ctx: Ctx): Promise<void> {
 
 async function runIncomingAnswered(ctx: Ctx): Promise<void> {
   const invitation = await ctx.waitForIncoming();
-  invitation.session.on((event) => {
-    console.log(`[driver] session event: ${event.state}`);
-    ctx.record({ type: 'call', detail: event.state });
-  });
-  console.log('[driver] calling invitation.answer()');
+  invitation.session.on((event) => ctx.record({ type: 'call', detail: event.state }));
   await invitation.answer();
-  console.log('[driver] invitation.answer() resolved');
   await ctx.waitFor(() => traceHas(ctx.trace, 'call', 'confirmed'), "call 'confirmed'");
   await ctx.waitFor(() => traceHas(ctx.trace, 'call', 'terminated'), "call 'terminated'");
 }
@@ -276,19 +271,7 @@ export async function main(): Promise<number> {
       private readonly remoteHost: string,
       private readonly remotePort: number,
     ) {
-      socket.on('message', (msg: Buffer, rinfo: { address: string; port: number }) => {
-        const text = new TextDecoder().decode(msg);
-        const lines = text.split('\r\n');
-        const firstLine = lines[0] ?? '';
-        const callId = lines.find((l) => l.toLowerCase().startsWith('call-id:'));
-        const from = lines.find((l) => l.toLowerCase().startsWith('from:'));
-        const to = lines.find((l) => l.toLowerCase().startsWith('to:'));
-        const cseq = lines.find((l) => l.toLowerCase().startsWith('cseq:'));
-        console.log(`[loopback-udp] ${firstLine.split(' ')[0]} from ${rinfo.address}:${rinfo.port} len=${msg.length}`);
-        console.log(`  Call-ID: ${callId}`);
-        console.log(`  From: ${from}`);
-        console.log(`  To: ${to}`);
-        console.log(`  CSeq: ${cseq}`);
+      socket.on('message', (msg: Buffer) => {
         if (msg instanceof Uint8Array) {
           for (const listener of [...this.listeners]) {
             try { listener({ type: 'data', data: msg.slice() }); } catch { /* swallow */ }
