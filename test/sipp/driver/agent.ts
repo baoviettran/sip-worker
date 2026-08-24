@@ -128,8 +128,11 @@ async function runRegistrationFailure(ctx: Ctx): Promise<void> {
 export async function runScenarioAction(scenario: string, ctx: Ctx): Promise<void> {
   switch (scenario) {
     case 'register-basic':
-    case 'register-auth':
       return runRegister(ctx);
+    case 'register-auth':
+      return ctx.env.variant === 'wrong-password'
+        ? runRegistrationFailure(ctx)
+        : runRegister(ctx);
     default:
       throw new Error(`scenario action not wired: ${scenario}`);
   }
