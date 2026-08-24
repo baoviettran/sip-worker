@@ -157,6 +157,14 @@ async function runIncomingAnswered(ctx: Ctx): Promise<void> {
   await ctx.waitFor(() => traceHas(ctx.trace, 'call', 'terminated'), "call 'terminated'");
 }
 
+async function runCancelRace(ctx: Ctx): Promise<void> {
+  const invitation = await ctx.waitForIncoming();
+  invitation.session.on((event) => ctx.record({ type: 'call', detail: event.state }));
+  // The core auto-answers CANCEL with 200 and the INVITE with 487; the
+  // invitation session reaches 'terminated' without ever confirming.
+  await ctx.waitFor(() => traceHas(ctx.trace, 'call', 'terminated'), "call 'terminated'");
+}
+
 /** Dispatch the per-scenario driver action. Scenario tasks add their cases here. */
 export async function runScenarioAction(scenario: string, ctx: Ctx): Promise<void> {
   switch (scenario) {
@@ -172,6 +180,8 @@ export async function runScenarioAction(scenario: string, ctx: Ctx): Promise<voi
       return runOutgoingCall(ctx);
     case 'invite-incoming':
       return runIncomingAnswered(ctx);
+    case 'cancel-race':
+      return runCancelRace(ctx);
     default:
       throw new Error(`scenario action not wired: ${scenario}`);
   }
@@ -335,7 +345,7 @@ export async function main(): Promise<number> {
       // NodeUdpTransport.isFromConfiguredPeer drops packets whose source port
       // doesn't match remotePort.  For incoming-only scenarios the driver must
       // accept INVITEs from any source port, so we use LoopbackTransport.
-      const needsPermissive = env.scenario === 'invite-incoming';
+      const needsPermissive = env.scenario === 'invite-incoming' || env.scenario === 'cancel-race';
       if (needsPermissive) {
         transport = new LoopbackTransport(
           dgram.createSocket('udp4'),
