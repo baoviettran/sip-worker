@@ -144,6 +144,19 @@ async function runOutgoingCall(ctx: Ctx): Promise<void> {
   await ctx.waitFor(() => traceHas(ctx.trace, 'call', 'terminated'), "call 'terminated'");
 }
 
+async function runIncomingAnswered(ctx: Ctx): Promise<void> {
+  const invitation = await ctx.waitForIncoming();
+  invitation.session.on((event) => {
+    console.log(`[driver] session event: ${event.state}`);
+    ctx.record({ type: 'call', detail: event.state });
+  });
+  console.log('[driver] calling invitation.answer()');
+  await invitation.answer();
+  console.log('[driver] invitation.answer() resolved');
+  await ctx.waitFor(() => traceHas(ctx.trace, 'call', 'confirmed'), "call 'confirmed'");
+  await ctx.waitFor(() => traceHas(ctx.trace, 'call', 'terminated'), "call 'terminated'");
+}
+
 /** Dispatch the per-scenario driver action. Scenario tasks add their cases here. */
 export async function runScenarioAction(scenario: string, ctx: Ctx): Promise<void> {
   switch (scenario) {
@@ -157,6 +170,8 @@ export async function runScenarioAction(scenario: string, ctx: Ctx): Promise<voi
       return runRefresh(ctx);
     case 'invite-outgoing':
       return runOutgoingCall(ctx);
+    case 'invite-incoming':
+      return runIncomingAnswered(ctx);
     default:
       throw new Error(`scenario action not wired: ${scenario}`);
   }
@@ -186,6 +201,78 @@ export async function main(): Promise<number> {
       const method = new TextDecoder().decode(data.subarray(0, 128)).split(' ')[0] ?? '';
       if (method === 'REGISTER' || method === 'INVITE') record({ type: 'transport', detail: method });
       return this.inner.send(data);
+    }
+  }
+
+  // Lightweight UDP transport that accepts datagrams from any source port.
+  // NodeUdpTransport.isFromConfiguredPeer rejects packets whose source port
+  // doesn't match remotePort; SIPp UAC mode sends INVITEs from an ephemeral
+  // port, so we need this for incoming-only scenarios.
+  class LoopbackTransport implements Transport {
+    readonly capabilities: TransportCapabilities = Object.freeze({
+      reliable: false,
+      framing: 'datagram',
+      token: 'UDP',
+    });
+    private readonly listeners = new Set<(event: TransportEvent) => void>();
+    private connected = false;
+
+    constructor(
+      private readonly socket: import('node:dgram').Socket,
+      private readonly localPort: number,
+      private readonly remoteHost: string,
+      private readonly remotePort: number,
+    ) {
+      socket.on('message', (msg: Buffer, rinfo: { address: string; port: number }) => {
+        const text = new TextDecoder().decode(msg);
+        const lines = text.split('\r\n');
+        const firstLine = lines[0] ?? '';
+        const callId = lines.find((l) => l.toLowerCase().startsWith('call-id:'));
+        const from = lines.find((l) => l.toLowerCase().startsWith('from:'));
+        const to = lines.find((l) => l.toLowerCase().startsWith('to:'));
+        const cseq = lines.find((l) => l.toLowerCase().startsWith('cseq:'));
+        console.log(`[loopback-udp] ${firstLine.split(' ')[0]} from ${rinfo.address}:${rinfo.port} len=${msg.length}`);
+        console.log(`  Call-ID: ${callId}`);
+        console.log(`  From: ${from}`);
+        console.log(`  To: ${to}`);
+        console.log(`  CSeq: ${cseq}`);
+        if (msg instanceof Uint8Array) {
+          for (const listener of [...this.listeners]) {
+            try { listener({ type: 'data', data: msg.slice() }); } catch { /* swallow */ }
+          }
+        }
+      });
+    }
+
+    connect(): Promise<void> {
+      return new Promise<void>((resolve) => {
+        this.socket.bind(this.localPort, () => {
+          this.connected = true;
+          resolve();
+        });
+      });
+    }
+
+    disconnect(): Promise<void> {
+      return new Promise<void>((resolve) => {
+        this.connected = false;
+        try { this.socket.close(() => resolve()); } catch { resolve(); }
+      });
+    }
+
+    isConnected(): boolean { return this.connected; }
+
+    subscribe(listener: (event: TransportEvent) => void): () => void {
+      this.listeners.add(listener);
+      return () => { this.listeners.delete(listener); };
+    }
+
+    send(data: Uint8Array): Promise<void> {
+      return new Promise<void>((resolve, reject) => {
+        this.socket.send(data, this.remotePort, this.remoteHost, (err) => {
+          if (err) reject(err); else resolve();
+        });
+      });
     }
   }
 
@@ -244,11 +331,25 @@ export async function main(): Promise<number> {
   }): Promise<UserAgent> => {
     let transport: Transport;
     if (env.transport === 'udp') {
-      transport = new NodeUdpTransport(dgram.createSocket('udp4') as unknown as import('@sip-worker/node/transport').DatagramSocketLike, {
-        localPort: opts.localPort,
-        remoteHost: opts.host,
-        remotePort: opts.sippPort,
-      });
+      // SIPp UAC mode sends INVITEs from an ephemeral port, not from -p.
+      // NodeUdpTransport.isFromConfiguredPeer drops packets whose source port
+      // doesn't match remotePort.  For incoming-only scenarios the driver must
+      // accept INVITEs from any source port, so we use LoopbackTransport.
+      const needsPermissive = env.scenario === 'invite-incoming';
+      if (needsPermissive) {
+        transport = new LoopbackTransport(
+          dgram.createSocket('udp4'),
+          opts.localPort,
+          opts.host,
+          opts.sippPort,
+        );
+      } else {
+        transport = new NodeUdpTransport(dgram.createSocket('udp4') as unknown as import('@sip-worker/node/transport').DatagramSocketLike, {
+          localPort: opts.localPort,
+          remoteHost: opts.host,
+          remotePort: opts.sippPort,
+        });
+      }
     } else {
       transport = new NodeTcpTransport(new net.Socket() as unknown as import('@sip-worker/node/transport').StreamSocketLike, { host: opts.host, port: opts.sippPort });
     }
