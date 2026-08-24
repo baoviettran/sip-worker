@@ -124,6 +124,17 @@ async function runRegistrationFailure(ctx: Ctx): Promise<void> {
   throw new Error('registration unexpectedly succeeded');
 }
 
+async function runRefresh(ctx: Ctx): Promise<void> {
+  await ctx.ua!.register();
+  await ctx.waitFor(
+    () => ctx.trace.filter((r) => r.type === 'transport' && r.detail === 'REGISTER').length >= 3,
+    '>= 3 REGISTER wire sends',
+  );
+  // Cancel the refresh timer before the next cycle can send an unanswered REGISTER.
+  await ctx.dispose(ctx.ua!);
+  ctx.ua = null;
+}
+
 /** Dispatch the per-scenario driver action. Scenario tasks add their cases here. */
 export async function runScenarioAction(scenario: string, ctx: Ctx): Promise<void> {
   switch (scenario) {
@@ -133,6 +144,8 @@ export async function runScenarioAction(scenario: string, ctx: Ctx): Promise<voi
       return ctx.env.variant === 'wrong-password'
         ? runRegistrationFailure(ctx)
         : runRegister(ctx);
+    case 'register-refresh':
+      return runRefresh(ctx);
     default:
       throw new Error(`scenario action not wired: ${scenario}`);
   }
