@@ -182,6 +182,8 @@ export async function runScenarioAction(scenario: string, ctx: Ctx): Promise<voi
       return runIncomingAnswered(ctx);
     case 'cancel-race':
       return runCancelRace(ctx);
+    case 'retransmissions':
+      return runOutgoingCall(ctx);
     default:
       throw new Error(`scenario action not wired: ${scenario}`);
   }
