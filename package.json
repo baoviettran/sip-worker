@@ -41,7 +41,11 @@
     "test:soak": "npm run test:soak:core && npm run test:soak:browser",
     "test:soak:core": "vitest run test/soak/core-soak.test.ts",
     "test:soak:browser": "playwright test --config=test/soak/playwright.config.ts",
-    "test:pilot": "npm run pilot:typecheck && npm run test:pilot:unit && npm run test:pilot:browser"
+    "test:pilot": "npm run pilot:typecheck && npm run test:pilot:unit && npm run test:pilot:browser",
+    "build:sipp": "tsup test/sipp/driver/agent.ts --format esm --platform node --out-dir test/sipp/driver/dist --clean --target node20",
+    "test:sipp": "npm run build:sipp && node test/sipp/run-scenario.mjs",
+    "test:sipp:unit": "vitest run test/sipp/driver/assertions.unit.test.ts test/sipp/driver/agent.unit.test.ts",
+    "test:sipp:infra": "node --test 'test/sipp/*.test.mjs' 'test/sipp/**/*.test.mjs'"
   },
   "devDependencies": {
     "@microsoft/api-extractor": "7.58.12",
