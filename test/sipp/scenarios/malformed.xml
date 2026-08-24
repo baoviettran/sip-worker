@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="malformed">
+  <recv request="REGISTER" crlf="true"></recv>
+  <send>
+    <![CDATA[
+      THIS IS NOT SIP AT ALL
+      From: <sip:broken@[local_ip]>
+      To: <sip:x@[local_ip]>
+      Call-ID: broken
+      CSeq: 1 NOPE
+    ]]>
+  </send>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:] ;tag=mal01
+      [last_Call-ID:]
+      [last_CSeq:]
+      Expires: 3
+      Content-Length: 0
+    ]]>
+  </send>
+</scenario>

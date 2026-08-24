@@ -196,6 +196,8 @@ export async function runScenarioAction(scenario: string, ctx: Ctx): Promise<voi
       return runOutgoingCall(ctx);
     case 'bye-timeout':
       return runByeTimeout(ctx);
+    case 'malformed':
+      return runRegister(ctx);
     default:
       throw new Error(`scenario action not wired: ${scenario}`);
   }
