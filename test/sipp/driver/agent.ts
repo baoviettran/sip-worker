@@ -175,6 +175,31 @@ async function runCancelRace(ctx: Ctx): Promise<void> {
   await ctx.waitFor(() => traceHas(ctx.trace, 'call', 'terminated'), "call 'terminated'");
 }
 
+async function runReconnect(ctx: Ctx): Promise<void> {
+  const gen1 = ctx.ua!;
+  await gen1.register();
+  await ctx.waitFor(() => traceHas(ctx.trace, 'registration', 'registered'), "generation 1 'registered'");
+  const identity = gen1.identity!;
+  await ctx.dispose(gen1);
+  ctx.ua = null;
+  // SIPp tracks the peer address per call; reusing the original port ensures
+  // the second 200 OK reaches gen2's socket (a new port would miss it).
+  ctx.ua = await ctx.bootGeneration({
+    sippPort: ctx.env.sippPort,
+    localPort: ctx.env.localPort,
+    host: ctx.env.host,
+    username: ctx.env.username,
+    password: ctx.env.password,
+    initialIdentity: identity,
+  });
+  await ctx.ua.register();
+  // Count records, not traceHas — gen1's 'registered' is already in the trace.
+  await ctx.waitFor(
+    () => ctx.trace.filter((r) => r.type === 'registration').length >= 2,
+    'generation 2 registration record',
+  );
+}
+
 /** Dispatch the per-scenario driver action. Scenario tasks add their cases here. */
 export async function runScenarioAction(scenario: string, ctx: Ctx): Promise<void> {
   switch (scenario) {
@@ -198,6 +223,8 @@ export async function runScenarioAction(scenario: string, ctx: Ctx): Promise<voi
       return runByeTimeout(ctx);
     case 'malformed':
       return runRegister(ctx);
+    case 'reconnect':
+      return runReconnect(ctx);
     default:
       throw new Error(`scenario action not wired: ${scenario}`);
   }
