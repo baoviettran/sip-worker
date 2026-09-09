@@ -33,11 +33,7 @@ export function materializeConf() {
   for (const dir of ['lang', 'ivr_menus', 'chatplan', 'skinny_profiles', 'yaml']) {
     rmSync(join(confDir, dir), { recursive: true, force: true });
   }
-  for (const f of [
-    'tetris.ttml', 'fur_elise.ttml', 'vars.xml.orig',
-    'config.FS0', 'extensions.conf', 'notify-voicemail.tpl',
-    'README_IMPORTANT.txt', 'voicemail.tpl', 'web-vm.tpl', 'mime.types',
-  ]) {
+  for (const f of ['tetris.ttml', 'fur_elise.ttml', 'vars.xml.orig']) {
     rmSync(join(confDir, f), { force: true });
   }
   // 3) drop every vanilla sip profile FILE; the external/ + external-ipv6/
