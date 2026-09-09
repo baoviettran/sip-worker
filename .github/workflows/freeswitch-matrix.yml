@@ -1,0 +1,91 @@
+name: freeswitch-matrix
+
+on:
+  schedule:
+    # Nightly call-matrix release gate. Off the :00/:30 marks.
+    - cron: '47 5 * * *'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  matrix-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Provision a virtual audio sink
+        run: |
+          set -euo pipefail
+          if ! command -v pulseaudio >/dev/null 2>&1; then
+            sudo apt-get update >/dev/null && sudo apt-get install -y pulseaudio >/dev/null
+          fi
+          pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+          pactl load-module module-null-sink sink_name=sipw-null >/dev/null 2>&1 || true
+          pactl set-default-sink sipw-null >/dev/null 2>&1 || true
+          pactl info >/dev/null 2>&1 && pactl list short sinks | grep -q sipw-null
+      - name: Install browser engines
+        run: npx playwright install --with-deps chromium
+      - name: Matrix PR slice (Chromium, steps 1-3, 5-10)
+        env:
+          MATRIX_MODE: 'pr'
+        run: npm run test:matrix:page
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fs-matrix-pr
+          path: |
+            test/freeswitch-matrix/artifacts/
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+
+  matrix-nightly:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Provision PulseAudio null sink (Firefox receive path)
+        run: |
+          set -euo pipefail
+          if ! command -v pulseaudio >/dev/null 2>&1; then
+            sudo apt-get update >/dev/null && sudo apt-get install -y pulseaudio >/dev/null
+          fi
+          pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+          pactl load-module module-null-sink sink_name=sipw-null >/dev/null 2>&1 || true
+          pactl set-default-sink sipw-null >/dev/null 2>&1 || true
+          if pactl info >/dev/null 2>&1 && pactl list short sinks | grep -q sipw-null; then
+            echo "pulseaudio null sink ready"
+          else
+            pulseaudio --kill >/dev/null 2>&1 || true
+            echo 'pcm.!default { type null }' | sudo tee /etc/asound.conf >/dev/null
+            grep -q 'type null' /etc/asound.conf
+          fi
+      - name: Install browser engines
+        run: npx playwright install --with-deps chromium firefox
+      - name: Full matrix nightly (Chromium + Firefox + audio proof)
+        env:
+          MATRIX_MODE: 'nightly'
+        run: npm run test:matrix:page
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fs-matrix-nightly
+          path: |
+            test/freeswitch-matrix/artifacts/
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
