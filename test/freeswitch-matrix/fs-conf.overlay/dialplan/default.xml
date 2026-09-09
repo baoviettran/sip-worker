@@ -1,0 +1,14 @@
+<context name="default">
+  <extension name="echo">
+    <condition field="destination_number" expression="^echo$">
+      <action application="answer"/>
+      <action application="echo"/>
+    </condition>
+  </extension>
+  <extension name="record">
+    <condition field="destination_number" expression="^record$">
+      <action application="answer"/>
+      <action application="record" data="/tmp/recording.wav"/>
+    </condition>
+  </extension>
+</context>

@@ -1,0 +1,33 @@
+<configuration name="sofia.conf" description="sofia SIP profiles">
+  <global_settings>
+  </global_settings>
+  <profiles>
+    <profile name="ws-test">
+      <aliases>
+        <alias name="default"/>
+      </aliases>
+      <gateways>
+      </gateways>
+      <domains>
+        <domain name="$${domain}" parse="true"/>
+      </domains>
+      <settings>
+        <param name="apply-inbound-acl" value="192.168.0.0/16"/>
+        <param name="apply-inbound-acl" value="10.0.0.0/8"/>
+        <param name="apply-inbound-acl" value="172.16.0.0/12"/>
+        <param name="auth-calls" value="false"/>
+        <param name="auth-registrations" value="false"/>
+        <param name="challenge-realm" value="auto_from"/>
+        <param name="debug" value="0"/>
+        <param name="disable-transfer" value="false"/>
+        <param name="enable-timer" value="false"/>
+        <param name="rfc2543-rtp" value="false"/>
+        <param name="sip-port" value="__SIP_PORT__"/>
+        <param name="sip-trace" value="false"/>
+        <param name="ws-binding" value="__WS_PORT__"/>
+        <param name="wss-binding" value="__WSS_PORT__"/>
+        <param name="nonce-expires" value="120"/>
+      </settings>
+    </profile>
+  </profiles>
+</configuration>
