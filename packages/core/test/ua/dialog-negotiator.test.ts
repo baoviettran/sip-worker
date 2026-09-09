@@ -557,6 +557,39 @@ describe('DialogNegotiator', () => {
       expect(h.negotiator.busy).toBe(false);
     });
 
+    it('ignores a 100 Trying provisional and resolves on the following 200 OK', async () => {
+      const h = setup();
+      const restart = h.negotiator.restartIce();
+      await flush();
+      const reinvite = lastOutboundInvite(h);
+      // FreeSWITCH emits 100 Trying for every re-INVITE; the negotiation must
+      // keep the transaction open (no rollback, no extra INVITE) until the
+      // final response reconciles it.
+      respondStatusTo(h, reinvite, 100, 'Trying');
+      await flush();
+      await expectPending(restart);
+      expect(h.media.commands.filter((c) => c.type === 'rollbackDirection')).toHaveLength(0);
+      expect(h.sentRequests.filter((r) => r.method === 'INVITE')).toHaveLength(1);
+
+      respond2xxTo(h, reinvite);
+      await flush();
+      h.media.releaseSetRemote();
+      await restart;
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it('still rejects on a final 4xx after a provisional response', async () => {
+      const h = setup();
+      const restart = h.negotiator.restartIce();
+      await flush();
+      const reinvite = lastOutboundInvite(h);
+      respondStatusTo(h, reinvite, 100, 'Trying');
+      await flush();
+      respondStatusTo(h, reinvite, 488, 'Not Acceptable Here');
+      await expect(restart).rejects.toMatchObject({ statusCode: 488 });
+      expect(h.negotiator.busy).toBe(false);
+    });
+
     it('rejects on a SIP transaction timeout (missing 2xx)', async () => {
       const h = setup({ clock: false });
       const restart = h.negotiator.restartIce();
@@ -831,6 +864,45 @@ describe('DialogNegotiator', () => {
       await expect(held).rejects.toMatchObject({ code: 'HOLD_NEGOTIATION_FAILED' });
       expect(h.media.commands.filter((c) => c.type === 'rollbackDirection')).toHaveLength(1);
       expect(h.media.commands.filter((c) => c.type === 'commitDirection')).toHaveLength(0);
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it('ignores 100 Trying and 183 provisionals and resolves after the final 2xx', async () => {
+      const h = setup();
+      const held = h.negotiator.hold('sendonly');
+      await flush();
+      const reinvite = lastOutboundInvite(h);
+      // Provisionals (FreeSWITCH emits 100 Trying for every re-INVITE; 183
+      // with early media is the other common case) must not settle the
+      // negotiation: the transaction stays open for the final response.
+      respondStatusTo(h, reinvite, 100, 'Trying');
+      await flush();
+      await expectPending(held);
+      expect(h.media.commands.filter((c) => c.type === 'rollbackDirection')).toHaveLength(0);
+      expect(h.sentRequests.filter((r) => r.method === 'INVITE')).toHaveLength(1);
+
+      respondStatusTo(h, reinvite, 183, 'Session Progress');
+      await flush();
+      await expectPending(held);
+
+      respond2xxTo(h, reinvite, STUB_SDP);
+      await flush();
+      h.media.releaseSetRemote();
+      await held;
+      expect(h.media.commands.filter((c) => c.type === 'commitDirection')).toHaveLength(1);
+      expect(h.negotiator.busy).toBe(false);
+    });
+
+    it('rolls back and rejects on a final 4xx after a provisional response', async () => {
+      const h = setup();
+      const held = h.negotiator.hold('sendonly');
+      await flush();
+      const reinvite = lastOutboundInvite(h);
+      respondStatusTo(h, reinvite, 100, 'Trying');
+      await flush();
+      respondStatusTo(h, reinvite, 488, 'Not Acceptable Here');
+      await expect(held).rejects.toMatchObject({ code: 'HOLD_NEGOTIATION_FAILED' });
+      expect(h.media.commands.filter((c) => c.type === 'rollbackDirection')).toHaveLength(1);
       expect(h.negotiator.busy).toBe(false);
     });
 
