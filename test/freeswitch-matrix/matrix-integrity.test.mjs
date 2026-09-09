@@ -84,6 +84,10 @@ function isOverlayFile(filePath) {
 const fsConfDir = join(__dirname, 'fs-conf');
 const fsConfFiles = existsSync(fsConfDir) ? walkDir(fsConfDir) : [];
 
+test('fs-conf tree is present (floor check)', () => {
+  assert.ok(fsConfFiles.length >= 30, `fs-conf has ${fsConfFiles.length} files, expected >= 30 — tree may be missing or pruned`);
+});
+
 test('fs-conf base tree has no __*__ port tokens (overlay files excluded)', () => {
   // Match port-style tokens: __SIP_PORT__, __WS_PORT__, __WSS_PORT__, etc.
   // Requires uppercase letters between the double-underscores, excluding
@@ -100,22 +104,23 @@ test('fs-conf base tree has no __*__ port tokens (overlay files excluded)', () =
   }
 });
 
-// ── 3. No committed tls/*.key or *.pem ──────────────────────────────────
-// TLS certs are minted per-run by materialize.mjs and must never be committed.
+// ── 3. No committed key material ───────────────────────────────────────
+// TLS certs are minted per-run by materialize.mjs into per-run tmpdirs
+// (not a committed tls/ directory).  Scan the whole matrix tree for .key
+// and .pem files — must be zero.
 
-const tlsDir = join(__dirname, 'tls');
-const hasTls = existsSync(tlsDir);
+const allMatrixFiles = walkDir(__dirname);
 
-test('no committed tls/*.key files', () => {
-  if (!hasTls) return; // no tls/ directory — clean
-  const files = walkDir(tlsDir);
-  const keyFiles = files.filter((f) => f.endsWith('.key'));
+test('no .key files anywhere in the committed matrix tree', () => {
+  const keyFiles = allMatrixFiles.filter((f) => f.endsWith('.key'));
   assert.strictEqual(keyFiles.length, 0, `found committed .key files: ${keyFiles.join(', ')}`);
 });
 
-test('no committed tls/*.pem files', () => {
-  if (!hasTls) return; // no tls/ directory — clean
-  const files = walkDir(tlsDir);
-  const pemFiles = files.filter((f) => f.endsWith('.pem'));
+test('no .pem files anywhere in the committed matrix tree', () => {
+  const pemFiles = allMatrixFiles.filter((f) => f.endsWith('.pem'));
   assert.strictEqual(pemFiles.length, 0, `found committed .pem files: ${pemFiles.join(', ')}`);
+});
+
+test('matrix tree is fully enumerated (floor check)', () => {
+  assert.ok(allMatrixFiles.length >= 50, `matrix dir has ${allMatrixFiles.length} files, expected >= 50 — scan may be incomplete`);
 });

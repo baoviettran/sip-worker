@@ -37,11 +37,11 @@ never skip it.  Skipped tests hide real regressions.
 
 | Artifact | Path |
 |----------|------|
-| Recorded audio WAVs | `/recordings/` inside the FreeSWITCH container (mounted from `test/freeswitch-matrix/recordings/`) |
+| Recorded audio WAVs | `/recordings/` inside the FreeSWITCH container (mounted from a per-run tmpdir created by `fsctl.ts`) |
 | FreeSWITCH config (committed) | `test/freeswitch-matrix/fs-conf/` |
 | FreeSWITCH config (overlay) | `test/freeswitch-matrix/fs-conf.overlay/` |
 | Bundled page entry | `test/freeswitch-matrix/dist/` (built by `build-matrix.mjs`) |
-| Playwright report | `test-results/` (default Playwright output) |
+| Playwright traces | `test-results/` (retained on failure via `trace: retain-on-failure`; reporter is `[['list']]`, no HTML report) |
 
 ## FS-image bump procedure
 
