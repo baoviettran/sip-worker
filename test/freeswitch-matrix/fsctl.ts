@@ -77,7 +77,7 @@ export async function startFreeSwitch(confDir: string): Promise<FsHandle> {
     const state = typeof stdout === 'string' ? stdout.trim() : undefined;
     if (state === 'healthy') return handle;
     if (state === 'unhealthy' || Date.now() > deadline) {
-      const logs = spawnSync('docker', ['logs', name], { encoding: 'utf8' }).stdout.slice(-4000);
+      const logs = (spawnSync('docker', ['logs', name], { encoding: 'utf8' }).stdout ?? '').slice(-4000);
       await stopFreeSwitch(handle);
       throw new Error(`FreeSWITCH failed to become healthy (state=${state})\n${logs}`);
     }

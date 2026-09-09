@@ -54,6 +54,15 @@ describe('fsExec drives the event socket', () => {
       // the Content-Length-framed body.
       const ac = new AbortController();
       const events = fsSubscribeDtfm({ signal: ac.signal });
+      // Warm the lazy generator BEFORE uuid_send_dtmf fires: fsSubscribeDtfm's
+      // connect/auth/subscribe body runs only on the first next(), so issue
+      // that call here — the pending promise is the event sink for the digit
+      // (today's un-warmed subscription passed only because park-dequeue
+      // latency exceeded socket-connect time). A next() that loses its
+      // Promise.race stays pending and silently consumes the NEXT yielded
+      // event, so next() is re-issued only after the previous one RESOLVED —
+      // never while one is in flight.
+      let pending: ReturnType<typeof events.next> = events.next();
       try {
         await new Promise((resolve) => setTimeout(resolve, 2_000)); // let the call settle
         const channels = (await fsExec('show channels')).split('\n');
@@ -66,8 +75,10 @@ describe('fsExec drives the event socket', () => {
         const deadline = Date.now() + 10_000;
         let observed: { digit: string; channel: string } | undefined;
         while (Date.now() < deadline) {
+          // Race the retained pending next(); on timeout it stays in flight
+          // (the finally-block abort ends it) and is never re-issued.
           const next = await Promise.race([
-            events.next(),
+            pending,
             new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), deadline - Date.now())),
           ]);
           if (next === 'timeout') break;
@@ -76,6 +87,7 @@ describe('fsExec drives the event socket', () => {
             observed = next.value;
             break;
           }
+          pending = events.next(); // previous next() resolved; safe to re-issue
         }
         expect(observed, 'no DTMF event for digit 5 within 10 s').toBeDefined();
         expect(observed!.channel).toContain('9196');

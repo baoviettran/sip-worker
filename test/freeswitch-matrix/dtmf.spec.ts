@@ -2,7 +2,10 @@
 // the page is observed at FreeSWITCH.
 //
 // Flow: register (step), open the node-side fsSubscribeDtfm() subscription
-// (fsctl.ts — a real `event plain DTMF` connection on 127.0.0.1:8021), then
+// (fsctl.ts — a real `event plain DTMF` connection on 127.0.0.1:8021) and
+// issue its FIRST next() before the dtmf step — the generator body
+// (connect/auth/subscribe) is lazy and only runs on that first next(), and
+// the pending promise it returns is the event sink for the digit — then
 // run step `dtmf`, which registers again on its own phone, dials the 9196
 // echo extension, establishes, and sends RFC 4733 digit '5' via the browser
 // RTCDTMFSender (PCMU/8000 is preferred for the call: FreeSWITCH 1.10.12
@@ -124,14 +127,23 @@ test.describe('matrix · DTMF observed at FreeSWITCH', () => {
     const stun = await startStunResponder();
     try {
       ensureDtlsPem(ctx.handle);
-      // register first (an FS-side registration for this identity), then open
-      // the subscription BEFORE the dtmf step sends the digit — the
-      // subscription must be live when the tone goes on the wire.
+      // register first (an FS-side registration for this identity), then warm
+      // the subscription BEFORE the dtmf step sends the digit: fsSubscribeDtfm
+      // is a lazy async generator — its connect/auth/subscribe body runs only
+      // on the first next(), so that first next() happens here (below) and
+      // the pending promise it returns is the event sink when the tone goes
+      // on the wire. A next() that loses its Promise.race stays pending and
+      // silently consumes the NEXT yielded event, so next() is re-issued only
+      // after the previous one RESOLVED — never while one is in flight.
       const r0 = await runStep(page, 'register', CREDENTIALS);
       expect(r0.ok, r0.detail).toBe(true);
 
       const ac = new AbortController();
       const events = fsSubscribeDtfm({ signal: ac.signal });
+      // Warm the lazy generator NOW, before the dtmf step dials: the pending
+      // first next() is the event sink — it consumes the '5' event when it
+      // arrives. Never call next() again while one is in flight.
+      let pending: ReturnType<typeof events.next> = events.next();
       try {
         const stepPromise = runStep(page, 'dtmf', { ...CREDENTIALS, stunPort: stun.port });
         // The step parks after the tone is sent (see runDtmfStep) so the call
@@ -150,16 +162,19 @@ test.describe('matrix · DTMF observed at FreeSWITCH', () => {
         const uuid = aLeg?.split(',')[0];
         expect(uuid, 'sofia/ws-test call leg not found in show channels').toBeTruthy();
 
-        // Primary assertion: the subscription yields the DTMF event for '5'
-        // on the call's channel within the deadline. A timeout FAILS — never
-        // a skip, never a hang.
+        // Primary assertion: the warmed subscription (pending next() issued
+        // before the dtmf step — see above) yields the DTMF event for '5' on
+        // the call's channel within the deadline. A timeout FAILS — never a
+        // skip, never a hang. The raced-but-unresolved next() is left
+        // pending; the finally-block abort ends it. next() is re-issued only
+        // after the previous call resolved.
         const deadline = Date.now() + DTMF_DEADLINE_MS;
         const match = await (async (): Promise<{ digit: string; channel: string } | undefined> => {
           for (;;) {
             const remaining = deadline - Date.now();
             if (remaining <= 0) return undefined;
             const next = await Promise.race([
-              events.next(),
+              pending,
               new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), remaining)),
             ]);
             if (next === 'timeout') return undefined;
@@ -167,6 +182,7 @@ test.describe('matrix · DTMF observed at FreeSWITCH', () => {
             if (next.value.digit === DIGIT && next.value.channel.startsWith('sofia/ws-test/')) {
               return next.value;
             }
+            pending = events.next();
           }
         })();
 

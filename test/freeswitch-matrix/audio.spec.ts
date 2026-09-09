@@ -7,8 +7,8 @@
 // (`floor = max(floorRms, 0.01)`) → open the gate → the page raises the 440 Hz
 // tone, lets ≥2 s of RTP flow, samples AnalyserNode energy on the remote
 // stream, and checks getStats packet growth both ways → finish-call hangs up
-// (flushing the recorder) → the node reads the single /recordings WAV and
-// computes maxWindowedRms. Assert: page energy above the floor AND
+// (flushing the recorder) → the node reads the one new WAV (delta after
+// clearing stale recordings) and computes maxWindowedRms. Assert: page energy above the floor AND
 // recordingRms above the floor AND rtpBothWays true.
 //
 // The step contract `{ ok, detail, energy, rtpBothWays, recordingRms }` is
@@ -16,7 +16,7 @@
 // in its MatrixResult, `finish-call` flushes the recorder, and recordingRms is
 // computed HERE (node side — the page cannot read the WAV).
 import { test, expect } from '@playwright/test';
-import { copyFileSync, existsSync, readFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { createSocket, type RemoteInfo, type Socket } from 'node:dgram';
 import { bootMatrix, disposeMatrix, runStep } from './helpers';
@@ -78,15 +78,32 @@ function wavRmsLenient(bytes: Uint8Array): number | null {
 }
 
 /**
- * Node-side silence floor from the partial recording. Recording names are
- * uuid-based and NOT mtime-ordered, and there is at most one WAV (one
- * container per test, one call per test) — never pick "newest".
+ * Node-side silence floor from the partial recording. The recordDir is shared
+ * for the whole Playwright invocation (one container per run, every 9196 dial
+ * writes into it), so audio.spec clears stale WAVs before dialing and asserts
+ * its own delta — exactly one new WAV. Recording names are uuid-based and NOT
+ * mtime-ordered — never pick "newest".
  */
 function readRecordingFloor(handle: FsHandle): { rms: number | null; path: string | null; bytes: number } {
   const recs = getRecordings(handle);
   if (recs.length === 0) return { rms: null, path: null, bytes: 0 };
   const bytes = new Uint8Array(readFileSync(recs[0]));
   return { rms: wavRmsLenient(bytes), path: recs[0], bytes: bytes.byteLength };
+}
+
+/**
+ * Clear WAVs left in the shared recordDir by earlier specs' dials. The
+ * recordDir belongs to the ONE container booted in globalSetup and is shared
+ * across all spec files and both browser projects, so it is NOT empty when
+ * this test starts. Clearing here is safe: only audio.spec consumes WAVs, and
+ * the artifacts collector copies them in stopFreeSwitch — the globalSetup
+ * teardown, which Playwright runs once after ALL specs, never between them.
+ * Fail-not-skip: unlinkSync throws rather than silently continuing.
+ */
+function clearStaleRecordings(handle: FsHandle): void {
+  for (const wav of getRecordings(handle)) {
+    unlinkSync(wav);
+  }
 }
 
 /**
@@ -161,6 +178,10 @@ test.describe('matrix · outgoing call two-way audio', () => {
     const ctx = await bootMatrix(page);
     const stun = await startStunResponder();
     try {
+      // Delta accounting: the recordDir is shared for the whole invocation, so
+      // drop stale WAVs from earlier specs before dialing, then assert the
+      // delta (exactly one new WAV) after the call (see clearStaleRecordings).
+      clearStaleRecordings(ctx.handle);
       // The DTLS pem must exist before the INVITE (FreeSWITCH re-reads it per
       // call, but seeding up front removes the order dependence entirely).
       ensureDtlsPem(ctx.handle);
@@ -196,9 +217,13 @@ test.describe('matrix · outgoing call two-way audio', () => {
       expect(fin.ok, fin.detail).toBe(true);
       expect(fin.events).toContainEqual(expect.objectContaining({ type: 'wire', detail: 'BYE' }));
 
-      // exactly one WAV; the strict parse throws when absent or corrupt
+      // exactly one new WAV (delta after clearing stale recordings); the
+      // strict parse throws when absent or corrupt
       const recs = getRecordings(ctx.handle);
-      expect(recs.length, `recordings: ${recs.join(', ')}`).toBe(1);
+      expect(
+        recs.length,
+        `recordings: ${recs.join(', ')} — one new WAV (delta after clearing stale recordings)`,
+      ).toBe(1);
       const bytes = new Uint8Array(readFileSync(recs[0]));
       const { pcm, sampleRate } = parseRiffWav(bytes);
       const durationS = pcm.length / sampleRate;
