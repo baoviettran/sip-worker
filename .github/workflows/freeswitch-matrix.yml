@@ -42,9 +42,8 @@ jobs:
           name: fs-matrix-pr
           path: |
             test/freeswitch-matrix/artifacts/
-            playwright-report/
             test-results/
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   matrix-nightly:
     if: github.event_name != 'pull_request'
@@ -86,6 +85,5 @@ jobs:
           name: fs-matrix-nightly
           path: |
             test/freeswitch-matrix/artifacts/
-            playwright-report/
             test-results/
-          if-no-files-found: ignore
+          if-no-files-found: error

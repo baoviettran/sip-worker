@@ -3,7 +3,7 @@
 // originate, uuid_kill). Fail-not-skip: every wait is bounded and
 // startFreeSwitch throws instead of hanging or skipping.
 import { spawn, spawnSync, execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, copyFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -86,7 +86,24 @@ export async function startFreeSwitch(confDir: string): Promise<FsHandle> {
 }
 
 export async function stopFreeSwitch(handle: FsHandle): Promise<void> {
-  spawnSync('docker', ['rm', '-f', handle.name], { stdio: 'ignore' });
+  try {
+    // Capture the full container logs before removal (post-mortem copy).
+    const logs = spawnSync('docker', ['logs', handle.name], { encoding: 'utf8' }).stdout;
+    const runDir = join('test', 'freeswitch-matrix', 'artifacts', handle.name);
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, 'fs.log'), logs);
+    // Copy recorded WAVs into the artifacts dir (audio proof artifacts).
+    const wavs = readdirSync(handle.recordDir).filter((f) => f.endsWith('.wav'));
+    for (const wav of wavs) {
+      copyFileSync(join(handle.recordDir, wav), join(runDir, wav));
+    }
+  } catch (err) {
+    console.warn('[fsctl] artifact collection failed:', err);
+  } finally {
+    // Clean up the fsrec tmpdir (fixes known tmpdir leak).
+    rmSync(handle.recordDir, { recursive: true, force: true });
+    spawnSync('docker', ['rm', '-f', handle.name], { stdio: 'ignore' });
+  }
 }
 
 /**

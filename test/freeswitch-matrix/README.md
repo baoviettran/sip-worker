@@ -37,7 +37,7 @@ never skip it.  Skipped tests hide real regressions.
 
 | Artifact | Path |
 |----------|------|
-| Recorded audio WAVs | `/recordings/` inside the FreeSWITCH container (mounted from a per-run tmpdir created by `fsctl.ts`) |
+| FreeSWITCH logs + recorded audio WAVs | `test/freeswitch-matrix/artifacts/<container-name>/` (`fs.log` + `*.wav`; written by `stopFreeSwitch` before container removal) |
 | FreeSWITCH config (committed) | `test/freeswitch-matrix/fs-conf/` |
 | FreeSWITCH config (overlay) | `test/freeswitch-matrix/fs-conf.overlay/` |
 | Bundled page entry | `test/freeswitch-matrix/dist/` (built by `build-matrix.mjs`) |

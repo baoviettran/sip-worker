@@ -11,3 +11,5 @@ packages/*/temp/
 test-results/
 playwright-report/
 blob-report/
+# FreeSWITCH matrix runtime artifacts (fs.log + WAVs per run)
+test/freeswitch-matrix/artifacts/
