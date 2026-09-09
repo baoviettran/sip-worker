@@ -1,33 +1,27 @@
-<configuration name="sofia.conf" description="sofia SIP profiles">
-  <global_settings>
-  </global_settings>
-  <profiles>
-    <profile name="ws-test">
-      <aliases>
-        <alias name="default"/>
-      </aliases>
-      <gateways>
-      </gateways>
-      <domains>
-        <domain name="$${domain}" parse="true"/>
-      </domains>
-      <settings>
-        <param name="apply-inbound-acl" value="192.168.0.0/16"/>
-        <param name="apply-inbound-acl" value="10.0.0.0/8"/>
-        <param name="apply-inbound-acl" value="172.16.0.0/12"/>
-        <param name="auth-calls" value="false"/>
-        <param name="auth-registrations" value="false"/>
-        <param name="challenge-realm" value="auto_from"/>
-        <param name="debug" value="0"/>
-        <param name="disable-transfer" value="false"/>
-        <param name="enable-timer" value="false"/>
-        <param name="rfc2543-rtp" value="false"/>
-        <param name="sip-port" value="__SIP_PORT__"/>
-        <param name="sip-trace" value="false"/>
-        <param name="ws-binding" value="__WS_PORT__"/>
-        <param name="wss-binding" value="__WSS_PORT__"/>
-        <param name="nonce-expires" value="120"/>
-      </settings>
-    </profile>
-  </profiles>
-</configuration>
+<profile name="ws-test">
+  <settings>
+  <param name="sip-ip" value="127.0.0.1"/>
+  <param name="sip-port" value="__SIP_PORT__"/>
+  <param name="rtp-ip" value="127.0.0.1"/>
+  <param name="rtp-start-port" value="20000"/>
+  <param name="rtp-end-port" value="20100"/>
+  <param name="ext-sip-ip" value="127.0.0.1"/>
+  <param name="ext-rtp-ip" value="127.0.0.1"/>
+  <param name="dialplan" value="XML"/>
+  <param name="context" value="default"/>
+  <param name="auth-calls" value="true"/>
+  <param name="accept-blind-reg" value="false"/>
+  <param name="accept-blind-auth" value="false"/>
+  <param name="inbound-codec-prefs" value="OPUS,PCMU,PCMA"/>
+  <param name="outbound-codec-prefs" value="OPUS,PCMU,PCMA"/>
+  <param name="inbound-codec-negotiation" value="generous"/>
+  <param name="dtmf-type" value="rfc2833"/>
+  <param name="ws-binding" value="127.0.0.1:__WS_PORT__"/>
+  <param name="wss-binding" value="127.0.0.1:__WSS_PORT__"/>
+  <domain name="127.0.0.1">
+    <params>
+      <param name="dial-string" value="{^^:sip_invite_domain=${dialed_domain}:presence_id=${dialed_user}@${dialed_domain}}${sofia_contact(*/${dialed_user}@${dialed_domain})}"/>
+    </params>
+  </domain>
+  </settings>
+</profile>

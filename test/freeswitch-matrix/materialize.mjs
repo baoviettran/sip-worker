@@ -37,7 +37,7 @@ export function materializeConf() {
     rmSync(join(confDir, f), { force: true });
   }
   // 3) drop every vanilla sip profile FILE; the external/ + external-ipv6/
-  //    template dirs stay (the validated 43-file tree keeps them; nothing loads
+  //    template dirs stay (the validated 41-file tree keeps them; nothing loads
   //    them once the profile files are gone)
   for (const f of ['internal.xml', 'internal-ipv6.xml', 'external.xml', 'external-ipv6.xml']) {
     rmSync(join(confDir, 'sip_profiles', f), { force: true });
@@ -48,7 +48,7 @@ export function materializeConf() {
       rmSync(join(confDir, 'directory', 'default', f), { recursive: true, force: true });
     }
   }
-  // 5) prune autoload_configs to the conf files of the 9 loaded modules
+  // 5) prune autoload_configs to the 8 conf files keepAutoload holds
   const keepAutoload = new Set([
     'console.conf.xml', 'db.conf.xml', 'event_socket.conf.xml', 'logfile.conf.xml',
     'modules.conf.xml', 'opus.conf.xml', 'sofia.conf.xml', 'switch.conf.xml',
@@ -62,7 +62,7 @@ export function materializeConf() {
   //    and the default/ demo subdir, which freeswitch.xml includes)
   cpSync(overlayDir, confDir, { recursive: true, force: true });
   // 7) in-place edits
-  editFreeswitchXml(); // drop the chatplan/lang include lines (their trees were pruned)
+  editFreeswitchXml(); // drop safarov-only chatplan/lang-de/lang-en include lines
   editVars();          // fixed default_password, loopback domain, recordings_dir
   mkdirSync(join(confDir, 'tls'), { recursive: true }); // certs minted per run, never committed
 }
@@ -71,7 +71,7 @@ function editFreeswitchXml() {
   const p = join(confDir, 'freeswitch.xml');
   const keep = readFileSync(p, 'utf8')
     .split('\n')
-    .filter((l) => !/data="(?:chatplan\/\*|lang\/)/.test(l));
+    .filter((l) => !/data="(?:chatplan\/\*\.xml|lang\/de\/\*\.xml|lang\/en\/\*\.xml)"/.test(l));
   writeFileSync(p, keep.join('\n'));
 }
 

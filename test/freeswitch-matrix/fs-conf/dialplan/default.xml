@@ -1,14 +1,13 @@
-<context name="default">
-  <extension name="echo">
-    <condition field="destination_number" expression="^echo$">
-      <action application="answer"/>
-      <action application="echo"/>
-    </condition>
-  </extension>
-  <extension name="record">
-    <condition field="destination_number" expression="^record$">
-      <action application="answer"/>
-      <action application="record" data="/tmp/recording.wav"/>
-    </condition>
-  </extension>
-</context>
+<?xml version="1.0" encoding="utf-8"?>
+<include>
+  <context name="default">
+    <extension name="matrix_echo_9196">
+      <condition field="destination_number" expression="^9196$">
+        <action application="answer"/>
+        <action application="record_session" data="$${recordings_dir}/matrix_${uuid}.wav"/>
+        <action application="echo"/>
+        <action application="hangup"/>
+      </condition>
+    </extension>
+  </context>
+</include>
