@@ -236,6 +236,8 @@ async function waitRegistration(phone: BrowserPhone, state: 'registered', timeou
 interface StepArgs {
   user: string;
   password: string;
+  /** Media codec preference override (dtmf step: see runDtmfStep). */
+  codecPreference?: readonly ('opus' | 'PCMU' | 'PCMA')[];
   /**
    * Port of the node-side STUN responder (audio step only). Chromium obfuscates
    * host ICE candidates as mDNS *.local names, which the FreeSWITCH
@@ -276,6 +278,17 @@ function buildPhone(
   // candidates, so the offer passes the FreeSWITCH candidate ACL.
   // iceServers is a media-level option (BrowserMediaOptions).
   const diagEvents = opts?.diagnosticsEvents;
+  const media: BrowserPhoneOptions['media'] | undefined =
+    args.stunPort !== undefined || args.codecPreference !== undefined
+      ? {
+          ...(args.stunPort !== undefined
+            ? { iceServers: [{ urls: `stun:127.0.0.1:${args.stunPort}` }] }
+            : {}),
+          ...(args.codecPreference !== undefined
+            ? { codecPreference: [...args.codecPreference] }
+            : {}),
+        }
+      : undefined;
   const options: BrowserPhoneOptions = {
     signaling: { url: `wss://${domain}:${wssPort}/ws` },
     account: {
@@ -295,9 +308,7 @@ function buildPhone(
       username: args.user,
       password: args.password,
     },
-    ...(args.stunPort !== undefined
-      ? { media: { iceServers: [{ urls: `stun:127.0.0.1:${args.stunPort}` }] } }
-      : {}),
+    ...(media !== undefined ? { media } : {}),
     // Inbound steps assert the diagnostic chain (call.established →
     // call.terminated); the logger sink captures codes in emission order.
     ...(diagEvents !== undefined
@@ -830,6 +841,96 @@ async function runUnmuteStep(): Promise<MatrixResult> {
 }
 
 // ---------------------------------------------------------------------------
+// DTMF (matrix step 8): `dtmf` registers, dials the 9196 echo extension,
+// establishes, and sends RFC 4733 digit '5' through the browser's
+// RTCDTMFSender (telephone-event is negotiated in the offer, so Chromium
+// emits telephone-event RTP packets that FreeSWITCH's dtmf-type=rfc2833
+// profile parses into DTMF events). The step only reports dtmfSent + the
+// clean diag chain — the digit assertion is NODE-SIDE in dtmf.spec.ts
+// against fsSubscribeDtfm's event-socket stream.
+// ---------------------------------------------------------------------------
+async function runDtmfStep(args: StepArgs): Promise<MatrixResult> {
+  const events: MatrixEvent[] = [];
+  const diagCodes: string[] = [];
+  // Prefer PCMU for this call: with the default opus/48000 offer FreeSWITCH
+  // answers telephone-event at 48000 (PT 110), which the pinned image's
+  // mod_rtp does not decode — the browser's RFC 4733 tones are silently
+  // dropped and no DTMF event ever fires. PCMU/8000 pairs with
+  // telephone-event/8000 (PT 126), which FreeSWITCH decodes. Same digit, same
+  // RFC 4733 transport — only the codec pairing changes.
+  const phone = buildPhone(events, { ...args, codecPreference: ['PCMU'] }, {
+    diagnosticsEvents: diagCodes,
+  });
+  livePhones.push(phone);
+  try {
+    await phone.connect();
+    await waitState(phone, { connectionState: 'connected' });
+    await phone.register();
+    await waitRegistration(phone, 'registered');
+    const call = phone.createCall('sip:9196@127.0.0.1') as OutgoingBrowserCall;
+    await call.start();
+    await waitFor(() => call.state === 'established', 'call established', 15_000, () => `call=${call.state}`);
+    // RFC 4733 requires the media path up: Chrome's RTCDTMFSender reports
+    // canInsertDTMF=true only once the DTLS handshake completes, which lags
+    // both the SIP established state and the ICE-connected media session
+    // state. Retry the send across that window — a transient DTMF_UNSUPPORTED
+    // during the handshake is expected and filtered from the diag chain below;
+    // if the deadline expires the last error propagates (a failure, never a
+    // hang or a skip).
+    await waitFor(
+      () => call.mediaState === 'connected',
+      'media session connected',
+      15_000,
+      () => `media=${call.mediaState}`,
+    );
+    const sendDeadline = Date.now() + 10_000;
+    for (;;) {
+      try {
+        await call.sendDtmf('5');
+        break;
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        if (code !== 'DTMF_UNSUPPORTED' || Date.now() > sendDeadline) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
+    // The digit is observed NODE-SIDE by dtmf.spec.ts (see its file header:
+    // the event-socket DTMF event, or — because the pinned image's 9196 echo
+    // dialplan never dequeues, and the DTMF event only fires on dequeue — the
+    // channel-uuid-prefixed receipt lines in the FS log). The call must still
+    // be up while the spec observes, so park at the gate until the spec sets
+    // __matrixDtmfGo; the 90 s cap keeps a crashed spec from hanging the page.
+    const gate = window as unknown as { __matrixAwaitDtmf?: boolean; __matrixDtmfGo?: boolean };
+    gate.__matrixAwaitDtmf = true;
+    await waitFor(() => gate.__matrixDtmfGo === true, 'dtmf drain gate', 90_000);
+    await call.hangup();
+    await waitFor(
+      () => call.state === 'terminated' || call.state === 'failed',
+      'call terminated',
+      15_000,
+      () => `call=${call.state}`,
+    );
+    if (call.state === 'failed') throw new Error('call failed instead of terminating cleanly');
+    // Any surviving call.dtmf_failed here is a transient DTMF_UNSUPPORTED
+    // from the DTLS-handshake retry window above — the send itself succeeded
+    // (a final failure would have thrown before this point), so it does not
+    // break the clean call chain.
+    assertCleanDiagChain(diagCodes.filter((c) => c !== 'call.dtmf_failed'));
+    return {
+      ok: true,
+      detail: `dtmf: sent '5' on an established echo call, call ${call.state}, diag ${diagCodes.join('→')}`,
+      result: { callState: call.state, dtmfSent: true, diagCodes: [...diagCodes] },
+      events,
+    };
+  } catch (error) {
+    const f = asFailure(error);
+    return { ok: false, detail: `dtmf: ${f.message}`, errorCode: f.code, events };
+  } finally {
+    await disposePhone(phone);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Inbound-call steps: wait-incoming registers and arms the incomingCall
 // listener; answer-incoming answers the INVITE and proves establishment;
 // hangup / expect-remote-terminated observe the call's termination. The
@@ -1036,6 +1137,7 @@ async function runMatrixStep(name: string, args: unknown): Promise<MatrixResult>
   else if (name === 'wait-incoming') result = await runWaitIncomingStep(stepArgs);
   else if (name === 'answer-incoming') result = await runAnswerIncomingStep();
   else if (name === 'hangup') result = await runHangupStep();
+  else if (name === 'dtmf') result = await runDtmfStep(stepArgs);
   else if (name === 'expect-remote-terminated') result = await runExpectRemoteTerminatedStep();
   else result = { ok: false, detail: `unknown matrix step '${name}'`, events: [] };
   // Playwright structured-clones the evaluate() result; spread keeps the

@@ -201,6 +201,174 @@ export async function resolveWssDestination(profile: string, user: string, domai
   return `sofia/${profile}/sip:${user}@${domain}:${m[1]};transport=wss`;
 }
 
+/** One parsed `Event-Name: DTMF` event from the event socket. */
+export interface DtmfObservation {
+  digit: string;
+  channel: string;
+}
+
+/**
+ * Long-lived `event plain DTMF` subscription on the event socket (one
+ * connection per call; the generator owns its socket and destroys it when the
+ * consumer breaks out, return()s the generator, or aborts `opts.signal`).
+ * Yields one object per `Event-Name: DTMF` frame, parsed from the
+ * `DTMF-Digit:` / `Channel-Name:` headers. Fail-not-skip: the auth handshake
+ * and the subscription ack are deadline-bounded (a timeout REJECTS, never
+ * hangs), and a socket error surfaces as a thrown error on the awaiting
+ * consumer.
+ *
+ * The optional AbortSignal is the teardown primitive the generator's queueing
+ * semantics force on consumers: once a `next()` is in flight, a queued
+ * `return()` only processes when that next() completes (an event or eof), so
+ * a consumer that raced a pending next() against a deadline and then called
+ * return() with no event ever arriving would hang forever and leak the
+ * socket. Aborting destroys the socket; 'close' marks eof, the idle wait
+ * wakes, and the pending next() resolves { done: true } within bounded time.
+ *
+ * Wire format (verified against the pinned image, v1.10.12): after
+ * `auth <pass>\n\n` the server answers a `Content-Type: command/reply` frame
+ * (`Reply-Text: +OK accepted`); the subscription command is
+ * `event plain DTMF\n\n`, acknowledged by a second `command/reply`
+ * (`Reply-Text: +OK event listener enabled plain`). Every DTMF event then
+ * arrives as a `Content-Type: text/event-plain` frame — a header block
+ * carrying `Content-Length: N`, terminated by a blank line, followed by
+ * exactly N bytes of body holding the plain-text event headers
+ * (`Event-Name: DTMF`, `DTMF-Digit: 5`, `Channel-Name: …`). The parser
+ * therefore consumes Content-Length-framed bodies, not bare blank-line
+ * frames. (Observed empirically: FreeSWITCH fires the DTMF event when the
+ * channel's application dequeues the digit — switch_channel_dequeue_dtmf —
+ * so a server-side test drives it with uuid_send_dtmf on a parked loopback
+ * leg; uuid_send_dtmf alone only sends the digits OUT and fires nothing.)
+ */
+export async function* fsSubscribeDtfm(
+  opts?: { signal?: AbortSignal },
+): AsyncGenerator<{ digit: string; channel: string }> {
+  const sock = net.connect(ES_PORT, ES_HOST);
+  sock.setEncoding('utf8');
+  const queue: DtmfObservation[] = [];
+  const waiters: Array<() => void> = [];
+  let failure: Error | undefined;
+  let eof = false;
+  let authAck = false;
+  let subscribed = false;
+  let buf = '';
+  const pump = (): void => {
+    for (const w of waiters.splice(0)) w();
+  };
+  const onAbort = (): void => {
+    eof = true;
+    sock.destroy();
+    pump();
+  };
+  opts?.signal?.addEventListener('abort', onAbort, { once: true });
+  sock.on('data', (chunk: string) => {
+    buf += chunk;
+    for (;;) {
+      const sep = buf.indexOf('\n\n');
+      if (sep === -1) break; // frame headers incomplete
+      const head = buf.slice(0, sep);
+      const rest = buf.slice(sep + 2);
+      const n = Number(/^Content-Length: (\d+)$/m.exec(head)?.[1] ?? 0);
+      if (rest.length < n) break; // framed body still in flight
+      const body = rest.slice(0, n);
+      buf = rest.slice(n);
+      const type = /^Content-Type: (.*)$/m.exec(head)?.[1] ?? '';
+      if (!authAck) {
+        if (type === 'auth/request') {
+          sock.write(`auth ${ES_PASSWORD}\n\n`);
+        } else if (type === 'command/reply') {
+          const reply = /^Reply-Text: (.*)$/m.exec(head)?.[1] ?? '';
+          if (reply.startsWith('+OK')) {
+            authAck = true;
+            sock.write('event plain DTMF\n\n');
+          } else {
+            failure = new Error(`event-socket auth failed: ${reply}`);
+            sock.destroy();
+          }
+        }
+        continue;
+      }
+      if (!subscribed) {
+        if (type === 'command/reply') {
+          const reply = /^Reply-Text: (.*)$/m.exec(head)?.[1] ?? '';
+          if (reply.startsWith('+OK')) {
+            subscribed = true;
+          } else {
+            failure = new Error(`event-socket DTMF subscription failed: ${reply}`);
+            sock.destroy();
+          }
+        }
+        continue;
+      }
+      // Live: only DTMF events are subscribed to, but parse defensively —
+      // any other frame is skipped.
+      if (/^Event-Name: DTMF$/m.test(body)) {
+        const digit = /^DTMF-Digit: (.*)$/m.exec(body)?.[1]?.trim();
+        if (digit !== undefined) {
+          queue.push({
+            digit,
+            channel: /^Channel-Name: (.*)$/m.exec(body)?.[1]?.trim() ?? '',
+          });
+        }
+      }
+    }
+    pump();
+  });
+  sock.on('error', (e: Error) => {
+    failure = failure ?? e;
+    sock.destroy();
+  });
+  sock.on('close', () => {
+    eof = true;
+    pump();
+  });
+  const waitUntil = (pred: () => boolean, desc: string, ms: number): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const i = waiters.indexOf(check);
+        if (i >= 0) waiters.splice(i, 1);
+        reject(new Error(`fsSubscribeDtfm: timed out waiting for ${desc}`));
+      }, ms);
+      const check = (): void => {
+        if (!pred()) {
+          waiters.push(check);
+          return;
+        }
+        clearTimeout(timer);
+        resolve();
+      };
+      check();
+    });
+  try {
+    await waitUntil(() => authAck || failure !== undefined || eof, 'auth handshake', 5_000);
+    if (failure) throw failure;
+    if (eof) throw new Error('event socket closed during auth handshake');
+    await waitUntil(() => subscribed || failure !== undefined || eof, 'subscription ack', 5_000);
+    if (failure) throw failure;
+    if (eof) throw new Error('event socket closed before the DTMF subscription ack');
+    for (;;) {
+      while (queue.length > 0) {
+        yield queue.shift()!;
+      }
+      if (failure) throw failure;
+      if (eof) return;
+      // Bounded idle wait (not an open-ended await): an un-resolved await
+      // would prevent generator.return() from ever completing and leak the
+      // socket — see the yield loop's cleanup contract above.
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 250);
+        waiters.push(() => {
+          clearTimeout(t);
+          resolve();
+        });
+      });
+    }
+  } finally {
+    opts?.signal?.removeEventListener('abort', onAbort);
+    sock.destroy();
+  }
+}
+
 /** Recorded WAVs under the /recordings mount, sorted by filename (ascending). */
 export function getRecordings(handle: FsHandle): string[] {
   return readdirSync(handle.recordDir)
