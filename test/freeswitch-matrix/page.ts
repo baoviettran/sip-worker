@@ -12,7 +12,12 @@
 // credentials, SIP messages, or SDP.
 
 import { BrowserPhone, createBrowserMediaEnvironment } from 'sip-worker';
-import type { BrowserPhoneOptions, OutgoingBrowserCall } from 'sip-worker';
+import type {
+  BrowserPhoneOptions,
+  OutgoingBrowserCall,
+  IncomingBrowserCall,
+  DiagnosticRecord,
+} from 'sip-worker';
 
 /** Build evidence injected by build-matrix.mjs (tarball SHA-256 + provenance). */
 declare const __MATRIX_BUILD__: {
@@ -121,12 +126,27 @@ function wireMethod(firstLine: string): string | undefined {
   return tokens[0] === 'SIP/2.0' ? tokens[1] : tokens[0];
 }
 
-function recordWire(text: string, events: MatrixEvent[]): void {
+function recordWire(text: string, events: MatrixEvent[], incoming: boolean): void {
   const firstLine = text.split(/\r?\n/, 1)[0] ?? '';
   const method = wireMethod(firstLine);
   if (method !== undefined && WIRE_METHODS.has(method)) {
     events.push({ type: 'wire', detail: method });
   }
+  if (incoming) captureViaRport(text);
+}
+/**
+ * The page's own WSS source port, as FreeSWITCH appends it to the Via of any
+ * response to a REGISTER (`;received=127.0.0.1;rport=<srcPort>`). Scoping the
+ * scan to REGISTER responses keeps INVITE-transaction Vias (FreeSWITCH's own
+ * address) out of the capture. wait-incoming requires this value: the dialog
+ * Contact rewritten below must address the page's actual WSS connection or
+ * FreeSWITCH's ACK goes to a fresh (never-answered) WSS connection.
+ */
+let wssSourcePort: number | undefined;
+function captureViaRport(text: string): void {
+  if (!/CSeq: \d+ REGISTER\r?$/im.test(text)) return;
+  const m = /rport=(\d+)/.exec(text);
+  if (m) wssSourcePort = Number(m[1]);
 }
 
 class RecordingWebSocket extends WebSocket {
@@ -138,20 +158,20 @@ class RecordingWebSocket extends WebSocket {
     this.addEventListener('message', (e: MessageEvent) => {
       const data: unknown = e.data;
       if (typeof data === 'string') {
-        recordWire(data, this.events);
+        recordWire(data, this.events, true);
       } else if (data instanceof ArrayBuffer) {
-        recordWire(new TextDecoder().decode(data), this.events);
+        recordWire(new TextDecoder().decode(data), this.events, true);
       } else if (ArrayBuffer.isView(data)) {
-        recordWire(new TextDecoder().decode(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)), this.events);
+        recordWire(new TextDecoder().decode(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)), this.events, true);
       }
     });
   }
 
   send(data: string | Blob | ArrayBufferLike | ArrayBufferView): void {
-    if (typeof data === 'string') recordWire(data, this.events);
-    else if (data instanceof ArrayBuffer) recordWire(new TextDecoder().decode(data), this.events);
+    if (typeof data === 'string') recordWire(data, this.events, false);
+    else if (data instanceof ArrayBuffer) recordWire(new TextDecoder().decode(data), this.events, false);
     else if (ArrayBuffer.isView(data)) {
-      recordWire(new TextDecoder().decode(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)), this.events);
+      recordWire(new TextDecoder().decode(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)), this.events, false);
     }
     super.send(data as string | Blob | ArrayBufferLike | ArrayBufferView);
   }
@@ -246,7 +266,7 @@ function readStepArgs(args: unknown): StepArgs {
 function buildPhone(
   events: MatrixEvent[],
   args: StepArgs,
-  opts?: { capturePcs?: RTCPeerConnection[] },
+  opts?: { capturePcs?: RTCPeerConnection[]; diagnosticsEvents?: string[] },
 ): BrowserPhone {
   installFakeMic();
   const wssPort = readWssPort();
@@ -255,17 +275,39 @@ function buildPhone(
   // srflx 127.0.0.1 candidate (see StepArgs.stunPort) alongside the mDNS host
   // candidates, so the offer passes the FreeSWITCH candidate ACL.
   // iceServers is a media-level option (BrowserMediaOptions).
+  const diagEvents = opts?.diagnosticsEvents;
   const options: BrowserPhoneOptions = {
     signaling: { url: `wss://${domain}:${wssPort}/ws` },
     account: {
       registrarUri: `sip:${domain}:${wssPort}`,
       aor: `sip:${args.user}@${domain}`,
-      contact: `sip:${args.user}@${domain}`,
+      // The Contact must be BRACKETED: sofia-sip's name-addr parser routes
+      // the params of an unbracketed contact (everything after the first
+      // ';') into the header-parameter list, not the URL-parameter list, so
+      // FreeSWITCH never sees `transport=wss` and sends server→client dialog
+      // requests (the ACK after the page's 200 OK, the BYE after uuid_kill)
+      // over UDP, where the page never sees them. The registration Contact
+      // points at the WSS listener port; wait-incoming rewrites the runtime
+      // contact to the page's own WSS source port (learned from the FS Via
+      // rport) before the inbound INVITE arrives, so the ACK reuses the
+      // page's WSS connection instead of opening a new one.
+      contact: `<sip:${args.user}@${domain}:${wssPort};transport=wss>`,
       username: args.user,
       password: args.password,
     },
     ...(args.stunPort !== undefined
       ? { media: { iceServers: [{ urls: `stun:127.0.0.1:${args.stunPort}` }] } }
+      : {}),
+    // Inbound steps assert the diagnostic chain (call.established →
+    // call.terminated); the logger sink captures codes in emission order.
+    ...(diagEvents !== undefined
+      ? {
+          diagnostics: {
+            logger: (record: DiagnosticRecord) => {
+              diagEvents.push(record.code);
+            },
+          },
+        }
       : {}),
   };
   // The audio step needs the live RTCPeerConnection for getStats growth: wrap
@@ -592,6 +634,181 @@ async function runFinishCallStep(): Promise<MatrixResult> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Inbound-call steps: wait-incoming registers and arms the incomingCall
+// listener; answer-incoming answers the INVITE and proves establishment;
+// hangup / expect-remote-terminated observe the call's termination. The
+// IncomingBrowserCall cannot hang up locally yet (ownerHangup is staged for a
+// later task), so the node side triggers the BYE with uuid_kill on the FS
+// channel; the page steps assert the observed clean termination.
+// ---------------------------------------------------------------------------
+interface InboundState {
+  phone: BrowserPhone;
+  events: MatrixEvent[];
+  /** Diagnostic codes in emission order (buildPhone diagnostics sink). */
+  diagCodes: string[];
+  /** Set when the phone emits incomingCall (armed in wait-incoming). */
+  call: IncomingBrowserCall | undefined;
+}
+let inbound: InboundState | undefined;
+
+/** Register the phone and arm the incomingCall listener; returns immediately. */
+async function runWaitIncomingStep(args: StepArgs): Promise<MatrixResult> {
+  const events: MatrixEvent[] = [];
+  const diagCodes: string[] = [];
+  const phone = buildPhone(events, args, { diagnosticsEvents: diagCodes });
+  livePhones.push(phone);
+  const state: InboundState = { phone, events, diagCodes, call: undefined };
+  // Arm BEFORE registering so the INVITE can never race the subscription.
+  phone.on('incomingCall', (e) => {
+    state.call = e.call;
+  });
+  inbound = state;
+  try {
+    await phone.connect();
+    await waitState(phone, { connectionState: 'connected' });
+    await phone.register();
+    await waitRegistration(phone, 'registered');
+    // FreeSWITCH routes the post-200-OK ACK (and the uuid_kill BYE) to the
+    // Contact of the page's dialog messages. The dialog Contact therefore
+    // must be the page's own WSS connection endpoint — 127.0.0.1:<srcPort> —
+    // so the ACK reuses the accepted WSS connection instead of opening a new
+    // one the page would never read. The srcPort is what FreeSWITCH echoes
+    // back in the REGISTER response Via (`rport=<srcPort>`); the runtime
+    // contact is rewritten before the originate can put the INVITE on the
+    // wire, so the Invitation snapshots the corrected value.
+    if (wssSourcePort === undefined) {
+      throw new Error('wait-incoming: no Via rport in FreeSWITCH responses (cannot address the page WSS connection)');
+    }
+    const runtime = (phone as unknown as { runtime?: { core?: { options?: { contact?: string } } } }).runtime;
+    if (!runtime?.core?.options || typeof runtime.core.options.contact !== 'string') {
+      throw new Error('wait-incoming: cannot reach runtime core contact to set the dialog address');
+    }
+    runtime.core.options.contact =
+      `<sip:${args.user}@127.0.0.1:${wssSourcePort};transport=wss>`;
+    return {
+      ok: true,
+      detail: `wait-incoming: registered, listening for incoming INVITE (dialog contact rport=${wssSourcePort})`,
+      result: { registered: true },
+      events,
+    };
+  } catch (error) {
+    const f = asFailure(error);
+    inbound = undefined;
+    return { ok: false, detail: `wait-incoming: ${f.message}`, errorCode: f.code, events };
+  }
+}
+
+/** Answer the inbound INVITE and prove the call establishes. */
+async function runAnswerIncomingStep(): Promise<MatrixResult> {
+  const state = inbound;
+  if (!state) {
+    return { ok: false, detail: 'answer-incoming: no wait-incoming step is live', events: [] };
+  }
+  const { phone, events } = state;
+  try {
+    await waitFor(
+      () => state.call !== undefined,
+      'incoming INVITE',
+      30_000,
+      () => `connection=${phone.connectionState} registration=${phone.registrationState}`,
+    );
+    const incoming = state.call;
+    if (!incoming) throw new Error('incoming INVITE not captured'); // waitFor guarantees this
+    await incoming.answer();
+    await waitFor(
+      () => incoming.state === 'established',
+      'call established',
+      15_000,
+      () => `call=${incoming.state} connection=${phone.connectionState}`,
+    );
+    return {
+      ok: true,
+      detail: 'answer-incoming: established',
+      result: { callState: incoming.state },
+      events,
+    };
+  } catch (error) {
+    const f = asFailure(error);
+    return { ok: false, detail: `answer-incoming: ${f.message}`, errorCode: f.code, events };
+  }
+}
+
+/** Observe the call terminate cleanly (the node side triggers the BYE). */
+async function runHangupStep(): Promise<MatrixResult> {
+  const state = inbound;
+  if (!state?.call) {
+    return { ok: false, detail: 'hangup: no established inbound call is live', events: state?.events ?? [] };
+  }
+  const { phone, call, events } = state;
+  try {
+    await waitFor(
+      () => call.state === 'terminated' || call.state === 'failed',
+      'call terminated',
+      20_000,
+      () => `call=${call.state} connection=${phone.connectionState}`,
+    );
+    if (call.state === 'failed') throw new Error('call failed instead of terminating cleanly');
+    return {
+      ok: true,
+      detail: 'hangup: call terminated cleanly',
+      result: { callState: call.state },
+      events,
+    };
+  } catch (error) {
+    const f = asFailure(error);
+    return { ok: false, detail: `hangup: ${f.message}`, errorCode: f.code, events };
+  } finally {
+    inbound = undefined;
+    await disposePhone(phone);
+  }
+}
+
+/** Assert the remote BYE terminated the call with a clean diagnostic chain. */
+async function runExpectRemoteTerminatedStep(): Promise<MatrixResult> {
+  const state = inbound;
+  if (!state?.call) {
+    return {
+      ok: false,
+      detail: 'expect-remote-terminated: no established inbound call is live',
+      events: state?.events ?? [],
+    };
+  }
+  const { phone, call, events, diagCodes } = state;
+  try {
+    await waitFor(
+      () => call.state === 'terminated' || call.state === 'failed',
+      'remote BYE terminating call',
+      20_000,
+      () => `call=${call.state} connection=${phone.connectionState}`,
+    );
+    if (call.state === 'failed') throw new Error('call failed instead of clean remote termination');
+    const establishedIdx = diagCodes.indexOf('call.established');
+    const terminatedIdx = diagCodes.indexOf('call.terminated');
+    if (establishedIdx === -1) {
+      throw new Error(`diagnostic call.established missing (trace: ${diagCodes.join(',')})`);
+    }
+    if (terminatedIdx === -1) {
+      throw new Error(`diagnostic call.terminated missing (trace: ${diagCodes.join(',')})`);
+    }
+    if (terminatedIdx < establishedIdx) {
+      throw new Error(`call.terminated before call.established (trace: ${diagCodes.join(',')})`);
+    }
+    return {
+      ok: true,
+      detail: `expect-remote-terminated: clean remote BYE, diag ${diagCodes.join('→')}`,
+      result: { callState: call.state, diagCodes },
+      events,
+    };
+  } catch (error) {
+    const f = asFailure(error);
+    return { ok: false, detail: `expect-remote-terminated: ${f.message}`, errorCode: f.code, events };
+  } finally {
+    inbound = undefined;
+    await disposePhone(phone);
+  }
+}
+
 async function runMatrixStep(name: string, args: unknown): Promise<MatrixResult> {
   const stepArgs = readStepArgs(args);
   let result: MatrixResult;
@@ -599,6 +816,10 @@ async function runMatrixStep(name: string, args: unknown): Promise<MatrixResult>
   else if (name === 'wrong-password') result = await runWrongPasswordStep(stepArgs);
   else if (name === 'outgoing-audio') result = await runOutgoingAudioStep(stepArgs);
   else if (name === 'finish-call') result = await runFinishCallStep();
+  else if (name === 'wait-incoming') result = await runWaitIncomingStep(stepArgs);
+  else if (name === 'answer-incoming') result = await runAnswerIncomingStep();
+  else if (name === 'hangup') result = await runHangupStep();
+  else if (name === 'expect-remote-terminated') result = await runExpectRemoteTerminatedStep();
   else result = { ok: false, detail: `unknown matrix step '${name}'`, events: [] };
   // Playwright structured-clones the evaluate() result; spread keeps the
   // result literal so shape stays explicit, and `identity` is a plain object.

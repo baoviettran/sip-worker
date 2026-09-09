@@ -164,6 +164,43 @@ export function fsExec(cmd: string): Promise<string> {
   });
 }
 
+/**
+ * Originate a parked call to `destination` (e.g. `sofia/ws-test/1000@127.0.0.1`)
+ * and resolve the FS channel UUID (used later for uuid_kill). api commands
+ * answer with an api/response body — `-ERR …` on failure, the channel UUID
+ * (bare or after `+OK`) on success.
+ */
+export async function originateCall(destination: string): Promise<string> {
+  const body = await fsExec(`originate {ignore_early_media=true}${destination} &park()`);
+  if (body.startsWith('-ERR')) throw new Error(`originate -ERR: ${body}`);
+  const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(body);
+  if (!m) throw new Error(`originate returned no channel uuid: ${body}`);
+  return m[1];
+}
+
+/**
+ * Build an originate destination that reaches a WSS-registered client, or
+ * throw when the registration is absent (fail-not-skip).
+ *
+ * The dial-string form (`sofia/<profile>/<user>@<domain>`) does NOT reach the
+ * registration on the pinned image: the dial-string resolves to the stored
+ * contact, whose URI carries no transport parameter, so FreeSWITCH dials the
+ * raw URI over UDP:5060 and fails with NORMAL_TEMPORARY_FAILURE. The reliable
+ * form is the direct URI with the registered client's connection port and an
+ * explicit wss transport — FreeSWITCH then routes the INVITE over the client's
+ * existing WebSocket. The port is observable in the registration's fs_path
+ * (sofia_contact output), so it is read at runtime, never assumed.
+ */
+export async function resolveWssDestination(profile: string, user: string, domain: string): Promise<string> {
+  const contact = await fsExec(`sofia_contact */${user}@${domain}`);
+  if (!contact.startsWith('sofia/')) {
+    throw new Error(`no registration for ${user}@${domain}: ${contact}`);
+  }
+  const m = /fs_path=sip%3A.*?%3A(\d+)/.exec(contact);
+  if (!m) throw new Error(`sofia_contact output lacks fs_path port: ${contact}`);
+  return `sofia/${profile}/sip:${user}@${domain}:${m[1]};transport=wss`;
+}
+
 /** Recorded WAVs under the /recordings mount, sorted by filename (ascending). */
 export function getRecordings(handle: FsHandle): string[] {
   return readdirSync(handle.recordDir)
