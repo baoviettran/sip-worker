@@ -635,6 +635,201 @@ async function runFinishCallStep(): Promise<MatrixResult> {
 }
 
 // ---------------------------------------------------------------------------
+// Hold/resume + mute/unmute (matrix steps 6 and 7): ONE persistent outgoing
+// call — `hold` registers, dials 9196, establishes, and places the call on
+// local hold; `resume`/`mute` mutate it; `unmute` un-mutes, proves RTP
+// resumed (Task 6 sampler), and terminates the call cleanly. Every step
+// returns the observed holdState/muted state, the full diagnostic trace, and
+// post-action RTP-growth evidence (boolean + counters) — the spec asserts the
+// control-plane contract (the holdState/diagnostic pair), not an SDP
+// direction literal.
+// ---------------------------------------------------------------------------
+interface ControlsRun {
+  phone: BrowserPhone;
+  call: OutgoingBrowserCall;
+  events: MatrixEvent[];
+  pc: RTCPeerConnection;
+  diagCodes: string[];
+}
+let controlsRun: ControlsRun | undefined;
+
+function wireCount(events: MatrixEvent[], detail: string): number {
+  return events.filter((e) => e.type === 'wire' && e.detail === detail).length;
+}
+
+/** Establish the persistent outgoing call and place it on local hold. */
+async function runHoldStep(args: StepArgs): Promise<MatrixResult> {
+  const events: MatrixEvent[] = [];
+  const pcs: RTCPeerConnection[] = [];
+  const diagCodes: string[] = [];
+  const phone = buildPhone(events, args, { capturePcs: pcs, diagnosticsEvents: diagCodes });
+  livePhones.push(phone);
+  try {
+    await phone.connect();
+    await waitState(phone, { connectionState: 'connected' });
+    await phone.register();
+    await waitRegistration(phone, 'registered');
+    const call = phone.createCall('sip:9196@127.0.0.1') as OutgoingBrowserCall;
+    await call.start();
+    await waitFor(() => call.state === 'established', 'call established', 15_000, () => `call=${call.state}`);
+    await call.hold();
+    await waitFor(
+      () => call.holdState.local,
+      'holdState.local=true',
+      10_000,
+      () => `call=${call.state} hold=${JSON.stringify(call.holdState)}`,
+    );
+    const pc = pcs[pcs.length - 1];
+    if (!pc) throw new Error('no RTCPeerConnection was created for the call');
+    // Evidence only (the spec asserts the holdState + call.hold diag pair, not
+    // a media-direction literal): whether BOTH directions keep growing under
+    // hold. The library's default hold direction is sendonly, so the inbound
+    // echo leg is expected to pause — this boolean carries the observed
+    // behavior for the report.
+    const rtpUnderHold = await waitForRtpGrowth(pc, 4_000);
+    controlsRun = { phone, call, events, pc, diagCodes };
+    return {
+      ok: true,
+      detail: `hold: established + local hold (holdState=${JSON.stringify(call.holdState)})`,
+      result: {
+        callState: call.state,
+        holdState: { local: call.holdState.local, remote: call.holdState.remote },
+        muted: call.muted,
+        diagCodes: [...diagCodes],
+        wireInvites: wireCount(events, 'INVITE'),
+        wire200s: wireCount(events, '200'),
+        rtpUnderHold: {
+          ok: rtpUnderHold.ok,
+          baseline: rtpUnderHold.baseline,
+          inbound: rtpUnderHold.inbound,
+          outbound: rtpUnderHold.outbound,
+        },
+      },
+      events,
+    };
+  } catch (error) {
+    const f = asFailure(error);
+    controlsRun = undefined;
+    await disposePhone(phone);
+    return { ok: false, detail: `hold: ${f.message}`, errorCode: f.code, events };
+  }
+}
+
+/** Resume from local hold; prove media flows again in both directions. */
+async function runResumeStep(): Promise<MatrixResult> {
+  const run = controlsRun;
+  if (!run) {
+    return { ok: false, detail: 'resume: no hold step has a live call', events: [] };
+  }
+  const { call, pc, diagCodes, events } = run;
+  try {
+    await call.resume();
+    await waitFor(
+      () => !call.holdState.local,
+      'holdState.local=false',
+      10_000,
+      () => `call=${call.state} hold=${JSON.stringify(call.holdState)}`,
+    );
+    // Task 6 sampler: growth in BOTH directions (packets AND bytes) after the
+    // resume re-INVITE — the ≥1 s of flow that proves echo came back.
+    const rtp = await waitForRtpGrowth(pc, 15_000);
+    return {
+      ok: true,
+      detail: `resume: hold released (holdState=${JSON.stringify(call.holdState)}), rtpResumed=${rtp.ok}`,
+      result: {
+        callState: call.state,
+        holdState: { local: call.holdState.local, remote: call.holdState.remote },
+        diagCodes: [...diagCodes],
+        rtpGrowth: rtp.ok,
+        rtp,
+      },
+      events,
+    };
+  } catch (error) {
+    const f = asFailure(error);
+    return { ok: false, detail: `resume: ${f.message}`, errorCode: f.code, events };
+  }
+}
+
+/** Mute the local mic (setMuted is synchronous; mutedChanged flips the flag). */
+async function runMuteStep(): Promise<MatrixResult> {
+  const run = controlsRun;
+  if (!run) {
+    return { ok: false, detail: 'mute: no hold step has a live call', events: [] };
+  }
+  const { call, pc, diagCodes, events } = run;
+  try {
+    call.setMuted(true);
+    await waitFor(() => call.muted, 'muted=true', 5_000, () => `muted=${call.muted}`);
+    // Evidence only: a disabled local track still emits (silent) packets in
+    // Chromium, so packet flow usually continues while muted — the brief
+    // asserts the muted flag here, and RTP-resumes on unmute below.
+    const rtpDuringMute = await waitForRtpGrowth(pc, 4_000);
+    return {
+      ok: true,
+      detail: `mute: muted=true (rtpDuringMute=${rtpDuringMute.ok})`,
+      result: {
+        callState: call.state,
+        muted: call.muted,
+        diagCodes: [...diagCodes],
+        rtpDuringMute: {
+          ok: rtpDuringMute.ok,
+          baseline: rtpDuringMute.baseline,
+          inbound: rtpDuringMute.inbound,
+          outbound: rtpDuringMute.outbound,
+        },
+      },
+      events,
+    };
+  } catch (error) {
+    const f = asFailure(error);
+    return { ok: false, detail: `mute: ${f.message}`, errorCode: f.code, events };
+  }
+}
+
+/** Un-mute, prove RTP resumed, then terminate cleanly with the diag chain. */
+async function runUnmuteStep(): Promise<MatrixResult> {
+  const run = controlsRun;
+  if (!run) {
+    return { ok: false, detail: 'unmute: no hold step has a live call', events: [] };
+  }
+  const { phone, call, pc, diagCodes, events } = run;
+  try {
+    call.setMuted(false);
+    await waitFor(() => !call.muted, 'muted=false', 5_000, () => `muted=${call.muted}`);
+    // RTP resumes after unmute (Task 6 sampler, both directions).
+    const rtp = await waitForRtpGrowth(pc, 15_000);
+    await call.hangup();
+    await waitFor(
+      () => call.state === 'terminated' || call.state === 'failed',
+      'call terminated',
+      15_000,
+      () => `call=${call.state}`,
+    );
+    if (call.state === 'failed') throw new Error('call failed instead of terminating cleanly');
+    assertCleanDiagChain(diagCodes);
+    return {
+      ok: true,
+      detail: `unmute: muted=false, rtpResumed=${rtp.ok}, call ${call.state}`,
+      result: {
+        callState: call.state,
+        muted: call.muted,
+        diagCodes: [...diagCodes],
+        rtpGrowth: rtp.ok,
+        rtp,
+      },
+      events,
+    };
+  } catch (error) {
+    const f = asFailure(error);
+    return { ok: false, detail: `unmute: ${f.message}`, errorCode: f.code, events };
+  } finally {
+    controlsRun = undefined;
+    await disposePhone(phone);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Inbound-call steps: wait-incoming registers and arms the incomingCall
 // listener; answer-incoming answers the INVITE and proves establishment;
 // hangup / expect-remote-terminated observe the call's termination. The
@@ -834,6 +1029,10 @@ async function runMatrixStep(name: string, args: unknown): Promise<MatrixResult>
   else if (name === 'wrong-password') result = await runWrongPasswordStep(stepArgs);
   else if (name === 'outgoing-audio') result = await runOutgoingAudioStep(stepArgs);
   else if (name === 'finish-call') result = await runFinishCallStep();
+  else if (name === 'hold') result = await runHoldStep(stepArgs);
+  else if (name === 'resume') result = await runResumeStep();
+  else if (name === 'mute') result = await runMuteStep();
+  else if (name === 'unmute') result = await runUnmuteStep();
   else if (name === 'wait-incoming') result = await runWaitIncomingStep(stepArgs);
   else if (name === 'answer-incoming') result = await runAnswerIncomingStep();
   else if (name === 'hangup') result = await runHangupStep();
