@@ -175,6 +175,31 @@ class RecordingWebSocket extends WebSocket {
     }
     super.send(data as string | Blob | ArrayBufferLike | ArrayBufferView);
   }
+
+  /**
+   * Sever the live WSS the way a network cut does. A page cannot destroy its
+   * own TCP socket, so this mirrors the v0.7 browser-phone recovery technique
+   * (its harness server dropped the socket server-side): the real socket is
+   * closed (TCP teardown toward FreeSWITCH) and a synthetic close observation
+   * with the abnormal code 1006 is delivered to the transport BEFORE the real
+   * (clean 1000) close event can arrive. The transport detaches on the first
+   * close event it sees, so the synthetic abnormal close is the one that
+   * counts — and it must be abnormal: the library treats a clean close
+   * (1000/1005, no error) as a manual disconnect and never arms recovery.
+   */
+  hardDrop(): void {
+    const dropped = new CloseEvent('close', {
+      code: 1006,
+      reason: 'matrix hard wss drop',
+      wasClean: false,
+    });
+    try {
+      this.close();
+    } catch {
+      // An already-closed socket does not block the synthetic observation.
+    }
+    this.dispatchEvent(dropped);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +293,12 @@ function readStepArgs(args: unknown): StepArgs {
 function buildPhone(
   events: MatrixEvent[],
   args: StepArgs,
-  opts?: { capturePcs?: RTCPeerConnection[]; diagnosticsEvents?: string[] },
+  opts?: {
+    capturePcs?: RTCPeerConnection[];
+    diagnosticsEvents?: string[];
+    /** Live transport sockets, in creation order (drop-wss severs the last). */
+    captureSockets?: RecordingWebSocket[];
+  },
 ): BrowserPhone {
   installFakeMic();
   const wssPort = readWssPort();
@@ -341,7 +371,11 @@ function buildPhone(
     : baseEnv;
   const phone = new BrowserPhone({
     options,
-    factory: (url, protocols) => new RecordingWebSocket(url, protocols, events),
+    factory: (url, protocols) => {
+      const socket = new RecordingWebSocket(url, protocols, events);
+      opts?.captureSockets?.push(socket);
+      return socket;
+    },
     lifecycle: {
       isOnline: () => navigator.onLine,
       subscribe: (event, listener) => {
@@ -1123,6 +1157,128 @@ async function runExpectRemoteTerminatedStep(): Promise<MatrixResult> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// WSS-drop recovery (matrix step 10): register, establish an outgoing 9196
+// call, sever the live WSS from the page (RecordingWebSocket.hardDrop — the
+// synthetic 1006 observation that a network cut produces; a clean close would
+// NOT arm recovery), and observe the library's bounded recovery pipeline:
+// reconnect → registration.recovering → re-REGISTER → registered. The row-10
+// contract asserted here is REGISTRATION RECOVERY (reconnected + registered +
+// a recovery record observed + a real re-REGISTER on the wire) — NOT a
+// specific call re-establishment: the call either re-establishes (cleanly
+// hung up afterwards) or terminates with typed evidence, and its outcome is
+// returned as data. A terminal recovery record (connection.recovery_failed /
+// registration.recovery_failed) FAILS the step — fail-not-skip.
+// ---------------------------------------------------------------------------
+interface RecoveryStepResult {
+  connectionState: string;
+  registrationState: string;
+  /** 'established' (re-established, then cleanly hung up) | 'terminated' | 'failed'. */
+  callOutcome: string;
+  diagCodes: string[];
+  wireRegisters: number;
+  wireRegistersAfterDrop: number;
+}
+
+async function runDropWssStep(args: StepArgs): Promise<MatrixResult> {
+  const events: MatrixEvent[] = [];
+  const diagCodes: string[] = [];
+  const sockets: RecordingWebSocket[] = [];
+  const phone = buildPhone(events, args, {
+    diagnosticsEvents: diagCodes,
+    captureSockets: sockets,
+  });
+  livePhones.push(phone);
+  let call: OutgoingBrowserCall | undefined;
+  try {
+    await phone.connect();
+    await waitState(phone, { connectionState: 'connected' });
+    await phone.register();
+    await waitRegistration(phone, 'registered');
+    // The mid-call drop the row-10 scenario describes: an established call
+    // whose signaling socket is severed from under it.
+    call = phone.createCall('sip:9196@127.0.0.1') as OutgoingBrowserCall;
+    await call.start();
+    await waitFor(() => call.state === 'established', 'call established', 15_000, () => `call=${call.state}`);
+    const wireRegistersBeforeDrop = wireCount(events, 'REGISTER');
+    const socket = sockets[sockets.length - 1];
+    if (!socket) throw new Error('no live WebSocket was created for the transport');
+    socket.hardDrop();
+    // The abnormal-close observation arms recovery synchronously (the
+    // connection transitions before any recovery I/O starts).
+    await waitState(phone, { connectionState: 'recovering' }, 5_000);
+    // Then the bounded pipeline must land: reconnect + re-REGISTER. The
+    // library's own recovery budget is 30 s (recoveryTimeoutMs); the harness
+    // deadline is 45 s — a timeout here is a failure, never a hang.
+    await waitState(
+      phone,
+      { connectionState: 'connected', registrationState: 'registered' },
+      45_000,
+    );
+    // Contract: a recovery record observed — registration.recovering plus at
+    // least one connection.* recovery code, and NO terminal recovery record.
+    if (!diagCodes.includes('registration.recovering')) {
+      throw new Error(`recovery record missing: no registration.recovering (diag: ${diagCodes.join(',')})`);
+    }
+    const connectionRecovery = diagCodes.filter(
+      (c) => c === 'connection.reconnect_attempt' || c === 'connection.reconnected',
+    );
+    if (connectionRecovery.length === 0) {
+      throw new Error(`recovery record missing: no connection.* recovery diagnostic (diag: ${diagCodes.join(',')})`);
+    }
+    const terminalRecovery = diagCodes.filter(
+      (c) => c === 'connection.recovery_failed' || c === 'registration.recovery_failed',
+    );
+    if (terminalRecovery.length > 0) {
+      throw new Error(`recovery terminated: ${terminalRecovery.join(',')} (diag: ${diagCodes.join(',')})`);
+    }
+    // Wire evidence: the recovery re-REGISTER really crossed the new socket.
+    const wireRegistersAfterDrop = wireCount(events, 'REGISTER') - wireRegistersBeforeDrop;
+    if (wireRegistersAfterDrop < 1) {
+      throw new Error('recovery re-REGISTER missing from the wire trace');
+    }
+    // Call outcome (observed, never forced into one shape): a surviving call
+    // is hung up cleanly after the recovery; one the drop took with it is
+    // reported as terminated/failed — a failed outcome must carry the typed
+    // call.failed evidence.
+    let callOutcome: string;
+    if (call.state === 'established') {
+      await call.hangup();
+      await waitFor(
+        () => call.state === 'terminated' || call.state === 'failed',
+        'post-recovery call terminated',
+        20_000,
+        () => `call=${call.state} connection=${phone.connectionState}`,
+      );
+      if (call.state === 'failed') throw new Error('post-recovery hangup failed instead of terminating cleanly');
+      callOutcome = 'established';
+    } else {
+      callOutcome = call.state;
+      if (callOutcome === 'failed' && !diagCodes.includes('call.failed')) {
+        throw new Error(`call failed without typed call.failed evidence (diag: ${diagCodes.join(',')})`);
+      }
+    }
+    return {
+      ok: true,
+      detail: `drop-wss: reconnected + re-registered (diag ${diagCodes.join('→')}), call outcome ${callOutcome}`,
+      result: {
+        connectionState: phone.connectionState,
+        registrationState: phone.registrationState,
+        callOutcome,
+        diagCodes: [...diagCodes],
+        wireRegisters: wireCount(events, 'REGISTER'),
+        wireRegistersAfterDrop,
+      } satisfies RecoveryStepResult,
+      events,
+    };
+  } catch (error) {
+    const f = asFailure(error);
+    return { ok: false, detail: `drop-wss: ${f.message}`, errorCode: f.code, events };
+  } finally {
+    await disposePhone(phone);
+  }
+}
+
 async function runMatrixStep(name: string, args: unknown): Promise<MatrixResult> {
   const stepArgs = readStepArgs(args);
   let result: MatrixResult;
@@ -1139,6 +1295,7 @@ async function runMatrixStep(name: string, args: unknown): Promise<MatrixResult>
   else if (name === 'hangup') result = await runHangupStep();
   else if (name === 'dtmf') result = await runDtmfStep(stepArgs);
   else if (name === 'expect-remote-terminated') result = await runExpectRemoteTerminatedStep();
+  else if (name === 'drop-wss') result = await runDropWssStep(stepArgs);
   else result = { ok: false, detail: `unknown matrix step '${name}'`, events: [] };
   // Playwright structured-clones the evaluate() result; spread keeps the
   // result literal so shape stays explicit, and `identity` is a plain object.
