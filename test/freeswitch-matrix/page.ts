@@ -734,13 +734,40 @@ async function runAnswerIncomingStep(): Promise<MatrixResult> {
   }
 }
 
+/**
+ * A cleanly terminated call must show the diagnostic chain
+ * `call.established` → `call.terminated` (in that order) and no diagnostic
+ * from the library's severity-'error' family (DiagnosticRecorder CODE_SPECS:
+ * call.failed, call.dtmf_failed, media.failed). Throws with the full trace —
+ * fail-not-skip, never a softened check.
+ */
+function assertCleanDiagChain(diagCodes: readonly string[]): void {
+  const trace = diagCodes.join(',');
+  const establishedIdx = diagCodes.indexOf('call.established');
+  const terminatedIdx = diagCodes.indexOf('call.terminated');
+  if (establishedIdx === -1) {
+    throw new Error(`diagnostic call.established missing (trace: ${trace})`);
+  }
+  if (terminatedIdx === -1) {
+    throw new Error(`diagnostic call.terminated missing (trace: ${trace})`);
+  }
+  if (terminatedIdx < establishedIdx) {
+    throw new Error(`call.terminated before call.established (trace: ${trace})`);
+  }
+  const errorCodes = diagCodes.filter((code) =>
+    code === 'call.failed' || code === 'call.dtmf_failed' || code === 'media.failed');
+  if (errorCodes.length > 0) {
+    throw new Error(`error diagnostics on a cleanly terminated call: ${errorCodes.join(',')} (trace: ${trace})`);
+  }
+}
+
 /** Observe the call terminate cleanly (the node side triggers the BYE). */
 async function runHangupStep(): Promise<MatrixResult> {
   const state = inbound;
   if (!state?.call) {
     return { ok: false, detail: 'hangup: no established inbound call is live', events: state?.events ?? [] };
   }
-  const { phone, call, events } = state;
+  const { phone, call, events, diagCodes } = state;
   try {
     await waitFor(
       () => call.state === 'terminated' || call.state === 'failed',
@@ -749,10 +776,11 @@ async function runHangupStep(): Promise<MatrixResult> {
       () => `call=${call.state} connection=${phone.connectionState}`,
     );
     if (call.state === 'failed') throw new Error('call failed instead of terminating cleanly');
+    assertCleanDiagChain(diagCodes);
     return {
       ok: true,
-      detail: 'hangup: call terminated cleanly',
-      result: { callState: call.state },
+      detail: `hangup: call terminated cleanly, diag ${diagCodes.join('→')}`,
+      result: { callState: call.state, diagCodes },
       events,
     };
   } catch (error) {
@@ -783,17 +811,7 @@ async function runExpectRemoteTerminatedStep(): Promise<MatrixResult> {
       () => `call=${call.state} connection=${phone.connectionState}`,
     );
     if (call.state === 'failed') throw new Error('call failed instead of clean remote termination');
-    const establishedIdx = diagCodes.indexOf('call.established');
-    const terminatedIdx = diagCodes.indexOf('call.terminated');
-    if (establishedIdx === -1) {
-      throw new Error(`diagnostic call.established missing (trace: ${diagCodes.join(',')})`);
-    }
-    if (terminatedIdx === -1) {
-      throw new Error(`diagnostic call.terminated missing (trace: ${diagCodes.join(',')})`);
-    }
-    if (terminatedIdx < establishedIdx) {
-      throw new Error(`call.terminated before call.established (trace: ${diagCodes.join(',')})`);
-    }
+    assertCleanDiagChain(diagCodes);
     return {
       ok: true,
       detail: `expect-remote-terminated: clean remote BYE, diag ${diagCodes.join('→')}`,

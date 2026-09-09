@@ -6,9 +6,11 @@
 // for a later task), so BOTH scenarios terminate the call from the node side
 // with `uuid_kill <uuid>` on the originated channel — FreeSWITCH sends the
 // BYE and the page observes `terminated`. The scenarios differ in what the
-// final page step asserts: `hangup` proves clean termination;
-// `expect-remote-terminated` additionally asserts the diagnostic chain
-// `call.established` → `call.terminated` with no error records.
+// final page step observes: `hangup` proves clean local-side termination;
+// `expect-remote-terminated` observes the remote BYE. BOTH assert the
+// diagnostic chain `call.established` → `call.terminated` with no
+// error-family records (assertCleanDiagChain in page.ts), and the spec
+// re-asserts the chain from the returned diagCodes.
 //
 // The inbound answer negotiates WebRTC media, so the same DTLS pem seeding and
 // node-side STUN responder prerequisites as audio.spec.ts apply (replicated
@@ -147,6 +149,11 @@ test.describe('matrix · inbound originate + remote BYE', () => {
       expect((h.result as InboundStepResult).callState).toBe('terminated');
       // the BYE from FreeSWITCH arrived on the wire
       expect(h.events).toContainEqual(expect.objectContaining({ type: 'wire', detail: 'BYE' }));
+      // same diagnostic chain the remote-BYE scenario asserts
+      const diagCodes = (h.result as InboundStepResult).diagCodes ?? [];
+      expect(diagCodes, `diag trace: ${diagCodes.join(',')}`).toContain('call.established');
+      expect(diagCodes, `diag trace: ${diagCodes.join(',')}`).toContain('call.terminated');
+      expect(diagCodes.indexOf('call.terminated')).toBeGreaterThan(diagCodes.indexOf('call.established'));
     } finally {
       await stun.close();
       await disposeMatrix(ctx);
