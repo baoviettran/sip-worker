@@ -277,6 +277,25 @@ export class DialogNegotiator {
     this.clearRetryTimer();
   }
 
+  /**
+   * Build an in-dialog re-INVITE (ICE restart or hold/resume) carrying our
+   * local Contact. `Dialog.createRequest` populates Via/To/From/Call-ID/CSeq/
+   * Max-Forwards/Route only, and `Dialog.contact` is the REMOTE target (the
+   * peer's Contact), so the local one has to be added here.
+   *
+   * RFC 3261 12.1.1: a re-INVITE is a target refresh, so the UAC MUST put its
+   * own Contact in the request. Measured, not assumed: Asterisk (pjsip)
+   * answers a re-INVITE without one `400 Missing Contact header` and the
+   * request never reaches the dialplan, while sofia-sip (FreeSWITCH)
+   * tolerates the omission — which is why the FreeSWITCH matrix passed
+   * without this and only the Asterisk matrix could find it.
+   */
+  private buildReinvite(dialog: Dialog, sdp: string): SipRequestMessage {
+    const request = withTextBody(dialog.createRequest('INVITE'), sdp, 'application/sdp') as SipRequestMessage;
+    request.headers.set('Contact', this.contact);
+    return request;
+  }
+
   private async runRestart(
     dialog: Dialog,
     settle: (success: boolean, reason?: unknown) => void,
@@ -287,7 +306,7 @@ export class DialogNegotiator {
       return;
     }
 
-    const request = withTextBody(dialog.createRequest('INVITE'), sdp, 'application/sdp') as SipRequestMessage;
+    const request = this.buildReinvite(dialog, sdp);
 
     sendOwnedRequest(
       this.layer,
@@ -371,7 +390,7 @@ export class DialogNegotiator {
       return;
     }
 
-    const request = withTextBody(dialog.createRequest('INVITE'), sdp, 'application/sdp') as SipRequestMessage;
+    const request = this.buildReinvite(dialog, sdp);
 
     sendOwnedRequest(
       this.layer,
