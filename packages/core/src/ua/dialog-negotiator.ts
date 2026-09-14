@@ -300,6 +300,11 @@ export class DialogNegotiator {
         if (this.disposed) return;
         if (event.type === 'response') {
           const code = event.response.statusCode;
+          // A provisional (1xx) keeps the transaction open for its final
+          // response — FreeSWITCH emits 100 Trying for every re-INVITE, and
+          // treating it as final rejected hold/restart before the 200 OK
+          // arrived (mirrors Inviter.onResponse's provisional filter).
+          if (code >= 100 && code < 200) return;
           if (code >= 200 && code < 300) {
             this.terminateOwned();
             void this.completeRestart(dialog, request, event.response).then(
@@ -379,6 +384,11 @@ export class DialogNegotiator {
         if (this.disposed) return;
         if (event.type === 'response') {
           const code = event.response.statusCode;
+          // A provisional (1xx) keeps the transaction open for its final
+          // response — FreeSWITCH emits 100 Trying for every re-INVITE, and
+          // treating it as final rejected hold/resume before the 200 OK
+          // arrived (mirrors Inviter.onResponse's provisional filter).
+          if (code >= 100 && code < 200) return;
           if (code >= 200 && code < 300) {
             this.terminateOwned();
             void this.completeDirectional(dialog, request, event.response).then(

@@ -45,7 +45,11 @@
     "build:sipp": "tsup test/sipp/driver/agent.ts --format esm --platform node --out-dir test/sipp/driver/dist --clean --target node20",
     "test:sipp": "npm run build:sipp && node test/sipp/run-scenario.mjs",
     "test:sipp:unit": "vitest run test/sipp/driver/assertions.unit.test.ts test/sipp/driver/agent.unit.test.ts",
-    "test:sipp:infra": "node --test 'test/sipp/*.test.mjs' 'test/sipp/**/*.test.mjs'"
+    "test:sipp:infra": "node --test 'test/sipp/*.test.mjs' 'test/sipp/**/*.test.mjs'",
+    "test:matrix:unit": "vitest run test/freeswitch-matrix/*.unit.test.ts",
+    "test:matrix:infra": "npx vitest run --config test/freeswitch-matrix/vitest.config.ts test/freeswitch-matrix/*.infra.test.ts",
+    "test:matrix:integrity": "node --test test/freeswitch-matrix/*.test.mjs",
+    "test:matrix:page": "npx playwright test --config=test/freeswitch-matrix/playwright.config.ts"
   },
   "devDependencies": {
     "@microsoft/api-extractor": "7.58.12",

@@ -1,0 +1,31 @@
+<!doctype html>
+<!--
+  FreeSWITCH matrix page harness. Loads the BUILT/PACKED bundle (dist/matrix.js)
+  — never packages/**/src — and drives a real BrowserPhone against the per-run
+  FreeSWITCH container booted by the Playwright globalSetup. The per-run FS WSS
+  port arrives in the ?wss= query parameter (helpers.ts appends it), so this
+  page stays FreeSWITCH-agnostic.
+
+  The Node helper (helpers.ts) only invokes window.__runMatrixStep and asserts
+  on the returned plain-data MatrixResult. No credentials or SIP exchanges ever
+  leave the page in a result.
+
+  server.mjs FAILS (HTTP 503) when dist/matrix.js is absent, and the script
+  tag's onerror surfaces that as a fatal page state, so this page can never
+  silently serve stale or unbuilt code.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>sip-worker FreeSWITCH matrix harness</title>
+</head>
+<body>
+  <!-- Playwright clicks this first: unlocks audio with a user gesture
+       (mirroring the browser-phone gate; later call steps need real audio). -->
+  <button id="unlock" type="button">unlock audio</button>
+  <pre id="status" style="font-family: monospace; color: #eee; background: #111; padding: 1rem;">loading matrix bundle…</pre>
+  <script src="dist/matrix.js"
+          onerror="document.getElementById('status').textContent = 'HARNESS_FATAL matrix bundle failed to load (HTTP 503?) — run test/freeswitch-matrix/build-matrix.mjs'"></script>
+</body>
+</html>

@@ -1,0 +1,71 @@
+# FreeSWITCH call-matrix harness
+
+Playwright-driven integration tests that boot a real FreeSWITCH container,
+exercise sip-worker's WebRTC / SIP stack against it, and assert audio,
+registration, controls, DTMF, and recovery end-to-end.
+
+## Run idioms
+
+### Without docker (fast, no infra)
+
+```bash
+npm run test:matrix:unit        # vitest: rms + conf unit tests
+npm run test:matrix:integrity   # node --test: boundary + integrity gates
+```
+
+### With docker (requires a running FreeSWITCH image)
+
+```bash
+npm run test:matrix:infra       # vitest: fsboot + fsctl infra tests
+npm run test:matrix:page        # playwright: full spec suite
+```
+
+`MATRIX_MODE` selects the slice both the specs and the browser projects are
+drawn from: `pr` runs Chromium alone with `audio.spec.ts` structurally excluded
+(`testMatch`), while `nightly` (or unset) runs Chromium + Firefox including the
+audio proof. Registering a browser the CI job did not install fails every test
+with "Executable doesn't exist", so the two must stay in step.
+
+Or run a single spec:
+
+```bash
+npx playwright test --config=test/freeswitch-matrix/playwright.config.ts \
+  test/freeswitch-matrix/register.spec.ts
+```
+
+## Fail-not-skip
+
+Every test in this harness is a hard assertion.  A missing dependency,
+a failed FreeSWITCH boot, or a dropped WebSocket will **fail** the test,
+never skip it.  Skipped tests hide real regressions.
+
+## Artifact locations
+
+| Artifact | Path |
+|----------|------|
+| FreeSWITCH logs + recorded audio WAVs | `test/freeswitch-matrix/artifacts/<container-name>/` (`fs.log` + `*.wav`; written by `stopFreeSwitch` before container removal) |
+| FreeSWITCH config (committed) | `test/freeswitch-matrix/fs-conf/` |
+| FreeSWITCH config (overlay) | `test/freeswitch-matrix/fs-conf.overlay/` |
+| Bundled page entry | `test/freeswitch-matrix/dist/` (built by `build-matrix.mjs`) |
+| Playwright traces | `test-results/` (retained on failure via `trace: retain-on-failure`; reporter is `[['list']]`, no HTML report) |
+
+## FS-image bump procedure
+
+1. Edit `FS_IMAGE` in `test/freeswitch-matrix/materialize.mjs` to the new
+   digest-pinned image reference.
+2. Run `node test/freeswitch-matrix/materialize.mjs` (requires docker).
+   This pulls the new image, extracts the vanilla config, prunes it,
+   merges the overlay, and writes the committed `fs-conf/` tree.
+3. Review the diff in `fs-conf/` and `fs-conf.overlay/`.
+4. Run the integrity gate to confirm the tree is clean:
+
+   ```bash
+   npm run test:matrix:integrity
+   ```
+
+5. Run the infra and page tests with docker to validate:
+
+   ```bash
+   npm run test:matrix:infra
+   npm run test:matrix:page
+   ```
