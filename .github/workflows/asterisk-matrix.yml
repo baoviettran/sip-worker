@@ -1,0 +1,162 @@
+# Asterisk call-matrix CI gate — the v0.9 release gate.
+#
+# Modelled on .github/workflows/freeswitch-matrix.yml, which already settles the
+# decisions this file must not re-litigate: no step may report success without
+# having done its work, artifacts are uploaded on always(), secrets are redacted
+# before upload, every job is bounded by a timeout, Firefox gets a PulseAudio
+# null sink, and the engines installed match the projects playwright.config.ts
+# actually registers.
+#
+# The PBX under test is pinned by DIGEST, never a floating tag. The reference
+# the harness boots lives in test/asterisk-matrix/conf.ts (AST_IMAGE) and is
+# asserted against the image the container itself reports by
+# test/asterisk-matrix/astboot.infra.test.ts; it is repeated here so the digest a
+# given CI run used is greppable at the CI layer:
+#
+# andrius/asterisk@sha256:5c96c8f7a17688c79452a4a2a56864b4a7570f4c4276fc353db51e38111bb9c3
+#
+# Loopback-only (127.0.0.1) and --network host are the harness's business, not
+# this file's. No GitHub secret is referenced: the credentials the matrix uses
+# are committed constants in the test tree ('matrix-pass-2026' as the SIP
+# endpoint password and the AMI secret in the Asterisk tree), and the harness
+# redacts them on the way into artifacts/ — see astctl.stopAsterisk and
+# ami.AmiClient.flushTranscript.
+
+name: asterisk-matrix
+
+on:
+  schedule:
+    # Nightly call-matrix release gate. Off the :00/:30 marks, and offset from
+    # freeswitch-matrix.yml's 47 5 * * * so the two gates do not contend for the
+    # same runner minutes.
+    - cron: '23 6 * * *'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  asterisk-matrix-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Mirrors the FreeSWITCH PR job. This job is Chromium-only and Chromium
+      # decodes received media with or without a sink, so the null sink is not
+      # load-bearing here — it is kept because the v0.9 spec's CI structure
+      # section provisions it in both jobs, and because a broken PulseAudio
+      # install should surface in the PR gate rather than first appear in the
+      # nightly. The final line is the fail-loud check: `set -euo pipefail`
+      # makes a missing sink fail the step.
+      - name: Provision a virtual audio sink
+        run: |
+          set -euo pipefail
+          if ! command -v pulseaudio >/dev/null 2>&1; then
+            sudo apt-get update >/dev/null && sudo apt-get install -y pulseaudio >/dev/null
+          fi
+          pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+          pactl load-module module-null-sink sink_name=sipw-null >/dev/null 2>&1 || true
+          pactl set-default-sink sipw-null >/dev/null 2>&1 || true
+          pactl info >/dev/null 2>&1 && pactl list short sinks | grep -q sipw-null
+      # Chromium only: playwright.config.ts registers the firefox project solely
+      # outside 'pr' mode, so installing Firefox here would burn minutes on an
+      # engine no project will use.
+      - name: Install browser engines
+        run: npx playwright install --with-deps chromium
+      - name: Unit tests (no docker, no browser, no audio device)
+        run: npm run test:astmatrix:unit
+      # Created by the integrity task that follows this one in the plan. It is
+      # referenced now, deliberately: running the workflow against a tree where
+      # the gate is absent must fail, not quietly drop the check.
+      - name: Integrity + boundary gates
+        run: npm run test:astmatrix:integrity
+      - name: Docker infra gate (Asterisk boot, WSS transport, AMI)
+        run: npm run test:astmatrix:infra
+      - name: Matrix PR slice (Chromium, every step but the audio proof)
+        env:
+          MATRIX_MODE: 'pr'
+        run: npm run test:astmatrix:page
+      # astctl.ts collects under process.cwd() — the repo root for the npm
+      # script — so this tree's artifacts land in the workspace-root artifacts/
+      # directory, unlike the FreeSWITCH harness, whose runDir sits inside its
+      # own test tree. .gitignore anchors the same path the same way. All four artifacts
+      # the spec names land here: asterisk.log, the ami-*.log transcript, the
+      # recorded WAVs, plus test-results/ for the Playwright traces. There is no
+      # playwright-report/ entry because neither matrix config registers the
+      # HTML reporter (reporter: [['list']]) — listing a path no step produces
+      # would be dead config.
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ast-matrix-pr
+          path: |
+            artifacts/
+            test-results/
+          if-no-files-found: error
+
+  asterisk-matrix-nightly:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Firefox's prerequisite: the ubuntu runner has no audio device, so
+      # headless Firefox's cubeb finds no output sink and decodes received
+      # WebRTC audio to silence (docs/ci-browser-gate-notes.md §1). The ALSA
+      # null-PCM fallback exists because pulseaudio does not always come up on a
+      # hosted runner; either path is verified before the step can pass.
+      - name: Provision PulseAudio null sink (Firefox receive path)
+        run: |
+          set -euo pipefail
+          if ! command -v pulseaudio >/dev/null 2>&1; then
+            sudo apt-get update >/dev/null && sudo apt-get install -y pulseaudio >/dev/null
+          fi
+          pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+          pactl load-module module-null-sink sink_name=sipw-null >/dev/null 2>&1 || true
+          pactl set-default-sink sipw-null >/dev/null 2>&1 || true
+          if pactl info >/dev/null 2>&1 && pactl list short sinks | grep -q sipw-null; then
+            echo "pulseaudio null sink ready"
+          else
+            pulseaudio --kill >/dev/null 2>&1 || true
+            echo 'pcm.!default { type null }' | sudo tee /etc/asound.conf >/dev/null
+            grep -q 'type null' /etc/asound.conf
+          fi
+      # Both engines, because this job runs every project playwright.config.ts
+      # registers. The Firefox ICE/autoplay prefs this leg needs are set by the
+      # config itself (contextOptions.firefoxUserPrefs in
+      # test/asterisk-matrix/playwright.config.ts) — there is no runner-level
+      # equivalent to set here, and writing a profile by hand would be a no-op,
+      # since Playwright builds its own profile and reads prefs from the config.
+      - name: Install browser engines
+        run: npx playwright install --with-deps chromium firefox
+      # Chromium + Firefox + the audio proof. Firefox against either PBX is
+      # known-red on a dev box (controls.spec.ts and audio.spec.ts, both trees,
+      # measured during the step-authoring task) while the no-PBX browser spec
+      # passes; that redness is expected local behaviour and may not reproduce
+      # here. It is recorded, never excluded: the job is not marked
+      # non-blocking, no step swallows a failure, and Firefox stays in the
+      # matrix. A red leg is information — the traces and the container log
+      # are in artifacts/.
+      - name: Full matrix nightly (Chromium + Firefox + audio proof)
+        env:
+          MATRIX_MODE: 'nightly'
+        run: npm run test:astmatrix:page
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ast-matrix-nightly
+          path: |
+            artifacts/
+            test-results/
+          if-no-files-found: error
