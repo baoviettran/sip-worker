@@ -36,13 +36,16 @@
 //   INVITE is answered 200 and the dialog reaches `established` (so pjsip's
 //   `ice_support=yes` accepts the offer, unlike sofia's ACL which answered
 //   488), but NO audio ever flows — the step then times out waiting for the
-//   remote stream to appear, because ICE never finds a working candidate pair
-//   for the mDNS-obfuscated `.local` host candidates Chromium puts in the
-//   offer and pjsip has no mDNS resolver. The shared STUN responder supplies
-//   an srflx 127.0.0.1 candidate pjsip can actually use, so it is needed here
-//   for the same underlying reason as on FreeSWITCH — a candidate pjsip can
-//   reach — even though the switch's symptom differs (488 there, silent media
-//   here).
+//   remote stream to appear. Passing the responder's port is what makes it
+//   work: measured symptom, measured remedy, stated plainly. The CAUSE is a
+//   hypothesis, not a measurement — it is consistent with pjsip not resolving
+//   the mDNS-obfuscated `.local` host candidates Chromium puts in the offer,
+//   the candidate class the shared responder exists to route around
+//   (`test/matrix-shared/stun.ts` records the half that WAS measured: srflx
+//   candidates are not obfuscated, and FreeSWITCH's wan.auto answered 488 with
+//   "no suitable candidates found" without it), and an srflx 127.0.0.1
+//   candidate is one pjsip can reach. That ICE fails over the resolver rather
+//   than over some other candidate difference is NOT verified here.
 import { test, expect } from '@playwright/test';
 import { readFileSync, unlinkSync } from 'node:fs';
 import { bootMatrix, disposeMatrix, runStep } from './helpers';
