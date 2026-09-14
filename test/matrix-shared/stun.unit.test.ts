@@ -22,6 +22,11 @@ describe('startStunResponder', () => {
       });
       expect(res[0]).toBe(0x01);
       expect(res[1]).toBe(0x01); // Binding Response
+      // The message-length header must cover the one attribute that follows it.
+      // Without this line the test still passes if the responder writes 0x0008,
+      // and Chromium ignores an attribute the header does not account for — so
+      // only a browser leg would notice.
+      expect(res.readUInt16BE(2)).toBe(0x000c); // length: one 12-byte attribute
       // Transaction id echoed verbatim.
       expect(res.subarray(4, 20)).toEqual(req.subarray(4, 20));
       // XOR-MAPPED-ADDRESS: 0x0020, length 8, reserved, family 1, x-port, x-addr.
@@ -42,12 +47,23 @@ describe('startStunResponder', () => {
     const stun = await startStunResponder();
     const { port } = stun;
     await stun.close();
-    const probe = await startStunResponder();
+    // Re-binding the same port IS the assertion: node's dgram sockets do not set
+    // SO_REUSEADDR, so a close() that left the socket held would leave 127.0.0.1:port
+    // occupied and this bind would throw EADDRINUSE. An earlier draft of this test
+    // started a second responder and asserted `typeof probe.port === 'number'`, which
+    // passes even when close() is a no-op — port 0 just gets a different port.
+    const probe = createSocket('udp4');
     try {
-      expect(typeof probe.port).toBe('number');
+      await new Promise<void>((resolve, reject) => {
+        probe.once('error', reject);
+        probe.bind(port, '127.0.0.1', () => {
+          probe.removeListener('error', reject);
+          resolve();
+        });
+      });
+      expect(probe.address().port).toBe(port);
     } finally {
-      await probe.close();
+      probe.close();
     }
-    expect(port).toBeGreaterThan(0);
   });
 });
