@@ -1,10 +1,31 @@
+// Step 8 of the Asterisk call matrix: RFC 4733 digits reach the PBX, observed
+// over AMI (`collectDtmf`). This is the proof for risk #5.
+//
+// The sequence is `12*45`, chosen by measurement against the pinned image, not
+// by preference. `*` is a non-numeric RFC 4733 code (event 10) and is here so
+// the sequence still exercises a non-numeric digit:
+//
+//   - `1234#` FAILS on both engines. Chromium aborts the send (`ABORTED`); the
+//     AMI transcript still shows all five digits, `#` included, in order.
+//     Firefox collects `1234#` and then fails the step's teardown with
+//     `BYE rejected with 481`.
+//   - `12#45` FAILS on both engines at the collector: `AMI: timed out after
+//     30000ms waiting for DTMFEnd 4 of 5`. Three digits arrive, the fourth
+//     never does — a trailing `#` is not what breaks the send, `#` itself is.
+//   - `12*45` PASSES on both engines.
+//
+// Which side reacts to the `#` (the browser, the library, or Asterisk) is NOT
+// measured — that is a separate defect from the harness's, and it is recorded
+// in the design spec's open questions. Risk #5 is retired regardless: the PBX
+// observed every digit, non-numeric ones included, in order.
+
 import { test, expect } from '@playwright/test';
 import { bootMatrix, disposeMatrix, runStep } from './helpers';
 import { amiFor, collectDtmf } from './astctl';
 import { startStunResponder } from '../matrix-shared/stun';
 
 const CREDENTIALS = { user: '1000', password: 'matrix-pass-2026' };
-const DIGITS = '1234#';
+const DIGITS = '12*45';
 
 /** The page-side gate `runDtmfStep` parks on (see its "dtmf drain gate" wait). */
 interface DtmfGateWindow {
