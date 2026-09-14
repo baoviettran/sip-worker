@@ -8,6 +8,13 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+// The step-declaration rules PARSE the spec files instead of scanning their
+// text — see "Parse, do not scan" below for why the scanner was deleted rather
+// than repaired. `typescript` is a DECLARED devDependency (^5.5.0, resolving
+// 5.9.3) that resolves from this directory, and `npm ci` installs
+// devDependencies in both CI jobs. `acorn` is deliberately NOT used: it is only
+// transitive, so a lockfile change could remove it.
+import ts from 'typescript';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -70,91 +77,12 @@ test('manifest maps to exactly six unique spec files', () => {
 // browser nor the webServer — no `globalSetup`, no container — and the whole
 // call costs ~1 s of the gate's run time.
 //
-// The ONE text rule that survives is the assertion FLOOR further down. It is
-// scoped to the file's own test bodies, because `--list` proves a step still
-// exists and is still named, not that its body still asserts anything.
-//
-// BLANK comment and template-literal REGIONS before segmenting, keeping the
-// line structure so the `^\s*` anchor still works: the floor is a raw text
-// match, and a `test(` at the start of a line inside a comment or a template
-// literal is not a declaration. This is the `withoutCommentLines` idiom from
-// test/matrix-shared/no-src-imports.test.mjs, extended to template literals:
-// that helper filters comment-only LINES, which cannot see a multi-line
-// template. Line comments need no special handling for this rule (a line
-// starting `// test(` does not match `^\s*test\(`), but block comments and
-// template literals can put a bare `test(` at column 0.
-//
-// KNOWN LIMIT of this scanner, measured: it is not `${}`-aware and knows nothing
-// about regex literals, so a backtick inside a regex literal opens a "template"
-// that swallows the rest of the file — measured, it leaves ZERO declarations in
-// five of the six spec files. The floor therefore does NOT require a minimum
-// number of declarations, and falls back to the raw text when it finds none.
-// That is what keeps the backtick case GREEN instead of turning a correct tree
-// RED. Getting this right properly means asking the runner, which is exactly
-// what the manifest rule above does.
-function stripCommentsAndTemplates(source) {
-  const keepNewlines = (ch) => (ch === '\n' ? '\n' : ' ');
-  let out = '';
-  let i = 0;
-  while (i < source.length) {
-    const two = source.slice(i, i + 2);
-    const c = source[i];
-    if (two === '//') {
-      while (i < source.length && source[i] !== '\n') {
-        out += ' ';
-        i += 1;
-      }
-      continue;
-    }
-    if (two === '/*') {
-      while (i < source.length && source.slice(i, i + 2) !== '*/') {
-        out += keepNewlines(source[i]);
-        i += 1;
-      }
-      out += '  ';
-      i += 2;
-      continue;
-    }
-    if (c === '`') {
-      out += ' ';
-      i += 1;
-      while (i < source.length) {
-        if (source[i] === '\\') {
-          out += '  ';
-          i += 2;
-          continue;
-        }
-        if (source[i] === '`') break;
-        out += keepNewlines(source[i]);
-        i += 1;
-      }
-      out += ' ';
-      i += 1;
-      continue;
-    }
-    // A quoted string can only ever contain a `test(` mid-line, never at a line
-    // start, so it is copied through with its contents intact — which also keeps
-    // this scanner from having to guess about apostrophes in prose.
-    if (c === "'" || c === '"') {
-      out += c;
-      i += 1;
-      while (i < source.length) {
-        if (source[i] === '\\') {
-          out += source.slice(i, i + 2);
-          i += 2;
-          continue;
-        }
-        out += source[i];
-        i += 1;
-        if (source[i - 1] === c) break;
-      }
-      continue;
-    }
-    out += c;
-    i += 1;
-  }
-  return out;
-}
+// The ONE rule that looks at the spec files is the per-step assertion FLOOR
+// further down, because `--list` proves a step still exists and is still named,
+// not that its body still asserts anything. It no longer scans their TEXT —
+// it parses them. See "Parse, do not scan" below: the hand-rolled scanner this
+// file used to carry (`stripCommentsAndTemplates`) is DELETED, together with the
+// two rules that read it, and must not be reintroduced.
 
 // The runner's OWN collection, in the shape the rule below compares against
 // MATRIX_MANIFEST. Two things are pinned rather than inherited, both of them
@@ -225,11 +153,15 @@ function collectMatrixTests() {
   return collected;
 }
 
+// ONE normalizer for a `{file, title}` pair, shared by the manifest rule here
+// and the parse-vs-runner cross-check below: the two must compare the same way,
+// and a second normalizer is a second thing to keep in step.
+const testKey = (t) => `${t.file} :: ${t.title}`;
+
 test('the runner collects exactly the tests MATRIX_MANIFEST names', () => {
   const collected = collectMatrixTests();
-  const key = (t) => `${t.file} :: ${t.title}`;
-  const expected = [...new Set(Object.values(MATRIX_MANIFEST).map(key))].sort();
-  const actual = [...new Set(collected.map(key))].sort();
+  const expected = [...new Set(Object.values(MATRIX_MANIFEST).map(testKey))].sort();
+  const actual = [...new Set(collected.map(testKey))].sort();
   assert.deepStrictEqual(
     actual,
     expected,
@@ -242,35 +174,180 @@ test('the runner collects exactly the tests MATRIX_MANIFEST names', () => {
   // `status` is useless here — list mode marks every test `'skipped'` because
   // nothing runs.
   assert.deepStrictEqual(
-    collected.filter((t) => t.expectedStatus !== 'passed').map((t) => `${key(t)} (${t.expectedStatus})`),
+    collected.filter((t) => t.expectedStatus !== 'passed').map((t) => `${testKey(t)} (${t.expectedStatus})`),
     [],
     'a matrix test is skipped or marked fixme — a skipped step is not a passing step',
   );
 
-  // `test.only` is the ONE focused-test form the runner cannot see, and it stays
-  // a text match because of that measurement, not in spite of it: with
-  // `test.only` in dtmf.spec.ts, `--list` still reports all nine specs with
+  // `test.only` is the ONE focused-test form the runner cannot see, and THAT
+  // measurement is why a source-level rule exists at all: with `test.only` in
+  // dtmf.spec.ts, `--list` still reports all nine specs with
   // `expectedStatus: 'passed'` (list mode does not apply the focus filter), and
   // `forbidOnly: true` under CI=1 does not change that either — measured, exit 0,
-  // full JSON. So there is no runner signal to assert against, and WITHOUT this
-  // rule a focused test would shrink the run to one step with every gate green —
-  // verbatim the harm the whole manifest rule exists to prevent. Narrowed to the
-  // one form the runner is blind to; `skip`/`fixme` are NOT re-checked here.
+  // full JSON. `forbidOnly` is not set in playwright.config.ts in any case
+  // (measured: the config does not mention it), so there is no runner-level
+  // backstop either. Without a source-level rule a focused test would shrink the
+  // run to one step with every gate green — verbatim the harm this whole
+  // manifest rule exists to prevent. The rule itself now lives in the AST walk
+  // below, which is narrowed the same way: it rejects the annotated declarations
+  // (`test.only` among them) and does NOT re-check what `--list` already covers
+  // as a set.
   //
-  // Its residual is the scanner's, and it points the safe way: a desync blanks
-  // text, so it can only HIDE a `test.only`, never invent one. It cannot turn a
-  // correct tree red.
-  for (const file of new Set(Object.values(MATRIX_MANIFEST).map((e) => e.file))) {
-    const source = stripCommentsAndTemplates(readFileSync(join(__dirname, file), 'utf8'));
-    assert.deepStrictEqual(
-      source.match(/^[ \t]*test\.only\(/gm) ?? [],
-      [],
-      `${file} declares a focused test — \`test.only\` does not run the other nine steps`,
-    );
+  // Corrected here: the text rule this replaced claimed "a desync blanks text,
+  // so it can only HIDE a `test.only`, never invent one. It cannot turn a
+  // correct tree red." The FIRST sentence is true and is the reason a
+  // source-level rule is still needed. The SECOND was falsified by measurement —
+  // the same one-line desync turned a correct tree red and blamed a step nobody
+  // touched — and it is gone with the scanner.
+
+
+});
+
+// ── Parse, do not scan ─────────────────────────────────────────────────
+// Rounds 2 and 3 both answered "does this test body still assert anything?" by
+// scanning SOURCE TEXT with a hand-rolled scanner, and BOTH were unsound in both
+// directions — round 3's job was to replace round 2's matcher with a better
+// scanner, and the better scanner failed the same way. **R114: after two failed
+// repairs of a mechanism, replace the mechanism.** The declarations below come
+// from a real parse of the file (`ts.createSourceFile` + a walk over its
+// CallExpressions), and the desync-prone scanner (`stripCommentsAndTemplates`)
+// is DELETED rather than patched a third time. A dead scanner is exactly what a
+// later "fix" re-adopts — same argument as F1's dead `wireInvites` field.
+//
+// What the scanner got wrong, measured, and why a tree cannot repeat it: it
+// treated every backtick as OPENING a template literal, so a backtick inside a
+// REGEX literal (`const TICK = /`/;`) desynced it. Its raw-text fallback fired
+// only when the desynced scan found ZERO declarations, i.e. only when the
+// desync preceded the FIRST `test(` — and the round-3 placement sweep measured
+// `fallback=no` in ALL EIGHT placements. Both directions were live:
+//
+//   * the desync at the END of test 1's body plus both `expect(` deleted from
+//     test 3 → gate at **12 pass / 0 fail, exit 0** while `--list` still
+//     reported nine steps: step 3 validated nothing and every gate was green.
+//   * the SAME one line at the top of test 2's body, on an otherwise CORRECT
+//     tree → `not ok 4`, blaming a step nobody touched.
+//
+// A regex literal is a node in the tree, and `test(` inside a template literal
+// is not a CallExpression at all, so neither can reach this walk. Measured on
+// the tree this replaces: the compound attack gives `register [4, 2, 0]`
+// (caught) and the correct tree with the same desync still gives `register
+// [4, 2, 2]` (unchanged, no false RED).
+//
+// It also closes the residual round 3 disclosed as OPEN: `const harmless =
+// 'expect(';` used to satisfy the floor because it was a SUBSTRING match. A
+// string literal is not a CallExpression, so it no longer counts.
+const SPEC_FILES = [...new Set(Object.values(MATRIX_MANIFEST).map((e) => e.file))];
+// `test` alone is a step; `test.<word>` is an ANNOTATED declaration (the rule
+// below rejects every annotation except `describe`, which is a container).
+const ANNOTATED_TEST = /^test\.([A-Za-z]+)$/;
+// The prefix `stepTitle` stamps on a title it could not read as a string
+// literal. Shared with the cross-check below, which switches to its per-file
+// count fallback when it finds one.
+const NON_LITERAL_TITLE = '<non-literal title:';
+
+function stepTitle(arg, sf) {
+  if (arg && (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg))) return arg.text;
+  // Not a literal — a template with `${}` in it, or a computed name. Say so in
+  // the title rather than dropping the step: the cross-check below falls back to
+  // per-file counts when it sees this marker, instead of either inventing a
+  // title that cannot match the runner's or failing a correct tree.
+  return `${NON_LITERAL_TITLE} ${arg ? arg.getText(sf) : 'missing'}>`;
+}
+
+// The describe chain enclosing `node`, outermost first. `--list --reporter=json`
+// reports a test's title as that chain joined by ` > `, which is what the
+// cross-check below compares against. `setParentNodes: true` is why `.parent`
+// is available. `test.describe` is a CONTAINER, not a step, and is excluded —
+// measured: the walk visits it like any other call expression.
+function describeChain(node, sf) {
+  const chain = [];
+  for (let p = node.parent; p; p = p.parent) {
+    if (ts.isCallExpression(p) && p.expression.getText(sf) === 'test.describe') {
+      chain.unshift(stepTitle(p.arguments[0], sf));
+    }
+  }
+  return chain;
+}
+
+// ONE walk per file yields the ordered STEP declarations. `node.expression
+// .getText(sf)` reads the callee verbatim, so `test`, `test.only`, `test.skip`,
+// `test.fixme` and `test.fail` are each read exactly as written.
+function declaredSteps(file) {
+  const sf = ts.createSourceFile(
+    file,
+    readFileSync(join(__dirname, file), 'utf8'),
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ true,
+    ts.ScriptKind.TS,
+  );
+  const steps = [];
+  const visit = (node) => {
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression.getText(sf);
+      const word = ANNOTATED_TEST.exec(callee)?.[1];
+      if (callee === 'test' || (word && word !== 'describe')) {
+        // The body is the LAST argument, and only a function argument is a
+        // body: `expect` CallExpressions inside it are counted by walking it,
+        // which includes assertions in nested helpers the body calls.
+        const body = node.arguments[node.arguments.length - 1];
+        let expects = 0;
+        if (body && (ts.isArrowFunction(body) || ts.isFunctionExpression(body))) {
+          const count = (n) => {
+            if (ts.isCallExpression(n) && n.expression.getText(sf) === 'expect') expects += 1;
+            ts.forEachChild(n, count);
+          };
+          count(body.body);
+        }
+        steps.push({
+          file,
+          callee,
+          expects,
+          title: [...describeChain(node, sf), stepTitle(node.arguments[0], sf)].join(' > '),
+        });
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return steps;
+}
+
+// Why each annotated form is rejected, in the failure message itself. Named
+// explicitly so a later reader does not "simplify" one of them away as
+// redundant with the `--list` rule above — each is a form `--list` cannot see:
+//
+//   * `test.only` — `--list` does not apply the focus filter (measured: all nine
+//     still report `expectedStatus: 'passed'`), and `forbidOnly` is NOT set in
+//     playwright.config.ts, so this rule is the only defence.
+//   * `test.skip` / `test.fixme` — collected, and caught by the `--list` rule's
+//     `expectedStatus !== 'passed'` half as well. Named here so the failure
+//     points at the declaration rather than at the runner's report.
+//   * `test.fail` — **NOT redundant with the `--list` rule**: measured, `--list`
+//     reports `expectedStatus: 'passed'` for it (unlike skip/fixme, which report
+//     `'skipped'`), so Rule 3 above is blind to it; and a `test.fail` test whose
+//     assertion IS broken reports `1 passed`, exit 0 (measured with real
+//     Chromium by the round-3 re-review). A step that cannot fail is not a step.
+const ANNOTATION_REASON = {
+  'test.only': 'a FOCUSED step — the runner then executes one step and reports it green',
+  'test.skip': 'a SKIPPED step — a skipped step is not a passing step',
+  'test.fixme': 'a FIXME step — a fixme step is not a passing step',
+  'test.fail': 'a step declared to FAIL — `--list` reports it as `passed`, so it validates nothing',
+};
+
+test('every matrix step is declared with a plain test() call', () => {
+  for (const file of SPEC_FILES) {
+    for (const step of declaredSteps(file)) {
+      assert.strictEqual(
+        step.callee,
+        'test',
+        `${file}: "${step.title}" is declared with \`${step.callee}(\` — ` +
+          `${ANNOTATION_REASON[step.callee] ?? 'not a plain test declaration'}`,
+      );
+    }
   }
 });
 
-// ── The floor: every test body still asserts something ─────────────────
+// ── The floor: every step body still asserts something ─────────────────
 // `--list` proves a step exists and is still named. It cannot prove the body
 // still asserts anything. Measured by the round-2 re-review: deleting BOTH
 // `expect(` lines from `register.spec.ts`'s `refresh` test (step 2) — a file
@@ -279,53 +356,99 @@ test('the runner collects exactly the tests MATRIX_MANIFEST names', () => {
 // (test/matrix-shared/helpers.ts:133), so nothing else fails either: step 2
 // would validate nothing and every gate would report full green.
 //
-// So the floor is PER TEST, not per file. Count `expect(` per SEGMENT, where a
-// segment runs from one `test(` declaration to the next, and require at least
-// one in every segment. `expects >= tests` is NOT the rule — that passes when
-// one of three tests is gutted, which is the defect itself. Measured segments at
-// this revision: register [3,2,2], audio [13], call-inbound [8,9], controls
-// [26], dtmf [2], recovery [12].
+// So the floor is PER STEP, not per file, and it is counted off the parse:
+// `expects >= tests` is NOT the rule — that passes when one of three tests is
+// gutted, which is the defect itself. Measured off the tree at this revision:
+// register [3,2,2], audio [13], call-inbound [8,9], controls [26], dtmf [2],
+// recovery [12].
 //
-// KNOWN RESIDUAL, deliberate, and it is incompleteness rather than vacuity: a
-// body reduced to ONE trivial assertion still passes, and a deliberate dodge
-// still wins outright — a single `const harmless = 'expect(';` satisfies the
-// floor, because no source-text rule can prove that an assertion actually
-// EXECUTES. Only running the step can, which is what the page slice is for. Do
-// NOT "fix" this with an exact `expect(` count: that turns every legitimate test
-// edit into a red gate, which is the failure mode this whole file exists to
-// prevent.
-const TEST_DECL = /^[ \t]*test\(/gm;
-
-// One segment per test declaration, taken from the blanked source so a `test(`
-// inside a comment or a template is not mistaken for a declaration. Falls back
-// to the raw text when the scanner found no declaration at all — see its KNOWN
-// LIMIT: a desync blanks whole files, and a silent floor is honest where a
-// fabricated RED is not.
-function assertionSegments(source) {
-  const stripped = stripCommentsAndTemplates(source);
-  let text = stripped;
-  let decls = [...stripped.matchAll(TEST_DECL)];
-  if (decls.length === 0) {
-    text = source;
-    decls = [...text.matchAll(TEST_DECL)];
-  }
-  return decls.map((decl, i) =>
-    text.slice(decl.index, i + 1 < decls.length ? decls[i + 1].index : text.length),
-  );
-}
-
+// KNOWN RESIDUAL, deliberate, and it is INCOMPLETENESS rather than vacuity.
+// Closed by the parse: `const harmless = 'expect(';` no longer satisfies the
+// floor (a string literal is not a CallExpression — measured). What remains open
+// is a body whose assertion is PRESENT but cannot EXECUTE: `if (false) { expect
+// (…) }`, or an `expect` inside a helper the body never calls. No static rule can
+// prove an assertion executes — only running the step can, which is what the
+// page slice is for. Do NOT "fix" this with an exact `expect(` count: that turns
+// every legitimate test edit into a red gate, which is the failure mode this
+// whole file exists to prevent.
 test('every declared test body still contains an assertion', () => {
-  for (const file of new Set(Object.values(MATRIX_MANIFEST).map((e) => e.file))) {
-    const segments = assertionSegments(readFileSync(join(__dirname, file), 'utf8'));
-    segments.forEach((body, i) => {
-      const assertions = body.match(/expect\(/g) ?? [];
+  for (const file of SPEC_FILES) {
+    for (const step of declaredSteps(file)) {
       assert.ok(
-        assertions.length >= 1,
-        `${file}: test ${i + 1} of ${segments.length} contains no expect( at all — that ` +
+        step.expects >= 1,
+        `${file}: "${step.title}" contains no expect( call at all — that ` +
           `step's body was emptied and it now validates nothing`,
       );
-    });
+    }
   }
+});
+
+// ── The cross-check: the parse and the runner must agree, BOTH directions ──
+// This is the structural half of the round-4 fix, and it is what closes C1's
+// SILENT mode. Round 3's scanner left a PARTIAL declaration list — the desync
+// swallowed everything after its trigger — and no rule compared that list
+// against the runner's, so a gutted step rode along inside a shortened list. A
+// partial list cannot equal the runner's nine, so the defect now has to be
+// visible. A one-directional check would not do: "every declared step is
+// collected" is silent about a step the parse never saw, which is exactly the
+// failure being closed.
+//
+// The set is compared at the `{file, title}` level, reusing the same `testKey`
+// normalizer as the manifest rule above — measured, the parse's title path and
+// `--list --reporter=json`'s agree EXACTLY on the committed tree, so no second
+// normalizer is needed. If they ever stop reconciling, the fix is to reconcile
+// them, not to compare a weaker count.
+//
+// ONE case cannot reconcile at the title level and is handled explicitly rather
+// than assumed away: a step whose title is a TEMPLATE with `${}` in it. The
+// runner evaluates it to a real string that no static walk can predict, so
+// `stepTitle` marks it `<non-literal title: ...>` and no comparison against a
+// collected title can ever succeed. The plan prescribes the fallback and this is
+// it — per-file declared vs collected counts, BOTH directions, which still
+// catches a file's declarations going missing or a step appearing from nowhere,
+// just not which step. Measured: every one of the nine committed steps has a
+// literal title, so the strict branch is the one that runs today; the fallback
+// exists so the first dynamic title is a narrower check rather than a false RED.
+//
+// **Do not re-derive round 3's argument against a count floor and delete this
+// check.** Round 3 refused to assert a minimum number of declarations because a
+// DESYNCED scanner left ZERO declarations in some placements, so any count was
+// a fabricated RED. That premise held only for the pre-declaration placement and
+// only because the scanner was unreliable: with a real parse the declared set is
+// assertable, and this equality is the assertion.
+test("the parsed steps and the runner's collected tests agree, in both directions", () => {
+  const declared = SPEC_FILES.flatMap((file) => declaredSteps(file));
+  const collected = collectMatrixTests();
+  if (!declared.some((s) => s.title.includes(NON_LITERAL_TITLE))) {
+    assert.deepStrictEqual(
+      [...new Set(declared.map(testKey))].sort(),
+      [...new Set(collected.map(testKey))].sort(),
+      'the parse and the runner disagree about which steps exist — a step the ' +
+        'runner collects is missing from the parse (a declaration form the walk ' +
+        'does not read), or the parse declares a step the runner never collects',
+    );
+    return;
+  }
+  // A dynamic title somewhere: compare per-file counts instead of titles. Both
+  // directions, and the runner's own set is checked for the marker first — a
+  // collected title carrying it would mean `testKey` was fed a parse-only
+  // string, i.e. this check comparing the parse against itself.
+  for (const key of collected.map(testKey)) {
+    assert.ok(!key.includes(NON_LITERAL_TITLE), `a collected test title carries the parse-only marker: ${key}`);
+  }
+  const countBy = (rows) => {
+    const m = new Map();
+    for (const r of rows) m.set(r.file, (m.get(r.file) ?? 0) + 1);
+    return [...m].sort(([a], [b]) => a.localeCompare(b));
+  };
+  assert.deepStrictEqual(
+    countBy(declared),
+    countBy(collected),
+    'a step title is dynamic, so titles cannot be compared — and the per-file ' +
+      'declared/collected counts disagree: a file declares a different number of ' +
+      'steps than the runner collects, so the parse and the runner are looking at ' +
+      'different sets',
+  );
 });
 
 // ── The unit gates cannot silently collect nothing ─────────────────────
