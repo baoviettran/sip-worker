@@ -13,6 +13,7 @@
 // browser package version, git commit, and SHA-256 of the browser tarball —
 // the build-pilot.mjs pattern.
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { cp, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -35,6 +36,15 @@ const distDir = join(matrixDir, 'dist');
 const log = (line) => console.log(`[build-matrix] ${line}`);
 
 export async function buildMatrix() {
+  // The tree is the cwd, so a wrong cwd would build a wrong/empty bundle and
+  // still report success — the only symptom being a 503 at page load, far from
+  // the cause. page.ts is the entry every matrix tree has.
+  if (!existsSync(join(matrixDir, 'page.ts'))) {
+    throw new Error(
+      `not a matrix tree: no page.ts in ${matrixDir}. Run this with cwd set to the tree being built (e.g. test/freeswitch-matrix).`,
+    );
+  }
+
   const fixture = await makeTempDir('sip-worker-matrix-');
   const entryRoot = join(fixture, 'entry');
   const tarballDir = join(fixture, 'tarballs');

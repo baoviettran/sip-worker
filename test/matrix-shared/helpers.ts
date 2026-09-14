@@ -58,8 +58,10 @@ export function createMatrixHelpers<H extends MatrixHandle>(opts: MatrixHarnessO
     const file = join(tmpdir(), `matrix-handle-${process.pid}-${randomUUID()}.json`);
     writeFileSync(file, JSON.stringify({ handle }));
     process.env[opts.handleEnvVar] = file;
+    // The WHOLE handle, not just wssPort: every port is what CI reaches for
+    // when a leg fails, and each tree adds its own fields.
     console.log(
-      `[matrix] ${opts.label} up: wss=${handle.wssPort} (handle: ${file})`,
+      `[matrix] ${opts.label} up: ${JSON.stringify(handle)} (handle: ${file})`,
     );
     return async () => {
       try {
