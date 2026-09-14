@@ -45,9 +45,27 @@ afterAll(async () => {
 });
 
 describe('Asterisk boot gate', () => {
-  it('runs the pinned image by digest', () => {
-    const image = execFileSync('docker', ['inspect', '-f', '{{.Config.Image}}', h.name], { encoding: 'utf8' }).trim();
-    expect(image).toBe(AST_IMAGE);
+  it('runs the image the pinned digest resolves to', () => {
+    // Two different facts about the container, both of which must hold.
+    //
+    //  - The RESOLVED identity. Comparing `{{.Config.Image}}` (the reference
+    //    astctl handed to `docker run`) with AST_IMAGE on its own never asked
+    //    what the engine actually ran; it reports the run site's own input back.
+    //    The container's image id against the id AST_IMAGE resolves to in the
+    //    local store fails for a container running any other image.
+    const runningId = execFileSync('docker', ['inspect', '-f', '{{.Image}}', h.name], { encoding: 'utf8' }).trim();
+    const pinnedId = execFileSync('docker', ['image', 'inspect', '-f', '{{.Id}}', AST_IMAGE], { encoding: 'utf8' }).trim();
+    // An empty or malformed read must not let the comparison below pass by
+    // accident: two empty strings are equal.
+    expect(runningId).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(runningId, `container runs ${runningId}; the pinned digest resolves to ${pinnedId}`).toBe(pinnedId);
+
+    //  - The REFERENCE FORM. The resolved-id comparison alone cannot catch a run
+    //    site edited back to a floating tag: this image's floating tag points at
+    //    the same id the digest does, so the ids would still match. This half
+    //    fails the moment the reference handed to `docker run` is not the pin.
+    const reference = execFileSync('docker', ['inspect', '-f', '{{.Config.Image}}', h.name], { encoding: 'utf8' }).trim();
+    expect(reference).toBe(AST_IMAGE);
   });
 
   it('reports the certified 20.7 version', () => {
