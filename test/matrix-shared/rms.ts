@@ -54,14 +54,20 @@ export function maxWindowedRms(samples: Float32Array, windowMs: number, sampleRa
 }
 
 /**
- * RMS of a possibly still-open recording. A PBX's recorder generally leaves the
- * data-chunk header length stale while the file is still open — the size is
- * only finalised on close, and some writers hold it at 0 from the start
- * (FreeSWITCH's record_session via libsndfile does this, and Asterisk's
- * MixMonitor behaves the same way) — so the strict parse runs first and a
- * data-through-EOF fallback rescues a zero/short declared length. Null = no
+ * RMS of a possibly still-open recording. A recorder generally leaves the
+ * data-chunk header length stale while the file is still open — the byte count
+ * is only finalised on close — so the strict parse runs first and a
+ * data-through-EOF fallback rescues a zero or short declared length. Null = no
  * usable floor from the WAV yet (the caller then relies on the 0.01 baseline,
  * which a silent final recording still fails).
+ *
+ * Measured case, Asterisk: at the gate (≥1 s into an established call)
+ * MixMonitor has written a bare 44-byte RIFF header with the declared length
+ * still 0, and a call killed mid-flight leaves 163 840 data bytes under that
+ * same declared 0 — the strict parse throws there and this fallback is what
+ * recovers the RMS. The fallback itself came from the FreeSWITCH matrix's
+ * record_session path, where a stale header was the suspected cause; what
+ * libsndfile's header bytes actually contain is not asserted here.
  */
 export function wavRmsLenient(bytes: Uint8Array): number | null {
   try {

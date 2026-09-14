@@ -84,10 +84,12 @@ interface AudioStepResult {
  * killed ~10 s in leaves 163 840 data bytes behind with the same declared
  * length of 0, i.e. the header is only finalised on close). So this read
  * returns null in practice and `floor` is the 0.01 baseline below, NOT a
- * measured per-run silence: the calibration is inert on Asterisk, exactly as
- * the FreeSWITCH tree designs for, and the recording still has to clear a
- * floor that a silent, truncated, or wrong-offset read cannot
- * (`test/matrix-shared/rms.unit.test.ts` pins that with a fixture).
+ * measured per-run silence: the calibration is inert on Asterisk. The baseline
+ * fallback is an inherited shape from the FreeSWITCH spec this one is modelled
+ * on — that it is inert there too is NOT measured here and is not claimed —
+ * and the recording still has to clear a floor that a silent, truncated, or
+ * wrong-offset read cannot (`test/matrix-shared/rms.unit.test.ts` pins that
+ * with a fixture).
  */
 function readRecordingFloor(handle: AstHandle): { rms: number | null; path: string | null; bytes: number } {
   const recs = getRecordings(handle);
