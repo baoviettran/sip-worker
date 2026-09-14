@@ -93,59 +93,78 @@ test.describe('asterisk matrix · hold/resume + mute/unmute control plane', () =
       // wire evidence of the hold signalling: the initial INVITE plus the
       // re-INVITE, both answered 200 by Asterisk.
       //
-      // The 200 is bound POSITIONALLY to the SECOND INVITE. Two weaker forms
-      // were measured here and both are vacuous against the mutation this
-      // evidence exists to catch (the hold re-INVITE going unanswered):
-      //   - a literal `wire200s >= 2`: satisfied by the registration
-      //     handshake's own 200 plus the initial INVITE's.
-      //   - the count-to-count `wire200s >= wireInvites`: BOTH counts survive
-      //     the mutation. Suppress the re-INVITE's 200 and the wire still
-      //     carries 2 INVITEs and 2 200s (the REGISTER 200 and the initial
-      //     INVITE's), so `2 >= 2` passes. Both those survivors are already
-      //     proven by `expect(h.ok, h.detail).toBe(true)` above and by the waits
-      //     inside `runHoldStep`, so the count form cannot fail on any path
-      //     where that already passes. (Same defect class Task 9's review
-      //     measured on its own 200 assertion, plan commit e01aad2.)
+      // TWO assertions, and they are deliberately a CONJUNCTION. Each is
+      // vacuous under a different model of the wire, so neither alone is the
+      // fix, and this file has already shipped each alone in turn:
       //
-      // So the index is bound and GUARDED rather than read inline, exactly as
-      // test/asterisk-matrix/call-inbound.spec.ts does one step over: with no
-      // second INVITE, `indexOf` returns -1 and `lastIndexOf('200') > -1` is
-      // true for ANY 200, so the predicate only means "after the re-INVITE"
-      // once the re-INVITE is known to be present. `h.events` is the OUTER step
-      // result's event list (the `MatrixResult.events` sibling of `result`),
-      // not a field of `h.result`.
+      //   - the COUNT form (`wire200s >= wireInvites`) is vacuous when the
+      //     stack does not challenge the initial INVITE: two INVITEs, three
+      //     200s, suppress the hold re-INVITE's 200 -> 2 >= 2 passes. Note what
+      //     that failure is: with FEWER INVITEs the count form does not go red,
+      //     it goes VACUOUS — fewer INVITEs only make `200s >= INVITEs` easier
+      //     to satisfy. (Round 1 of this fix wave wrote the opposite into the
+      //     plan — "a count of 2 would make it red on a correct tree" — and
+      //     that is backwards.)
+      //   - the POSITIONAL form (a 200 after the last INVITE) is
+      //     TRANSACTION-BLIND: it cannot tell the hold re-INVITE from the
+      //     establishing INVITE or from a PBX-initiated re-INVITE the page
+      //     answers. Measured: suppress the hold re-INVITE's own 200 AND let
+      //     the PBX initiate a re-INVITE the page answers -> the wire ends
+      //     `…,INVITE,INVITE,200,ACK`, the positional form passes, and the
+      //     count form (`3 >= 4`) is the one that catches it.
       //
-      // ...but the anchor is the LAST INVITE, not the second, and that is a
-      // MEASURED correction. The wire the hold step actually produces is
+      // Measured truth table — these three mutant scenarios plus green, and the
+      // conjunction is red on all three and green only on the committed tree:
+      //
+      //   scenario                                        count  positional  both
+      //   challenge model, hold 200 suppressed (3/2 INV)   RED    RED         RED
+      //   no-challenge model, hold 200 suppressed (2/2)    green  RED         RED
+      //   hold INVITE unanswered, PBX re-INVITE (4/3)      RED    green       RED
+      //   committed tree                                   green  green       GREEN
+      //
+      // The positional half is anchored to the LAST INVITE, not the second, and
+      // that is a MEASURED correction. The wire the hold step actually produces
+      // is
       //
       //   REGISTER REGISTER 200 INVITE ACK INVITE 200 ACK INVITE 200 ACK
       //                              ^auth retry, dialog established
       //                                                 ^ the hold re-INVITE
       //
-      // — pjsip challenges the first INVITE (401, ACKed but unrecorded), so
-      // the SECOND INVITE is the authenticated retry that establishes the
-      // dialog and it carries its own 200. Anchoring there is satisfied by
-      // that establishing 200, which this step never had to prove anything
-      // about: measured, suppressing the hold re-INVITE's 200 left the gate
+      // — pjsip challenges the first INVITE (401, ACKed but unrecorded), so the
+      // SECOND INVITE is the authenticated retry that establishes the dialog and
+      // it carries its own 200. Anchoring there (as this wave first did) is
+      // satisfied by that establishing 200, which this step never had to prove
+      // anything about: measured, suppressing the hold re-INVITE's 200 left it
       // GREEN. The hold re-INVITE is the last INVITE this step's own `hold()`
-      // puts on the wire (it is the final one before the step returns), so the
-      // 200 must follow THAT one. Both anchors are kept: the second-INVITE
-      // guard still fails when fewer than two INVITEs were seen at all.
+      // puts on the wire, so the 200 must follow THAT one. The second-INVITE
+      // guard is kept as well: it fails when fewer than two INVITEs were seen at
+      // all, and the index is bound and GUARDED rather than read inline exactly
+      // as test/asterisk-matrix/call-inbound.spec.ts does one step over — with
+      // no INVITE, `indexOf` returns -1 and `lastIndexOf('200') > -1` is true
+      // for ANY 200. `h.events` is the OUTER step result's event list (the
+      // `MatrixResult.events` sibling of `result`), not a field of `h.result`.
       //
-      // KNOWN LIMIT, measured and left open deliberately: the wire alone cannot
-      // tell "the hold re-INVITE" from "the establishing INVITE" by position, so
-      // a hold that sent NO re-INVITE at all is still silent here — only a count
-      // would catch it, and a count is stack-dependent (it is 3 here solely
-      // because pjsip challenges the first INVITE; pre-emptive auth would make
-      // it 2 and turn a count rule red on a correct tree). If a stack quirk ever
-      // makes this fail with every INVITE genuinely answered, REPORT it and
-      // record what the extra 200 was; do not relax the line to a count or a
-      // literal.
+      // KNOWN LIMIT, measured and left open deliberately: a hold that sent NO
+      // re-INVITE at all is still silent here. Position cannot separate the hold
+      // re-INVITE from the establishing INVITE, and the count form is vacuous
+      // under exactly that model; only an exact INVITE count would catch it, and
+      // that count is stack-dependent. This is incompleteness, not vacuity —
+      // every assertion present is real. If a stack quirk ever makes this fail
+      // with every INVITE genuinely answered, REPORT it and record what the
+      // extra 200 was; do not relax either line to a literal.
       const wire = h.events.filter((e) => e.type === 'wire').map((e) => e.detail);
       const firstInvite = wire.indexOf('INVITE');
       expect(firstInvite, `no INVITE on the wire — wire: ${wire.join(',')}`).toBeGreaterThanOrEqual(0);
       const reInvite = wire.indexOf('INVITE', firstInvite + 1);
       expect(reInvite, `no re-INVITE on the wire — wire: ${wire.join(',')}`).toBeGreaterThan(firstInvite);
+      // Both halves of the conjunction — see the table above for which mutant
+      // each one owns.
+      const wireInvites = wire.filter((x) => x === 'INVITE').length;
+      const wire200s = wire.filter((x) => x === '200').length;
+      expect(
+        wire200s,
+        `wire 200s: ${wire200s} vs INVITEs: ${wireInvites} — wire: ${wire.join(',')}`,
+      ).toBeGreaterThanOrEqual(wireInvites);
       expect(
         wire.lastIndexOf('200'),
         `no 200 after the last INVITE — wire: ${wire.join(',')}`,

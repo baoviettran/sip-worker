@@ -10,7 +10,8 @@ export default defineConfig({
     // Measured before flipping it: every script that runs Vitest through THIS
     // config collects at least one file, so no gate legitimately collects
     // nothing — `npm test`, test:matrix:unit (4 files), test:astmatrix:unit
-    // (4), test:pilot:unit (6), test:soak:core (1), test:sipp:unit (2). The
+    // (5: 3 × matrix-shared + 2 × asterisk-matrix), test:pilot:unit (6),
+    // test:soak:core (1), test:sipp:unit (2). The
     // two infra scripts pass their own --config (test/*/vitest.config.ts), which
     // never set this option and therefore already defaulted to false.
     passWithNoTests: false,

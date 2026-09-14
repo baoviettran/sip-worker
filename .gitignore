@@ -18,3 +18,8 @@ test/freeswitch-matrix/artifacts/
 # the repo root for the npm script — unlike the FreeSWITCH harness, whose runDir
 # is inside its own test tree.
 /artifacts/
+# The Asterisk matrix RUN RECORD (MATRIX_RECORD_FILE). Deliberately NOT under
+# /artifacts/: the record is written on every run, green included, so putting it
+# there would make artifacts/ never empty and disarm the CI guard that detects a
+# failed artifact collection. Anchored the same way, for the same reason.
+/matrix-record/

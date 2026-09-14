@@ -43,14 +43,16 @@ jobs:
     # The run record (acceptance criterion 8). The harness page appends each
     # `log()` line to this path through a Playwright binding (helpers.ts reads
     # the variable — steps.ts is bundled into the browser, where `process` does
-    # not exist). artifacts/ is uploaded on always() below, so the image digest,
-    # package hash, git commit and browser version survive a GREEN run too — on
-    # a green run `trace: 'retain-on-failure'` retains no trace at all, and the
-    # #status DOM node dies with the context. The FreeSWITCH workflow
-    # deliberately does not set this: its tree is frozen and its behaviour must
-    # stay byte-identical.
+    # not exist). DELIBERATELY OUTSIDE artifacts/: the record exists on every
+    # run, green included, so putting it under artifacts/ would make that
+    # directory never empty and disarm the artifacts step's
+    # if-no-files-found guard on every run in every job. It has its own
+    # directory, its own upload step and its own guard — on a green run
+    # `trace: 'retain-on-failure'` retains no trace and the #status DOM node
+    # dies with the context, so this is the only place the image digest, package
+    # hash, git commit and browser version survive.
     env:
-      MATRIX_RECORD_FILE: artifacts/matrix-run-record.txt
+      MATRIX_RECORD_FILE: matrix-record/matrix-run-record.txt
     # Worst case, re-derivable from test/asterisk-matrix/playwright.config.ts
     # and the step list below:
     #   8 tests       MATRIX_MODE=pr registers the Chromium project alone and
@@ -124,12 +126,27 @@ jobs:
       # it swallows silently (test/asterisk-matrix/astctl.ts:280-282). That is a
       # guard that cannot fail against the thing it exists to catch. Separate
       # steps make a missing artifacts/ a red step.
+      #
+      # The run record is the THIRD such path, and it must not live under
+      # artifacts/. It is written by the harness itself on EVERY run, green
+      # included, so putting it in artifacts/ meant artifacts/ was never empty
+      # and this step's guard could not fire on any run in any job — a green-run
+      # record bought by disarming a red-run detector. matrix-record/ therefore
+      # gets its own step and its own guard: a missing record is a red step, and
+      # a missing artifacts/ is still the red step it was.
       - name: Upload Asterisk artifacts (container log, AMI transcript, recordings)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ast-matrix-pr-artifacts
           path: artifacts/
+          if-no-files-found: error
+      - name: Upload the matrix run record (image digest, package hash, commit, browser)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ast-matrix-pr-record
+          path: matrix-record/
           if-no-files-found: error
       # KNOWN, UNRESOLVED, PRE-EXISTING. This artifact is uploaded unredacted.
       # A retained Playwright trace records page.evaluate arguments and outgoing
@@ -172,9 +189,10 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # Same run record as the PR job, and for the same reason — see there. Both
-    # jobs set it, so the nightly's green run carries the provenance too.
+    # jobs set it, so the nightly's green run carries the provenance too, and
+    # neither job's artifacts/ guard is disarmed by it.
     env:
-      MATRIX_RECORD_FILE: artifacts/matrix-run-record.txt
+      MATRIX_RECORD_FILE: matrix-record/matrix-run-record.txt
     # Worst case, re-derivable from test/asterisk-matrix/playwright.config.ts
     # and the step list below:
     #   18 tests     6 spec files x 2 projects — Chromium + Firefox (nightly
@@ -269,6 +287,13 @@ jobs:
         with:
           name: ast-matrix-nightly-artifacts
           path: artifacts/
+          if-no-files-found: error
+      - name: Upload the matrix run record (image digest, package hash, commit, browser)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ast-matrix-nightly-record
+          path: matrix-record/
           if-no-files-found: error
       # KNOWN, UNRESOLVED, PRE-EXISTING — the full note is on the PR job's
       # trace upload; it applies identically here. This artifact is uploaded

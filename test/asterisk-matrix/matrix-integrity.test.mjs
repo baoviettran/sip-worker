@@ -45,6 +45,84 @@ test('manifest maps to exactly six unique spec files', () => {
 // WITHIN a file was not. Criterion 7's "a missing step … fails CI" was false for
 // exactly this case.
 //
+// BLANK comment and template-literal REGIONS before counting, keeping the line
+// structure so the `^\s*` anchors still work. Both rules below are raw text
+// matches, and a `test(` at the start of a line inside a template literal
+// over-counts — measured by the re-review: a correct tree goes RED while the
+// message blames a deleted step. A gate that fails on correct code is a gate
+// someone deletes, which is the failure this file exists to prevent.
+//
+// This is the `withoutCommentLines` idiom from
+// test/matrix-shared/no-src-imports.test.mjs, extended to template literals:
+// that helper filters comment-only LINES, which cannot see a multi-line
+// template. Line comments need no special handling for THIS rule (a line
+// starting `// test(` does not match `^\s*test\(`), but block comments and
+// template literals can put a bare `test(` at column 0, so they are blanked by a
+// single-pass scanner rather than by a regex.
+function stripCommentsAndTemplates(source) {
+  const keepNewlines = (ch) => (ch === '\n' ? '\n' : ' ');
+  let out = '';
+  let i = 0;
+  while (i < source.length) {
+    const two = source.slice(i, i + 2);
+    const c = source[i];
+    if (two === '//') {
+      while (i < source.length && source[i] !== '\n') {
+        out += ' ';
+        i += 1;
+      }
+      continue;
+    }
+    if (two === '/*') {
+      while (i < source.length && source.slice(i, i + 2) !== '*/') {
+        out += keepNewlines(source[i]);
+        i += 1;
+      }
+      out += '  ';
+      i += 2;
+      continue;
+    }
+    if (c === '`') {
+      out += ' ';
+      i += 1;
+      while (i < source.length) {
+        if (source[i] === '\\') {
+          out += '  ';
+          i += 2;
+          continue;
+        }
+        if (source[i] === '`') break;
+        out += keepNewlines(source[i]);
+        i += 1;
+      }
+      out += ' ';
+      i += 1;
+      continue;
+    }
+    // A quoted string can only ever contain a `test(` mid-line, never at a line
+    // start, so it is copied through with its contents intact — which also keeps
+    // this scanner from having to guess about apostrophes in prose.
+    if (c === "'" || c === '"') {
+      out += c;
+      i += 1;
+      while (i < source.length) {
+        if (source[i] === '\\') {
+          out += source.slice(i, i + 2);
+          i += 2;
+          continue;
+        }
+        out += source[i];
+        i += 1;
+        if (source[i - 1] === c) break;
+      }
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
 // Tests declared per spec file. NOT derivable from MATRIX_STEPS: controls.spec.ts
 // covers steps 6 and 7 in ONE test (its header explains why they are not split),
 // so six files declare nine tests for ten steps. An exact-count-of-10 rule would
@@ -60,7 +138,7 @@ const SPEC_TESTS = {
 
 test('every matrix step is backed by a declared test', () => {
   for (const [file, expected] of Object.entries(SPEC_TESTS)) {
-    const source = readFileSync(join(__dirname, file), 'utf8');
+    const source = stripCommentsAndTemplates(readFileSync(join(__dirname, file), 'utf8'));
     const declared = source.match(/^\s*test\(/gm) ?? [];
     // The count is EXACT on purpose. Adding a test is a deliberate change to the
     // manifest and should be acknowledged by editing this table — that is the
@@ -75,6 +153,25 @@ test('every matrix step is backed by a declared test', () => {
       skipped,
       [],
       `${file} declares a skipped or focused test — a skipped step is not a passing step`,
+    );
+    // The floor the count rule cannot provide. A count is satisfied by a
+    // DECLARATION, so a test body gutted to nothing while its `test(` line
+    // survives leaves the whole gate at 11/11 and the page slice green — step 8
+    // then validates nothing at all. Measured by the re-review: exactly that,
+    // 11 pass / 0 fail. One `expect(` is the cheap non-vacuous half.
+    //
+    // KNOWN RESIDUAL, deliberate: a body reduced to ONE trivial assertion still
+    // passes this. No source-text rule can establish that a test still means what
+    // its name says, and this is incompleteness rather than vacuity — every
+    // assertion present is real. Do NOT "fix" it with an exact `expect(` count:
+    // that turns every legitimate test edit into a red gate, which is the failure
+    // mode this whole file exists to prevent. Measured `expect(` counts at the
+    // time of writing (register 7, audio 13, call-inbound 17, controls 26,
+    // dtmf 2, recovery 12) — for information, NOT asserted.
+    const assertions = source.match(/expect\(/g) ?? [];
+    assert.ok(
+      assertions.length >= 1,
+      `${file} declares a test but contains no expect( at all — the body was emptied and the step now validates nothing`,
     );
   }
   // A file that vanished would be caught above only if it were still listed in
