@@ -1,26 +1,48 @@
-// test/freeswitch-matrix/audio.spec.ts — matrix step 4: the outgoing-call
-// two-way audio proof.
+// test/asterisk-matrix/audio.spec.ts — matrix step 4: the outgoing-call
+// two-way audio proof for Asterisk.
 //
-// Procedure: register → createCall('sip:9196@127.0.0.1') → established → send
-// 1 s of digital silence (page gate), read the partial record_session WAV
+// Procedure: register → createCall('sip:600@127.0.0.1') → established → send
+// 1 s of digital silence (page gate), read the partial MixMonitor WAV
 // node-side and record its RMS as the per-run silence floor
 // (`floor = max(floorRms, 0.01)`) → open the gate → the page raises the 440 Hz
 // tone, lets ≥2 s of RTP flow, samples AnalyserNode energy on the remote
 // stream, and checks getStats packet growth both ways → finish-call hangs up
-// (flushing the recorder) → the node reads the one new WAV (delta after
-// clearing stale recordings) and computes maxWindowedRms. Assert: page energy above the floor AND
-// recordingRms above the floor AND rtpBothWays true.
+// (flushing MixMonitor) → the node reads the one new WAV (delta after
+// clearing stale recordings) and computes maxWindowedRms.
+//
+// THE MILESTONE GATE, stated plainly: two-way audio is programmatically
+// verified by THREE independent observations, ALL of which must hold —
+//   1. page-side AnalyserNode energy of the REMOTE stream (the tone Echo()
+//      returned) is above the measured silence floor;
+//   2. `rtpBothWays` is true — both directions' RTP packet counters grew;
+//   3. node-side `maxWindowedRms` of the PBX's own MixMonitor recording of
+//      the leg is above that same floor.
+// A SIP trace alone NEVER satisfies this test. The wire assertions
+// (INVITE/200/ACK) at the end are a closing sanity check on the dialog, not
+// the audio proof.
 //
 // The step contract `{ ok, detail, energy, rtpBothWays, recordingRms }` is
 // realized across the two steps: `outgoing-audio` carries energy/rtpBothWays
-// in its MatrixResult, `finish-call` flushes the recorder, and recordingRms is
+// in its MatrixResult, `finish-call` flushes MixMonitor, and recordingRms is
 // computed HERE (node side — the page cannot read the WAV).
+//
+// Open questions, and the answers this task recorded:
+// - `stunPort`: REQUIRED, and passed. Tried without it first, as briefed: the
+//   INVITE is answered 200 and the dialog reaches `established` (so pjsip's
+//   `ice_support=yes` accepts the offer, unlike sofia's ACL which answered
+//   488), but NO audio ever flows — the step then times out waiting for the
+//   remote stream to appear, because ICE never finds a working candidate pair
+//   for the mDNS-obfuscated `.local` host candidates Chromium puts in the
+//   offer and pjsip has no mDNS resolver. The shared STUN responder supplies
+//   an srflx 127.0.0.1 candidate pjsip can actually use, so it is needed here
+//   for the same underlying reason as on FreeSWITCH — a candidate pjsip can
+//   reach — even though the switch's symptom differs (488 there, silent media
+//   here).
 import { test, expect } from '@playwright/test';
-import { copyFileSync, existsSync, readFileSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, unlinkSync } from 'node:fs';
 import { bootMatrix, disposeMatrix, runStep } from './helpers';
-import { getRecordings, type FsHandle } from './fsctl';
-import { maxWindowedRms, parseRiffWav, readWavPcm16, wavRmsLenient } from '../matrix-shared/rms';
+import { getRecordings, type AstHandle } from './astctl';
+import { maxWindowedRms, parseRiffWav, wavRmsLenient } from '../matrix-shared/rms';
 import { startStunResponder } from '../matrix-shared/stun';
 
 const CREDENTIALS = { user: '1000', password: 'matrix-pass-2026' };
@@ -45,13 +67,24 @@ interface AudioStepResult {
 }
 
 /**
- * Node-side silence floor from the partial recording. The recordDir is shared
- * for the whole Playwright invocation (one container per run, every 9196 dial
- * writes into it), so audio.spec clears stale WAVs before dialing and asserts
- * its own delta — exactly one new WAV. Recording names are uuid-based and NOT
- * mtime-ordered — never pick "newest".
+ * Node-side silence floor from the partial recording. The recordingsDir is
+ * shared for the whole Playwright invocation (one container per run, every 600
+ * dial writes into it), so audio.spec clears stale WAVs before dialing and
+ * asserts its own delta — exactly one new WAV. Recording names are
+ * UNIQUEID-based and NOT mtime-ordered — never pick "newest".
+ *
+ * MEASURED at authoring time: at the gate (≥1 s into an established call) the
+ * file is 44 bytes — the RIFF header alone, data length 0 — because
+ * MixMonitor's first flush is larger than the 1 s silence window (a call
+ * killed ~10 s in leaves 163 840 data bytes behind with the same declared
+ * length of 0, i.e. the header is only finalised on close). So this read
+ * returns null in practice and `floor` is the 0.01 baseline below, NOT a
+ * measured per-run silence: the calibration is inert on Asterisk, exactly as
+ * the FreeSWITCH tree designs for, and the recording still has to clear a
+ * floor that a silent, truncated, or wrong-offset read cannot
+ * (`test/matrix-shared/rms.unit.test.ts` pins that with a fixture).
  */
-function readRecordingFloor(handle: FsHandle): { rms: number | null; path: string | null; bytes: number } {
+function readRecordingFloor(handle: AstHandle): { rms: number | null; path: string | null; bytes: number } {
   const recs = getRecordings(handle);
   if (recs.length === 0) return { rms: null, path: null, bytes: 0 };
   const bytes = new Uint8Array(readFileSync(recs[0]));
@@ -59,52 +92,31 @@ function readRecordingFloor(handle: FsHandle): { rms: number | null; path: strin
 }
 
 /**
- * Clear WAVs left in the shared recordDir by earlier specs' dials. The
- * recordDir belongs to the ONE container booted in globalSetup and is shared
- * across all spec files and both browser projects, so it is NOT empty when
- * this test starts. Clearing here is safe: only audio.spec consumes WAVs, and
- * the artifacts collector copies them in stopFreeSwitch — the globalSetup
- * teardown, which Playwright runs once after ALL specs, never between them.
+ * Clear WAVs left in the shared recordings dir by earlier specs' dials. The
+ * dir belongs to the ONE container booted in globalSetup and is shared across
+ * all spec files and both browser projects, so it is NOT empty when this test
+ * starts. Clearing here is safe: only audio.spec consumes WAVs, and the
+ * artifacts collector copies them in stopAsterisk — the globalSetup teardown,
+ * which Playwright runs once after ALL specs, never between them.
  * Fail-not-skip: unlinkSync throws rather than silently continuing.
  */
-function clearStaleRecordings(handle: FsHandle): void {
+function clearStaleRecordings(handle: AstHandle): void {
   for (const wav of getRecordings(handle)) {
     unlinkSync(wav);
   }
 }
 
-/**
- * Seed the DTLS-SRTP certificate FreeSWITCH needs to answer WebRTC offers.
- * FreeSWITCH looks for `<certs_dir>/dtls-srtp.pem` (this image: /etc/freeswitch
- * /tls, alongside the harness-minted wss.pem) and generates one on first use —
- * but /etc/freeswitch is mounted READ-ONLY, so generation always fails with
- * "FP FILE ERR" and the INVITE is answered 488. The runtimeDir is writable from
- * the host (the ro flag only binds the container view), and FreeSWITCH re-reads
- * the pem per call, so seeding a copy of wss.pem here fixes the answer without
- * touching the committed harness.
- */
-function ensureDtlsPem(handle: FsHandle): string {
-  const tlsDir = join(handle.runtimeDir, 'tls');
-  const dtlsPem = join(tlsDir, 'dtls-srtp.pem');
-  if (!existsSync(dtlsPem)) {
-    copyFileSync(join(tlsDir, 'wss.pem'), dtlsPem);
-  }
-  return dtlsPem;
-}
-
 test.describe('matrix · outgoing call two-way audio', () => {
-  test('outgoing-audio: tone reaches FreeSWITCH (WAV RMS) and echo returns (page energy)', async ({ page }) => {
+  test('outgoing-audio: tone reaches Asterisk (WAV RMS) and echo returns (page energy)', async ({ page }) => {
     const ctx = await bootMatrix(page);
     const stun = await startStunResponder();
     try {
-      // Delta accounting: the recordDir is shared for the whole invocation, so
-      // drop stale WAVs from earlier specs before dialing, then assert the
-      // delta (exactly one new WAV) after the call (see clearStaleRecordings).
+      // Delta accounting: the recordings dir is shared for the whole
+      // invocation, so drop stale WAVs from earlier specs before dialing, then
+      // assert the delta (exactly one new WAV) after the call (see
+      // clearStaleRecordings).
       clearStaleRecordings(ctx.handle);
-      // The DTLS pem must exist before the INVITE (FreeSWITCH re-reads it per
-      // call, but seeding up front removes the order dependence entirely).
-      ensureDtlsPem(ctx.handle);
-      // register → dial 9196 → established → 1 s of silence → gate open. The
+      // register → dial 600 → established → 1 s of silence → gate open. The
       // step promise is awaited only AFTER the node-side floor is calibrated,
       // so the page parks in its gate while we read the partial WAV.
       const args = { ...CREDENTIALS, stunPort: stun.port };
@@ -131,7 +143,7 @@ test.describe('matrix · outgoing call two-way audio', () => {
         `page energy ${audio.energy.toFixed(4)} vs floor ${floor.toFixed(4)} (silence rms ${floorRead.rms})`,
       ).toBeGreaterThan(floor);
 
-      // hang up → record_session flushes the WAV
+      // hang up → MixMonitor flushes the WAV
       const fin = await runStep(page, 'finish-call', CREDENTIALS);
       expect(fin.ok, fin.detail).toBe(true);
       expect(fin.events).toContainEqual(expect.objectContaining({ type: 'wire', detail: 'BYE' }));

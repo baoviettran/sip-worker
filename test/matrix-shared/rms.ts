@@ -52,3 +52,36 @@ export function maxWindowedRms(samples: Float32Array, windowMs: number, sampleRa
   }
   return best;
 }
+
+/**
+ * RMS of a possibly still-open recording. libsndfile may leave the data-chunk
+ * header length stale while record_session is mid-call, so the strict parse
+ * runs first and a data-through-EOF fallback rescues a zero/short declared
+ * length. Null = no usable floor from the WAV yet (the caller then relies on
+ * the 0.01 baseline, which a silent final recording still fails).
+ */
+export function wavRmsLenient(bytes: Uint8Array): number | null {
+  try {
+    const { pcm, sampleRate } = parseRiffWav(bytes);
+    if (pcm.length < sampleRate / 10) return null; // <100 ms: no usable floor yet
+    return maxWindowedRms(pcm, 20, sampleRate);
+  } catch {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const ascii = (o: number, n: number) => String.fromCharCode(...bytes.subarray(o, o + n));
+    if (ascii(0, 4) !== 'RIFF' || ascii(8, 4) !== 'WAVE') return null;
+    let off = 12;
+    let sampleRate = 0;
+    while (off + 8 <= bytes.byteLength) {
+      const id = ascii(off, 4);
+      const size = dv.getUint32(off + 4, true);
+      if (id === 'fmt ') sampleRate = dv.getUint32(off + 12, true);
+      if (id === 'data') {
+        const pcm = readWavPcm16(bytes.subarray(off + 8));
+        if (pcm.length < sampleRate / 10) return null;
+        return maxWindowedRms(pcm, 20, sampleRate || 8000);
+      }
+      off += 8 + size + (size % 2);
+    }
+    return null;
+  }
+}
