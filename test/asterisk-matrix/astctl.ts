@@ -238,6 +238,29 @@ export function findContactPort(h: AstHandle, user: string): number | undefined 
 }
 
 /**
+ * How many contacts the AOR currently lists for `user`.
+ *
+ * Why this is the PBX-side evidence for step 10: a recovery that replaced the
+ * old registration leaves ONE row; one that accumulated a second live socket
+ * beside it leaves TWO. Counting rows is the only way to see that difference
+ * from the PBX side — the page cannot, because both cases look identical from
+ * in there.
+ *
+ * It does NOT prove `remove_existing=yes` is doing the replacing: measured, a
+ * WS contact is reaped by pjsip when its connection closes, so a dead socket
+ * never lingers to be removed. What it catches is the live-socket leak.
+ */
+export function countContacts(h: AstHandle, user: string): number {
+  const out = astExec(h, 'pjsip show contacts');
+  const escaped = user.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let n = 0;
+  for (const line of out.split('\n')) {
+    if (new RegExp(`\\b${escaped}\\b[^\\s]*@127\\.0\\.0\\.1:\\d+`).test(line)) n++;
+  }
+  return n;
+}
+
+/**
  * Container logs and recordings, copied into artifacts/ before teardown so a CI
  * failure is diagnosable, then both temp dirs removed. Asterisk's console logger
  * is what `docker logs` captures (ast-conf/logger.conf), so this needs no

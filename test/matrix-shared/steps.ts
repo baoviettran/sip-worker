@@ -1315,6 +1315,16 @@ async function runDropWssStep(args: StepArgs, profile: PbxProfile): Promise<Matr
         throw new Error(`call failed without typed call.failed evidence (diag: ${diagCodes.join(',')})`);
       }
     }
+    // The phone is deliberately NOT disposed on this path, unlike every other
+    // step in this file. The recovered socket must still be live when the
+    // caller reads the PBX: pjsip reaps a WS contact the moment its connection
+    // closes, so a disposed phone leaves the AOR listing ZERO contacts — the
+    // correct answer at that moment would be the wrong one to assert on.
+    // `runWaitIncomingStep`/`runAnswerIncomingStep` already hold their phone
+    // open for the same class of reason (an inbound INVITE must still be
+    // routable after the step returns); this makes drop-wss consistent with
+    // them. `disposeLivePhones` (the page's `__matrixDispose`, called by
+    // `disposeMatrix`) is what eventually cleans it up.
     return {
       ok: true,
       detail: `drop-wss: reconnected + re-registered (diag ${diagCodes.join('→')}), call outcome ${callOutcome}`,
@@ -1330,9 +1340,11 @@ async function runDropWssStep(args: StepArgs, profile: PbxProfile): Promise<Matr
     };
   } catch (error) {
     const f = asFailure(error);
-    return { ok: false, detail: `drop-wss: ${f.message}`, errorCode: f.code, events };
-  } finally {
+    // The failure path DOES dispose: a failed recovery leaves no live state
+    // worth observing, and the phone must not outlive a step that already
+    // reported failure.
     await disposePhone(phone);
+    return { ok: false, detail: `drop-wss: ${f.message}`, errorCode: f.code, events };
   }
 }
 
