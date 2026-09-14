@@ -44,7 +44,7 @@ test.describe('asterisk matrix · recovery', () => {
     const stun = await startStunResponder();
     try {
       // No `register` step here, and no `portBefore`: the FreeSWITCH mirror
-      // goes straight to `drop-wss` (recovery.spec.ts:60), and the pre-drop port
+      // goes straight to `drop-wss` (recovery.spec.ts:61), and the pre-drop port
       // read this plan used to do was unreadable anyway — `register` disposes
       // its phone in its own `finally` (steps.ts:508), so the AOR was empty by
       // the time the read happened and `findContactPort` returned `undefined`.
