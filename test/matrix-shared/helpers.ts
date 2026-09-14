@@ -94,8 +94,10 @@ export function createMatrixHelpers<H extends MatrixHandle>(opts: MatrixHarnessO
     const handle = readHandle();
     const url = `${baseUrl}/index.html?wss=${handle.wssPort}&image=${encodeURIComponent(opts.imageRef)}&run=${++bootSeq}`;
     // The run record (criterion 8), and ONLY when the runner asks for one
-    // (the Asterisk workflow sets MATRIX_RECORD_FILE under artifacts/ for both
-    // jobs; the FreeSWITCH workflow deliberately does not).
+    // (the Asterisk workflow sets MATRIX_RECORD_FILE under matrix-record/ for
+    // both jobs — NOT under artifacts/, so that the artifacts/ uploader's
+    // `if-no-files-found: error` keeps meaning "the test produced artifacts";
+    // the FreeSWITCH workflow deliberately does not set it at all).
     //
     // With it unset this block does nothing whatsoever — no binding installed,
     // no path resolved, no file touched — so the page side is exactly what it

@@ -4,38 +4,49 @@
 // inverted and one added — see below.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const MATRIX_STEPS = {
-  1:  'register.spec.ts',
-  2:  'register.spec.ts',
-  3:  'register.spec.ts',
-  4:  'audio.spec.ts',
-  5:  'call-inbound.spec.ts',
-  6:  'controls.spec.ts',
-  7:  'controls.spec.ts',
-  8:  'dtmf.spec.ts',
-  9:  'call-inbound.spec.ts',
-  10: 'recovery.spec.ts',
+// ── The step manifest: ONE ENTRY PER STEP, every step named ────────────
+// Ten steps, but only NINE tests in six files: `controls.spec.ts` covers steps
+// 6 and 7 in ONE test (its header explains why they are not split), so 6 and 7
+// name the same entry and the set comparison below collapses the duplicate.
+// Do NOT "fix" that by splitting the controls test or by dropping a step.
+//
+// `file` drives the on-disk rules. `title` is the runner's own title PATH —
+// the describe chain joined by ` > `, exactly as `--list --reporter=json`
+// reports it, NOT a guess about source text. Renaming a describe or a test is
+// therefore a deliberate manifest change: update this table with it.
+const MATRIX_MANIFEST = {
+  1:  { file: 'register.spec.ts',     title: 'asterisk matrix · registration > register: digest challenge then registered' },
+  2:  { file: 'register.spec.ts',     title: 'asterisk matrix · registration > refresh: re-REGISTER before expiry' },
+  3:  { file: 'register.spec.ts',     title: 'asterisk matrix · registration > wrong-password: typed AUTHENTICATION_FAILED' },
+  4:  { file: 'audio.spec.ts',        title: 'matrix · outgoing call two-way audio > outgoing-audio: tone reaches Asterisk (WAV RMS) and echo returns (page energy)' },
+  5:  { file: 'call-inbound.spec.ts', title: 'asterisk matrix · inbound > step 5: PBX-originated call is answered' },
+  6:  { file: 'controls.spec.ts',     title: 'asterisk matrix · hold/resume + mute/unmute control plane > steps 6-7: hold, resume, mute, unmute on an established outgoing call' },
+  7:  { file: 'controls.spec.ts',     title: 'asterisk matrix · hold/resume + mute/unmute control plane > steps 6-7: hold, resume, mute, unmute on an established outgoing call' },
+  8:  { file: 'dtmf.spec.ts',         title: 'asterisk matrix · DTMF > step 8: RFC 4733 digits reach the PBX' },
+  9:  { file: 'call-inbound.spec.ts', title: 'asterisk matrix · inbound > step 9: remote BYE ends the call cleanly' },
+  10: { file: 'recovery.spec.ts',     title: 'asterisk matrix · recovery > step 10: a severed WSS re-registers and the call survives' },
 };
 
-test('every MATRIX_STEPS spec file exists on disk', () => {
-  assert.strictEqual(Object.keys(MATRIX_STEPS).length, 10, 'manifest has exactly ten steps');
-  for (const [step, file] of Object.entries(MATRIX_STEPS)) {
-    assert.ok(existsSync(join(__dirname, file)), `step ${step}: missing ${file}`);
+test('every MATRIX_MANIFEST spec file exists on disk', () => {
+  assert.strictEqual(Object.keys(MATRIX_MANIFEST).length, 10, 'manifest has exactly ten steps');
+  for (const [step, entry] of Object.entries(MATRIX_MANIFEST)) {
+    assert.ok(existsSync(join(__dirname, entry.file)), `step ${step}: missing ${entry.file}`);
   }
 });
 
 test('manifest maps to exactly six unique spec files', () => {
-  const unique = [...new Set(Object.values(MATRIX_STEPS))];
+  const unique = [...new Set(Object.values(MATRIX_MANIFEST).map((e) => e.file))];
   assert.strictEqual(unique.length, 6, `expected 6 unique specs, got ${unique.length}: ${unique.join(', ')}`);
 });
 
-// ── Every step is backed by a DECLARED test ────────────────────────────
+// ── Every step is backed by a test THE RUNNER ACTUALLY COLLECTS ────────
 // The two rules above tie a step to a FILE, not to a test. Measured by the
 // whole-branch review: emptying out `dtmf.spec.ts` while keeping the file left
 // this gate GREEN (`ok 1` … `ok 9`, `# pass 9 # fail 0`, exit 0), and neither
@@ -45,20 +56,42 @@ test('manifest maps to exactly six unique spec files', () => {
 // WITHIN a file was not. Criterion 7's "a missing step … fails CI" was false for
 // exactly this case.
 //
-// BLANK comment and template-literal REGIONS before counting, keeping the line
-// structure so the `^\s*` anchors still work. Both rules below are raw text
-// matches, and a `test(` at the start of a line inside a template literal
-// over-counts — measured by the re-review: a correct tree goes RED while the
-// message blames a deleted step. A gate that fails on correct code is a gate
-// someone deletes, which is the failure this file exists to prevent.
+// The rule below is NOT a text match, and that is the point. Three rounds of
+// "count the `test(` declarations in the source" were each defeated: a `test(`
+// at column 0 inside a template literal over-counts, so a correct tree goes RED
+// while the message blames a deleted step; and a nested template inside an
+// interpolation is not blanked at all, so a deleted test plus a phantom `test(`
+// planted in a template read as GREEN with zero real tests left in the file. A
+// rule that is wrong in BOTH directions is not a rule to refine a fourth time.
 //
-// This is the `withoutCommentLines` idiom from
+// `--list --reporter=json` is Playwright's own answer to "what would you run".
+// It never reads source text, so strings, comments, templates and backticks
+// cannot reach it. Measured at this revision it needs neither docker nor a
+// browser nor the webServer — no `globalSetup`, no container — and the whole
+// call costs ~1 s of the gate's run time.
+//
+// The ONE text rule that survives is the assertion FLOOR further down. It is
+// scoped to the file's own test bodies, because `--list` proves a step still
+// exists and is still named, not that its body still asserts anything.
+//
+// BLANK comment and template-literal REGIONS before segmenting, keeping the
+// line structure so the `^\s*` anchor still works: the floor is a raw text
+// match, and a `test(` at the start of a line inside a comment or a template
+// literal is not a declaration. This is the `withoutCommentLines` idiom from
 // test/matrix-shared/no-src-imports.test.mjs, extended to template literals:
 // that helper filters comment-only LINES, which cannot see a multi-line
-// template. Line comments need no special handling for THIS rule (a line
+// template. Line comments need no special handling for this rule (a line
 // starting `// test(` does not match `^\s*test\(`), but block comments and
-// template literals can put a bare `test(` at column 0, so they are blanked by a
-// single-pass scanner rather than by a regex.
+// template literals can put a bare `test(` at column 0.
+//
+// KNOWN LIMIT of this scanner, measured: it is not `${}`-aware and knows nothing
+// about regex literals, so a backtick inside a regex literal opens a "template"
+// that swallows the rest of the file — measured, it leaves ZERO declarations in
+// five of the six spec files. The floor therefore does NOT require a minimum
+// number of declarations, and falls back to the raw text when it finds none.
+// That is what keeps the backtick case GREEN instead of turning a correct tree
+// RED. Getting this right properly means asking the runner, which is exactly
+// what the manifest rule above does.
 function stripCommentsAndTemplates(source) {
   const keepNewlines = (ch) => (ch === '\n' ? '\n' : ' ');
   let out = '';
@@ -123,64 +156,176 @@ function stripCommentsAndTemplates(source) {
   return out;
 }
 
-// Tests declared per spec file. NOT derivable from MATRIX_STEPS: controls.spec.ts
-// covers steps 6 and 7 in ONE test (its header explains why they are not split),
-// so six files declare nine tests for ten steps. An exact-count-of-10 rule would
-// therefore be RED on the correct tree — do not "correct" these numbers.
-const SPEC_TESTS = {
-  'register.spec.ts': 3,
-  'audio.spec.ts': 1,
-  'call-inbound.spec.ts': 2,
-  'controls.spec.ts': 1,
-  'dtmf.spec.ts': 1,
-  'recovery.spec.ts': 1,
-};
-
-test('every matrix step is backed by a declared test', () => {
-  for (const [file, expected] of Object.entries(SPEC_TESTS)) {
-    const source = stripCommentsAndTemplates(readFileSync(join(__dirname, file), 'utf8'));
-    const declared = source.match(/^\s*test\(/gm) ?? [];
-    // The count is EXACT on purpose. Adding a test is a deliberate change to the
-    // manifest and should be acknowledged by editing this table — that is the
-    // intent, not an oversight.
-    assert.strictEqual(
-      declared.length,
-      expected,
-      `${file} declares ${declared.length} tests, expected ${expected} — a step may have been deleted or renamed`,
+// The runner's OWN collection, in the shape the rule below compares against
+// MATRIX_MANIFEST. Two things are pinned rather than inherited, both of them
+// deliberate:
+//
+//   * `--project=chromium` — the manifest describes the tests, and chromium is
+//     the project the PR slice runs. Without it the collection doubles (18 =
+//     9 chromium + 9 firefox) and the set comparison would need a project
+//     dimension to tell the same test apart from itself.
+//   * `MATRIX_MODE=nightly` — `pr` excludes `audio.spec.ts` by `testMatch`, so
+//     an inherited `pr` would report 8 tests and turn step 4 into a false RED.
+//     The manifest is the complete one; say so here, not in the caller's env.
+//
+// It spawns the installed CLI by absolute path with `process.execPath`, so no
+// npm/npx wrapper is involved and no shell quoting is needed. `npm ci` precedes
+// this gate in both CI jobs.
+function collectMatrixTests() {
+  const root = join(__dirname, '..', '..');
+  const cli = join(root, 'node_modules', '@playwright', 'test', 'cli.js');
+  let stdout;
+  try {
+    stdout = execFileSync(
+      process.execPath,
+      [
+        cli,
+        'test',
+        `--config=${join(__dirname, 'playwright.config.ts')}`,
+        '--project=chromium',
+        '--list',
+        '--reporter=json',
+      ],
+      { cwd: root, encoding: 'utf8', env: { ...process.env, MATRIX_MODE: 'nightly' } },
     );
-    const skipped = source.match(/^\s*test\.(skip|fixme|only)\(/gm) ?? [];
-    assert.deepStrictEqual(
-      skipped,
-      [],
-      `${file} declares a skipped or focused test — a skipped step is not a passing step`,
-    );
-    // The floor the count rule cannot provide. A count is satisfied by a
-    // DECLARATION, so a test body gutted to nothing while its `test(` line
-    // survives leaves the whole gate at 11/11 and the page slice green — step 8
-    // then validates nothing at all. Measured by the re-review: exactly that,
-    // 11 pass / 0 fail. One `expect(` is the cheap non-vacuous half.
-    //
-    // KNOWN RESIDUAL, deliberate: a body reduced to ONE trivial assertion still
-    // passes this. No source-text rule can establish that a test still means what
-    // its name says, and this is incompleteness rather than vacuity — every
-    // assertion present is real. Do NOT "fix" it with an exact `expect(` count:
-    // that turns every legitimate test edit into a red gate, which is the failure
-    // mode this whole file exists to prevent. Measured `expect(` counts at the
-    // time of writing (register 7, audio 13, call-inbound 17, controls 26,
-    // dtmf 2, recovery 12) — for information, NOT asserted.
-    const assertions = source.match(/expect\(/g) ?? [];
-    assert.ok(
-      assertions.length >= 1,
-      `${file} declares a test but contains no expect( at all — the body was emptied and the step now validates nothing`,
+  } catch (err) {
+    // FAIL rather than fall back. The runner is the authority for this rule; a
+    // text match is known-bad in both directions and must not be resurrected.
+    assert.fail(
+      `could not list the matrix tests (${err.message}). This rule needs the ` +
+        `installed Playwright CLI; it deliberately does not fall back to reading source text.`,
     );
   }
-  // A file that vanished would be caught above only if it were still listed in
-  // SPEC_TESTS; tie the table itself to the manifest so the two cannot drift.
+  const report = JSON.parse(stdout);
   assert.deepStrictEqual(
-    Object.keys(SPEC_TESTS).sort(),
-    [...new Set(Object.values(MATRIX_STEPS))].sort(),
-    'SPEC_TESTS and MATRIX_STEPS disagree about which spec files exist',
+    report.errors,
+    [],
+    `playwright reported errors while loading the matrix specs: ${JSON.stringify(report.errors)}`,
   );
+  const collected = [];
+  const walk = (suite, prefix) => {
+    // The outermost suite of each file is titled with the file name; keeping it
+    // in the path would put the file name in the title twice.
+    const isFileRoot = typeof suite.file === 'string' && suite.title === suite.file;
+    const path = isFileRoot ? prefix : [...prefix, suite.title];
+    for (const child of suite.suites ?? []) walk(child, path);
+    for (const spec of suite.specs ?? []) {
+      collected.push({
+        file: spec.file ?? suite.file,
+        title: [...path, spec.title].join(' > '),
+        // `--list` reports every test as `status: 'skipped'` (nothing runs), so
+        // `status` says nothing here. `expectedStatus` is the real signal: a
+        // `test.skip(`/`test.fixme(` test is `'skipped'` while a live one is
+        // `'passed'`.
+        expectedStatus: (spec.tests ?? [])[0]?.expectedStatus,
+      });
+    }
+  };
+  for (const suite of report.suites ?? []) walk(suite, []);
+  return collected;
+}
+
+test('the runner collects exactly the tests MATRIX_MANIFEST names', () => {
+  const collected = collectMatrixTests();
+  const key = (t) => `${t.file} :: ${t.title}`;
+  const expected = [...new Set(Object.values(MATRIX_MANIFEST).map(key))].sort();
+  const actual = [...new Set(collected.map(key))].sort();
+  assert.deepStrictEqual(
+    actual,
+    expected,
+    'the runner and MATRIX_MANIFEST disagree about which tests exist — a step was ' +
+      'deleted, renamed or added, or a whole spec file stopped being collected',
+  );
+  // `test.skip(` and `test.fixme(` are still COLLECTED, so they need this second
+  // half. A skipped step is not a passing step. Measured: both report
+  // `expectedStatus: 'skipped'` while a live test reports `'passed'`, and
+  // `status` is useless here — list mode marks every test `'skipped'` because
+  // nothing runs.
+  assert.deepStrictEqual(
+    collected.filter((t) => t.expectedStatus !== 'passed').map((t) => `${key(t)} (${t.expectedStatus})`),
+    [],
+    'a matrix test is skipped or marked fixme — a skipped step is not a passing step',
+  );
+
+  // `test.only` is the ONE focused-test form the runner cannot see, and it stays
+  // a text match because of that measurement, not in spite of it: with
+  // `test.only` in dtmf.spec.ts, `--list` still reports all nine specs with
+  // `expectedStatus: 'passed'` (list mode does not apply the focus filter), and
+  // `forbidOnly: true` under CI=1 does not change that either — measured, exit 0,
+  // full JSON. So there is no runner signal to assert against, and WITHOUT this
+  // rule a focused test would shrink the run to one step with every gate green —
+  // verbatim the harm the whole manifest rule exists to prevent. Narrowed to the
+  // one form the runner is blind to; `skip`/`fixme` are NOT re-checked here.
+  //
+  // Its residual is the scanner's, and it points the safe way: a desync blanks
+  // text, so it can only HIDE a `test.only`, never invent one. It cannot turn a
+  // correct tree red.
+  for (const file of new Set(Object.values(MATRIX_MANIFEST).map((e) => e.file))) {
+    const source = stripCommentsAndTemplates(readFileSync(join(__dirname, file), 'utf8'));
+    assert.deepStrictEqual(
+      source.match(/^[ \t]*test\.only\(/gm) ?? [],
+      [],
+      `${file} declares a focused test — \`test.only\` does not run the other nine steps`,
+    );
+  }
+});
+
+// ── The floor: every test body still asserts something ─────────────────
+// `--list` proves a step exists and is still named. It cannot prove the body
+// still asserts anything. Measured by the round-2 re-review: deleting BOTH
+// `expect(` lines from `register.spec.ts`'s `refresh` test (step 2) — a file
+// with three tests — left this gate at 11 pass / 0 fail, exit 0, and the page
+// slice at 8 passed. `runStep` resolves `ok: false` rather than throwing
+// (test/matrix-shared/helpers.ts:133), so nothing else fails either: step 2
+// would validate nothing and every gate would report full green.
+//
+// So the floor is PER TEST, not per file. Count `expect(` per SEGMENT, where a
+// segment runs from one `test(` declaration to the next, and require at least
+// one in every segment. `expects >= tests` is NOT the rule — that passes when
+// one of three tests is gutted, which is the defect itself. Measured segments at
+// this revision: register [3,2,2], audio [13], call-inbound [8,9], controls
+// [26], dtmf [2], recovery [12].
+//
+// KNOWN RESIDUAL, deliberate, and it is incompleteness rather than vacuity: a
+// body reduced to ONE trivial assertion still passes, and a deliberate dodge
+// still wins outright — a single `const harmless = 'expect(';` satisfies the
+// floor, because no source-text rule can prove that an assertion actually
+// EXECUTES. Only running the step can, which is what the page slice is for. Do
+// NOT "fix" this with an exact `expect(` count: that turns every legitimate test
+// edit into a red gate, which is the failure mode this whole file exists to
+// prevent.
+const TEST_DECL = /^[ \t]*test\(/gm;
+
+// One segment per test declaration, taken from the blanked source so a `test(`
+// inside a comment or a template is not mistaken for a declaration. Falls back
+// to the raw text when the scanner found no declaration at all — see its KNOWN
+// LIMIT: a desync blanks whole files, and a silent floor is honest where a
+// fabricated RED is not.
+function assertionSegments(source) {
+  const stripped = stripCommentsAndTemplates(source);
+  let text = stripped;
+  let decls = [...stripped.matchAll(TEST_DECL)];
+  if (decls.length === 0) {
+    text = source;
+    decls = [...text.matchAll(TEST_DECL)];
+  }
+  return decls.map((decl, i) =>
+    text.slice(decl.index, i + 1 < decls.length ? decls[i + 1].index : text.length),
+  );
+}
+
+test('every declared test body still contains an assertion', () => {
+  for (const file of new Set(Object.values(MATRIX_MANIFEST).map((e) => e.file))) {
+    const segments = assertionSegments(readFileSync(join(__dirname, file), 'utf8'));
+    segments.forEach((body, i) => {
+      const assertions = body.match(/expect\(/g) ?? [];
+      assert.ok(
+        assertions.length >= 1,
+        `${file}: test ${i + 1} of ${segments.length} contains no expect( at all — that ` +
+          `step's body was emptied and it now validates nothing`,
+      );
+    });
+  }
 });
 
 // ── The unit gates cannot silently collect nothing ─────────────────────
