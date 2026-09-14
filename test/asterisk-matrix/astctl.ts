@@ -282,6 +282,18 @@ export async function stopAsterisk(h: AstHandle): Promise<void> {
  * itself — was never tested, so it is recorded as the likely explanation and
  * NOT as a finding. Nothing here depends on which it is: the filter is correct
  * either way, because only the browser's inbound digit arrives as `Received`.
+ *
+ * AMI has no per-action event subscription — a logged-in session receives every
+ * event class (ast-conf/manager.conf is `read = all`) — so this needs nothing
+ * from the client beyond the login it already does.
+ *
+ * Each wait is deadline-bound (`timeoutMs`, 30 s by default) and THROWS on
+ * expiry rather than resolving a shorter string. A sequence that arrives SHORT
+ * therefore rejects here, at the collector, and never reaches the caller's
+ * equality assertion — measured as this step's dominant failure shape
+ * (`AMI: timed out after 30000ms waiting for DTMFEnd 2 of 5`). A sequence that
+ * arrives with the WRONG digits passes the collector and fails at the assertion
+ * instead. Short and wrong are different failures with different places to look.
  */
 export async function collectDtmf(ami: AmiClient, count: number, timeoutMs = 30_000): Promise<string> {
   const digits: string[] = [];
