@@ -49,7 +49,9 @@
     "test:matrix:unit": "vitest run test/matrix-shared/*.unit.test.ts test/freeswitch-matrix/*.unit.test.ts",
     "test:matrix:infra": "npx vitest run --config test/freeswitch-matrix/vitest.config.ts test/freeswitch-matrix/*.infra.test.ts",
     "test:matrix:integrity": "node --test test/freeswitch-matrix/*.test.mjs",
-    "test:matrix:page": "npx playwright test --config=test/freeswitch-matrix/playwright.config.ts"
+    "test:matrix:page": "npx playwright test --config=test/freeswitch-matrix/playwright.config.ts",
+    "test:astmatrix:unit": "vitest run test/matrix-shared/*.unit.test.ts test/asterisk-matrix/*.unit.test.ts",
+    "test:astmatrix:infra": "npx vitest run --config test/asterisk-matrix/vitest.config.ts test/asterisk-matrix/*.infra.test.ts"
   },
   "devDependencies": {
     "@microsoft/api-extractor": "7.58.12",
