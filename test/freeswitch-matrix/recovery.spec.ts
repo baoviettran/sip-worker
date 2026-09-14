@@ -23,9 +23,9 @@
 import { test, expect } from '@playwright/test';
 import { copyFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { createSocket, type RemoteInfo, type Socket } from 'node:dgram';
 import { bootMatrix, disposeMatrix, runStep } from './helpers';
 import { type FsHandle } from './fsctl';
+import { startStunResponder } from '../matrix-shared/stun';
 
 const CREDENTIALS = { user: '1000', password: 'matrix-pass-2026' };
 
@@ -40,49 +40,6 @@ function ensureDtlsPem(handle: FsHandle): void {
   if (!existsSync(dtlsPem)) {
     copyFileSync(join(tlsDir, 'wss.pem'), dtlsPem);
   }
-}
-
-/**
- * Minimal RFC 5389 STUN server on loopback (same rationale as audio.spec.ts:
- * the srflx 127.0.0.1 candidate it teaches the page is not mDNS-obfuscated
- * and passes the FreeSWITCH candidate ACL).
- */
-function startStunResponder(): Promise<{ port: number; close: () => Promise<void> }> {
-  const socket: Socket = createSocket('udp4');
-  socket.on('message', (msg: Buffer, rinfo: RemoteInfo) => {
-    if (msg.length < 20 || msg[0] !== 0x00 || msg[1] !== 0x01) return;
-    const res = Buffer.alloc(32);
-    res[0] = 0x01;
-    res[1] = 0x01; // Binding Response
-    res[2] = 0x00;
-    res[3] = 0x0c;
-    msg.copy(res, 4, 4, 20);
-    res[20] = 0x00;
-    res[21] = 0x20;
-    res[22] = 0x00;
-    res[23] = 0x08;
-    res[24] = 0x00;
-    res[25] = 0x01;
-    const xport = rinfo.port ^ 0x2112;
-    res[26] = (xport >> 8) & 0xff;
-    res[27] = xport & 0xff;
-    res.writeUInt32BE((0x7f000001 ^ 0x2112a442) >>> 0, 28);
-    socket.send(res, rinfo.port, rinfo.address);
-  });
-  return new Promise((resolve, reject) => {
-    socket.once('error', reject);
-    socket.bind(0, '127.0.0.1', () => {
-      socket.removeListener('error', reject);
-      resolve({
-        port: (socket.address() as { port: number }).port,
-        close: () =>
-          new Promise<void>((res) => {
-            socket.once('close', () => res());
-            socket.close();
-          }),
-      });
-    });
-  });
 }
 
 interface RecoveryStepResult {
