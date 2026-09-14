@@ -283,12 +283,19 @@ export class DialogNegotiator {
    * Max-Forwards/Route only, and `Dialog.contact` is the REMOTE target (the
    * peer's Contact), so the local one has to be added here.
    *
-   * RFC 3261 12.1.1: a re-INVITE is a target refresh, so the UAC MUST put its
-   * own Contact in the request. Measured, not assumed: Asterisk (pjsip)
-   * answers a re-INVITE without one `400 Missing Contact header` and the
-   * request never reaches the dialplan, while sofia-sip (FreeSWITCH)
-   * tolerates the omission — which is why the FreeSWITCH matrix passed
-   * without this and only the Asterisk matrix could find it.
+   * RFC 3261 12.2.1 (UAC behavior, requests within a dialog): a UAC SHOULD
+   * include a Contact in any target refresh request, and unless there is a need
+   * to change it the URI SHOULD be the same as in previous requests — which is
+   * exactly the value set here, `options.contact`, the one the
+   * dialog-establishing request already used. SHOULD is the whole of the RFC's
+   * normative weight for a re-INVITE: 8.1.1.8's MUST is scoped to requests that
+   * can establish a dialog, and 12.1.1 is UAS behavior, not ours.
+   *
+   * The load-bearing fact is the peer's behavior, not the normative level:
+   * Asterisk enforces it as a hard `400 Missing Contact header`, so the
+   * re-INVITE never reaches the dialplan and hold never engages. sofia-sip
+   * tolerates the omission, which is why the frozen FreeSWITCH matrix passed
+   * without this and only the Asterisk leg could find it.
    */
   private buildReinvite(dialog: Dialog, sdp: string): SipRequestMessage {
     const request = withTextBody(dialog.createRequest('INVITE'), sdp, 'application/sdp') as SipRequestMessage;

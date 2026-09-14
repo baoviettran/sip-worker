@@ -298,21 +298,25 @@ interface StepArgs {
   /** Media codec preference override (dtmf step: see runDtmfStep). */
   codecPreference?: readonly ('opus' | 'PCMU' | 'PCMA')[];
   /**
-   * Port of the node-side STUN responder. Consumed by ANY step that builds an
-   * RTCPeerConnection — `audio`, `wait-incoming`, `answer-incoming` and `hold`
-   * all pass it today, each on a stack where the offer needs it — because
-   * `buildPhone` wires it into that step's `iceServers` whenever `readStepArgs`
-   * carries it through. Not an audio-step option.
+   * Port of the node-side STUN responder. Consumed by any step that builds an
+   * RTCPeerConnection: `buildPhone` wires it into that step's `iceServers`
+   * whenever `readStepArgs` carries it through. Not an audio-step option, and
+   * the callers are deliberately not listed here — the list goes stale the next
+   * time a step is added.
    *
-   * Why a stack needs it, as MEASURED (not as an assumed ACL rule): with no
-   * srflx 127.0.0.1 candidate the offer carries only Chromium's mDNS-obfuscated
-   * *.local host candidates, and on Asterisk pjsip does not resolve those — the
-   * dialog still reaches `established`, then NO media ever flows, a silent-media
-   * failure that reads like a media/control bug rather than an ICE one. The full
-   * measurement, including which part of the causal account is hypothesis rather
-   * than observation, is in `test/asterisk-matrix/audio.spec.ts`'s header; the
-   * FreeSWITCH half is recorded in `test/matrix-shared/stun.ts`. Neither is
-   * restated here.
+   * WHY a step needs it is per stack, and no single account covers both:
+   *   - FreeSWITCH rejects the offer's mDNS-obfuscated *.local host candidates
+   *     outright — sofia's apply-candidate-acl (wan.auto), 488. Account in
+   *     `test/matrix-shared/stun.ts`.
+   *   - Asterisk accepts the offer and the dialog reaches `established`, then NO
+   *     media ever flows, because pjsip does not resolve those `.local`
+   *     candidates — a silent-media failure that reads like a media/control bug
+   *     rather than an ICE one. Full measurement, including which part of the
+   *     causal account is hypothesis rather than observation, in
+   *     `test/asterisk-matrix/audio.spec.ts`'s header.
+   *
+   * In both cases the STUN-learned srflx 127.0.0.1 candidate is NOT obfuscated
+   * and is one the PBX can reach. Neither account is restated here.
    */
   stunPort?: number;
   /**
@@ -364,7 +368,9 @@ function buildPhone(
   const domain = '127.0.0.1';
   // When a node-side STUN responder is provided, the ICE agent gathers an
   // srflx 127.0.0.1 candidate (see StepArgs.stunPort) alongside the mDNS host
-  // candidates, so the offer passes the FreeSWITCH candidate ACL.
+  // candidates. What that fixes is per stack — sofia's candidate ACL on
+  // FreeSWITCH, pjsip not resolving `.local` on Asterisk — and each stack's
+  // account is recorded where it was measured, not here (StepArgs.stunPort).
   // iceServers is a media-level option (BrowserMediaOptions).
   const diagEvents = opts?.diagnosticsEvents;
   const media: BrowserPhoneOptions['media'] | undefined =

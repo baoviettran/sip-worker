@@ -397,9 +397,10 @@ describe('DialogNegotiator', () => {
       expect(cseqNumber).toBe(initialInviteCSeq + 1);
       expect(reinvite.headers.get('Content-Type')).toBe('application/sdp');
       expect(reinvite.headers.get('To')).toContain(`tag=${h.dialog.remoteTag}`);
-      // RFC 3261 12.1.1 target refresh: an in-dialog re-INVITE MUST carry our
-      // Contact. Measured against Asterisk: pjsip answers a re-INVITE without
-      // one `400 Missing Contact header` and the request never reaches the
+      // RFC 3261 12.2.1: a UAC SHOULD include a Contact in a target refresh
+      // request within a dialog. SHOULD, not MUST — but the peer makes it
+      // load-bearing: Asterisk answers a re-INVITE without one
+      // `400 Missing Contact header` and the request never reaches the
       // dialplan (sofia-sip tolerates the omission, so the FreeSWITCH matrix
       // passed without this).
       expect(reinvite.headers.get('Contact')).toBe(CONTACT);
