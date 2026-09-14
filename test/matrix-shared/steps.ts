@@ -298,11 +298,21 @@ interface StepArgs {
   /** Media codec preference override (dtmf step: see runDtmfStep). */
   codecPreference?: readonly ('opus' | 'PCMU' | 'PCMA')[];
   /**
-   * Port of the node-side STUN responder (audio step only). Chromium obfuscates
-   * host ICE candidates as mDNS *.local names, which the FreeSWITCH
-   * apply-candidate-acl (wan.auto) rejects outright; a STUN-learned srflx
-   * candidate for 127.0.0.1 is NOT obfuscated and loopback is allowed, so the
-   * offer carries a candidate FS accepts.
+   * Port of the node-side STUN responder. Consumed by ANY step that builds an
+   * RTCPeerConnection — `audio`, `wait-incoming`, `answer-incoming` and `hold`
+   * all pass it today, each on a stack where the offer needs it — because
+   * `buildPhone` wires it into that step's `iceServers` whenever `readStepArgs`
+   * carries it through. Not an audio-step option.
+   *
+   * Why a stack needs it, as MEASURED (not as an assumed ACL rule): with no
+   * srflx 127.0.0.1 candidate the offer carries only Chromium's mDNS-obfuscated
+   * *.local host candidates, and on Asterisk pjsip does not resolve those — the
+   * dialog still reaches `established`, then NO media ever flows, a silent-media
+   * failure that reads like a media/control bug rather than an ICE one. The full
+   * measurement, including which part of the causal account is hypothesis rather
+   * than observation, is in `test/asterisk-matrix/audio.spec.ts`'s header; the
+   * FreeSWITCH half is recorded in `test/matrix-shared/stun.ts`. Neither is
+   * restated here.
    */
   stunPort?: number;
   /**
