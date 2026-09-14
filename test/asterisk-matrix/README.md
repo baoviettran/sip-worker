@@ -36,7 +36,7 @@ renders them into the config. The one fixed range is RTP, `20102-20202`
 ### Without docker (fast, no infra)
 
 ```bash
-npm run test:astmatrix:unit        # vitest: RMS, STUN, config surface, profile, AMI framing
+npm run test:astmatrix:unit        # vitest: RMS/WAV, STUN, TLS minting, renderAstConf, AMI framing
 npm run test:astmatrix:integrity   # node --test: integrity + boundary gates
 ```
 

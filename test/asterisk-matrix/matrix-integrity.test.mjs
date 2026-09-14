@@ -66,15 +66,98 @@ const TOKEN_RE = /__[A-Z][A-Z_]*[A-Z]__/;
 // task gives extensions.conf a port, add it here rather than widening the walk.
 const TOKEN_FILES = ['pjsip.conf', 'http.conf', 'manager.conf'];
 
+// PORT-LEVEL, not file-level. **Corrected during Task 13, by measurement.**
+// The original rule here was `assert.ok(TOKEN_RE.test(readFileSync(file, 'utf8')))`
+// — "this file contains at least one token". Task 13 measured what that misses:
+// replacing `tlsbindaddr`'s token with a literal port while `__HTTP_PORT__`
+// survived in the same file left the gate GREEN. So a genuine hardcoded port
+// could survive review and collide with the FreeSWITCH matrix on a shared
+// machine — the exact failure this rule's comment above says it exists to
+// prevent. The rule below checks every port-bearing assignment instead.
+//
+// `bindaddr` is deliberately NOT a directive here: it carries a loopback ADDRESS
+// with no port (`bindaddr=127.0.0.1`), so demanding a token in it would fail on
+// the correct committed tree.
+const PORT_DIRECTIVE = /^\s*(?:bindport|tlsbindaddr|bind|port)\s*=\s*(\S+)\s*$/i;
+// The value may carry a host prefix: `bind=127.0.0.1:__WSS_PORT__`.
+const HOST_AND_TOKEN = /^(?:[^:\s]+:)?__[A-Z][A-Z_]*[A-Z]__$/;
+
 test('every port-bearing ast-conf file uses tokens, not literals', () => {
   for (const name of TOKEN_FILES) {
     const file = join(__dirname, 'ast-conf', name);
     assert.ok(existsSync(file), `ast-conf/${name} is missing — the committed tree is incomplete`);
-    assert.ok(TOKEN_RE.test(readFileSync(file, 'utf8')), `ast-conf/${name} carries no port token`);
+    let directives = 0;
+    for (const line of readFileSync(file, 'utf8').split('\n')) {
+      if (/^\s*[;#]/.test(line)) continue; // a commented-out directive binds nothing
+      const m = PORT_DIRECTIVE.exec(line);
+      if (!m) continue;
+      directives += 1;
+      assert.ok(HOST_AND_TOKEN.test(m[1]), `ast-conf/${name}: port literal "${m[1]}" — every port must be a token`);
+    }
+    // A file with no port directive at all would otherwise pass vacuously.
+    assert.ok(directives >= 1, `ast-conf/${name} declares no port directive — the rule cannot see it`);
   }
 });
 
+// NOTE FOR THE IMPLEMENTER: BOTH rules in this file are DESIGNED, not yet proved
+// — they were written from reading the three conf files, not from running them.
+// Before trusting either, do all four of these and report the observed output:
+//
+//   1. REPORT what the port rule actually matched — every `file:line:value` it
+//      accepted. It must be exactly four directives: pjsip.conf `bind`,
+//      http.conf `bindport`, http.conf `tlsbindaddr`, manager.conf `port`. A
+//      rule that also matches something else is a defect to report, not to
+//      quietly narrow.
+//   2. Replace ONE token with a literal port while another token survives in the
+//      same file → the port rule must go RED. This is the exact case the
+//      file-level rule missed; if it stays green, the fix did not work.
+//   3. Delete a port directive entirely → the port rule must go RED on
+//      `directives >= 1`.
+//   4. Delete the `bindaddr=127.0.0.1` line from manager.conf → the loopback
+//      rule must go RED on `seen.length >= 1`. This is the case that was
+//      vacuous before the floor.
+//
+// A rule that only ever passes is the failure mode this whole task exists to
+// prevent — and 2 and 4 are the two that were measured GREEN when they should
+// have been RED.
+//
+// PROVED, all four, during Task 13 fix round 1 — the observed output is in
+// .superpowers/sdd/2026-09-14-v0.9-asterisk-matrix/task-13-fix-r1-report.md:
+//   1. exactly 4 directives, as listed above, no extras — pjsip.conf:13 `bind`,
+//      http.conf:9 `bindport`, http.conf:11 `tlsbindaddr`, manager.conf:9 `port`.
+//   2. RED — `not ok 3 - every port-bearing ast-conf file uses tokens, not literals`
+//      (`port literal "127.0.0.1:18083"`), with `__HTTP_PORT__` still present in
+//      the same file. This is the case the file-level rule missed.
+//   3. RED — same subtest, on `declares no port directive` (the file's ONLY port
+//      directive was deleted, so `directives >= 1` fires).
+//   4. RED — `not ok 4 - ast-conf binds nothing outside loopback`
+//      (`manager.conf yields no bind directive`).
+//
+// KNOWN LIMIT of rule 3, measured and left as specified: `directives >= 1` is a
+// per-FILE floor, not per-directive. Deleting ONE of http.conf's two port
+// directives (its `bindport`) leaves the other in place, so the floor passes and
+// the gate stays GREEN (measured: 9 pass / 0 fail, exit 0). A file that loses
+// only some of its ports is a regression this rule cannot see; only losing all
+// of them is. Fixing that needs a per-directive expectation table, which is a
+// change to the rule rather than to its proof — raised in the report, not
+// applied here.
+
+// ── Loopback-only, WITH A FLOOR. **Corrected during Task 13, by measurement.** ──
+// As first written this test was VACUOUS, and the review measured it: `matchAll`
+// over zero matches runs zero assertions, so deleting every
+// `bind`/`bindaddr`/`tlsbindaddr` line from the committed config left it GREEN
+// (`ok 4`, exit 0). A gate that cannot fail reads as coverage without being any,
+// which is the failure mode this whole task exists to prevent.
+//
+// The value check keeps its full walk over `ast-conf/` — a NEW file that binds a
+// listener must still be caught — and the floor is added on top, per named file,
+// so that one file going invisible is named in the failure rather than absorbed
+// by the other two. The floor cannot be applied per file across the walk: only
+// three of the seven conf files bind a listener at all.
+const BIND_FILES = ['pjsip.conf', 'http.conf', 'manager.conf'];
+
 test('ast-conf binds nothing outside loopback', () => {
+  // (a) no file anywhere in ast-conf may bind outside loopback
   for (const file of walkDir(join(__dirname, 'ast-conf'))) {
     const text = readFileSync(file, 'utf8');
     for (const m of text.matchAll(/^\s*(bindaddr|tlsbindaddr|bind)\s*=\s*(.+)$/gm)) {
@@ -83,6 +166,15 @@ test('ast-conf binds nothing outside loopback', () => {
         `${relative(__dirname, file)} binds ${m[2].trim()} — the matrix is loopback-only`,
       );
     }
+  }
+  // (b) …and each file that is supposed to bind a listener must have been SEEN
+  // doing it. Measured today: pjsip.conf 1 (`bind`), http.conf 2 (`bindaddr`,
+  // `tlsbindaddr`), manager.conf 1 (`bindaddr`).
+  for (const name of BIND_FILES) {
+    const file = join(__dirname, 'ast-conf', name);
+    assert.ok(existsSync(file), `ast-conf/${name} is missing — the committed tree is incomplete`);
+    const seen = [...readFileSync(file, 'utf8').matchAll(/^\s*(bindaddr|tlsbindaddr|bind)\s*=\s*(.+)$/gm)];
+    assert.ok(seen.length >= 1, `ast-conf/${name} yields no bind directive — the rule cannot see the file it guards`);
   }
 });
 

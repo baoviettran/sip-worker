@@ -111,13 +111,25 @@ test('no harness file imports across the packed-tarball boundary', () => {
 });
 
 test('the trees were actually walked (floor check)', () => {
-  // Per tree, NOT on the aggregate. Measured: the three trees hold 11 + 15 + 19
-  // = 45 scanned files today, so an aggregate floor of 30 is satisfied by any
-  // two of them (asterisk + freeswitch alone is 34) — it cannot see a tree that
-  // dropped out of TREES, which is the one thing this check exists to notice. A
-  // per-tree floor of 5 keeps real headroom (the smallest tree has 11) and fails
+  // Per tree, NOT on the aggregate. MEASURED AT THIS TASK'S HEAD: the three trees
+  // hold 12 + 18 + 19 = 49 scanned files, so an aggregate floor of 30 is satisfied
+  // by any two of them (asterisk + freeswitch alone is 37) — it cannot see a tree
+  // that dropped out of TREES, which is the one thing this check exists to notice.
+  // A per-tree floor of 5 keeps real headroom (the smallest tree has 12) and fails
   // loudly on a tree that contributed nothing. The aggregate form would have
   // passed the exact mutation it was written to catch.
+  //
+  // Re-measured during Task 13: the numbers here were stale ("11 + 15 + 19 = 45",
+  // a snapshot from before this workstream added a file to the other two trees),
+  // which is a small thing but exactly the kind of number a later reader reuses
+  // without checking. Re-measure if a tree gains a file. The ARGUMENT does not
+  // depend on the exact figures — only on the aggregate being satisfiable by two
+  // trees while the smallest still clears the per-tree floor.
+  //
+  // Stronger than the above, and worth the line: EVERY one of the three pairs
+  // clears an aggregate floor of 30 — 12 + 18 = 30 exactly, 12 + 19 = 31, and
+  // 18 + 19 = 37. The aggregate form is not merely satisfiable without the
+  // smallest tree; it is satisfiable without ANY one of them.
   for (const t of TREES) {
     const n = walk(join(testDir, t)).length;
     assert.ok(n >= 5, `only ${n} files scanned under ${t} — that tree was not walked`);
