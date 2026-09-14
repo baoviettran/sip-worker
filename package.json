@@ -51,7 +51,8 @@
     "test:matrix:integrity": "node --test test/freeswitch-matrix/*.test.mjs",
     "test:matrix:page": "npx playwright test --config=test/freeswitch-matrix/playwright.config.ts",
     "test:astmatrix:unit": "vitest run test/matrix-shared/*.unit.test.ts test/asterisk-matrix/*.unit.test.ts",
-    "test:astmatrix:infra": "npx vitest run --config test/asterisk-matrix/vitest.config.ts test/asterisk-matrix/*.infra.test.ts"
+    "test:astmatrix:infra": "npx vitest run --config test/asterisk-matrix/vitest.config.ts test/asterisk-matrix/*.infra.test.ts",
+    "test:astmatrix:page": "npx playwright test --config=test/asterisk-matrix/playwright.config.ts"
   },
   "devDependencies": {
     "@microsoft/api-extractor": "7.58.12",
