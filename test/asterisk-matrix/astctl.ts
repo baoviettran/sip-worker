@@ -264,23 +264,24 @@ export async function stopAsterisk(h: AstHandle): Promise<void> {
 }
 
 /**
- * The next `count` DTMF digits Asterisk observed, in order. Waits on DTMFEnd
- * with `Direction: Received` — MEASURED on the pinned image, and both halves of
- * that predicate are load-bearing:
+ * The next `count` DTMF digits Asterisk observed, in order.
  *
- *   - A single RFC 4733 digit raises DTMFBegin AND DTMFEnd, so waiting on Begin
- *     would double-count and the sequence assertion would be meaningless.
- *   - Every digit arrives TWICE, once `Direction: Received` and once
- *     `Direction: Sent`: the matrix's target is `Echo()`, which re-emits the
- *     digit it just received back down the channel. A bare `Event === 'DTMFEnd'`
- *     predicate therefore matches both and returns `11223` for a `1234#` send —
- *     measured, not hypothesised; that is the failure this filter fixes.
+ * The predicate is deliberately DIRECTION-SPECIFIC — do not simplify it back to a
+ * bare `DTMFEnd`. That is what makes the returned sequence meaningful.
  *
- * AMI has no per-action event subscription — a logged-in session receives every
- * event class (ast-conf/manager.conf is `read = all`) — so this needs nothing
- * from the client beyond the login it already does. Each wait is deadline-bound
- * and throws on expiry; a sequence that arrives short or out of order rejects
- * here rather than resolving a shorter string.
+ * MEASURED against the pinned image: a single RFC 4733 digit raises `DTMFEnd`
+ * TWICE, once with `Direction: Received` and once with `Direction: Sent`, so a
+ * bare `DTMFEnd` predicate returns a DOUBLED string (an early draft of this plan
+ * would have produced `1122*` for a `12*45` send) and the equality assertion then
+ * fails on the wrong thing entirely. An AMI transcript of a single digit shows
+ * the `Received` event and its `Sent` twin, in order.
+ *
+ * INFERRED, NOT MEASURED: that the `Sent` twin comes from `Echo()` re-emitting
+ * the digit back down the channel. The OBSERVATION is the direction pair; the
+ * CAUSE of the `Sent` event — the echo application, versus the channel driver
+ * itself — was never tested, so it is recorded as the likely explanation and
+ * NOT as a finding. Nothing here depends on which it is: the filter is correct
+ * either way, because only the browser's inbound digit arrives as `Received`.
  */
 export async function collectDtmf(ami: AmiClient, count: number, timeoutMs = 30_000): Promise<string> {
   const digits: string[] = [];
