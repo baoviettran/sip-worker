@@ -3,13 +3,14 @@
 // label, the handle env var (unchanged, so CI needs no edit), the page port,
 // and the container controller.
 import { join } from 'node:path';
-import { startFreeSwitch, stopFreeSwitch, type FsHandle } from './fsctl';
+import { startFreeSwitch, stopFreeSwitch, FS_IMAGE, type FsHandle } from './fsctl';
 import { createMatrixHelpers } from '../matrix-shared/helpers';
 
 const h = createMatrixHelpers<FsHandle>({
   label: 'FreeSWITCH',
   handleEnvVar: 'MATRIX_FS_HANDLE_FILE',
   defaultHttpPort: 4500,
+  imageRef: FS_IMAGE,
   boot: () => startFreeSwitch(join(import.meta.dirname, 'fs-conf')),
   stop: stopFreeSwitch,
 });

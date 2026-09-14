@@ -5,8 +5,8 @@
 // workers can read it. Playwright registers a function RETURNED from
 // globalSetup as teardown, so the container stops there — there is no separate
 // globalTeardown file. bootMatrix opens the harness page with the per-run WSS
-// port in the ?wss= query (the page server is PBX-agnostic); runStep invokes the
-// page global __runMatrixStep.
+// port in the ?wss= query and the PBX image under test in ?image= (the page
+// server is PBX-agnostic); runStep invokes the page global __runMatrixStep.
 import type { Page } from '@playwright/test';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -44,6 +44,8 @@ export interface MatrixHarnessOptions<H extends MatrixHandle> {
   handleEnvVar: string;
   /** Page-server port when MATRIX_HTTP_PORT is unset. */
   defaultHttpPort: number;
+  /** The digest-pinned PBX image under test, carried in the ?image= query. */
+  imageRef: string;
   boot: () => Promise<H>;
   stop: (h: H) => Promise<void>;
 }
@@ -90,7 +92,7 @@ export function createMatrixHelpers<H extends MatrixHandle>(opts: MatrixHarnessO
   /** Navigate to the harness page, wait for the packed bundle to boot, unlock audio. */
   async function bootMatrix(page: Page): Promise<MatrixContext<H>> {
     const handle = readHandle();
-    const url = `${baseUrl}/index.html?wss=${handle.wssPort}&run=${++bootSeq}`;
+    const url = `${baseUrl}/index.html?wss=${handle.wssPort}&image=${encodeURIComponent(opts.imageRef)}&run=${++bootSeq}`;
     await page.goto(url, { waitUntil: 'domcontentloaded' });
     // The packed bundle sets this after wiring __runMatrixStep; a script-tag
     // failure (the server's 503) leaves it false and surfaces in the timeout.
