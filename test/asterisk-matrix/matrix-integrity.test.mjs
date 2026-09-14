@@ -180,18 +180,12 @@ test('the runner collects exactly the tests MATRIX_MANIFEST names', () => {
   );
 
   // `test.only` is the ONE focused-test form the runner cannot see, and THAT
-  // measurement is why a source-level rule exists at all: with `test.only` in
-  // dtmf.spec.ts, `--list` still reports all nine specs with
-  // `expectedStatus: 'passed'` (list mode does not apply the focus filter), and
-  // `forbidOnly: true` under CI=1 does not change that either — measured, exit 0,
-  // full JSON. `forbidOnly` is not set in playwright.config.ts in any case
+  // measurement is why a source-level rule exists at all: `--list` does not
+  // apply the focus filter and `forbidOnly` is not set in playwright.config.ts
   // (measured: the config does not mention it), so there is no runner-level
-  // backstop either. Without a source-level rule a focused test would shrink the
-  // run to one step with every gate green — verbatim the harm this whole
-  // manifest rule exists to prevent. The rule itself now lives in the AST walk
-  // below, which is narrowed the same way: it rejects the annotated declarations
-  // (`test.only` among them) and does NOT re-check what `--list` already covers
-  // as a set.
+  // backstop. The rule itself now lives in the AST walk below, and F20 widened it
+  // to the describe-level form as well; the measurements behind both are
+  // recorded with the classifier, not here.
   //
   // Corrected here: the text rule this replaced claimed "a desync blanks text,
   // so it can only HIDE a `test.only`, never invent one. It cannot turn a
@@ -237,9 +231,173 @@ test('the runner collects exactly the tests MATRIX_MANIFEST names', () => {
 // 'expect(';` used to satisfy the floor because it was a SUBSTRING match. A
 // string literal is not a CallExpression, so it no longer counts.
 const SPEC_FILES = [...new Set(Object.values(MATRIX_MANIFEST).map((e) => e.file))];
-// `test` alone is a step; `test.<word>` is an ANNOTATED declaration (the rule
-// below rejects every annotation except `describe`, which is a container).
-const ANNOTATED_TEST = /^test\.([A-Za-z]+)$/;
+
+// ── Classify the callee by STRUCTURE, not by an exact string ───────────
+// Round 4 decided what a declaration was by comparing the callee's TEXT against
+// exact strings at three sites: `/^test\.([A-Za-z]+)$/` (single-dot),
+// `=== 'test.describe'` and `=== 'expect'`. That ONE root cause produced both
+// defects this round closes, in opposite directions:
+//
+//   * F20 (critical) — `test.describe.only(` matched NEITHER arm of the
+//     declaration test: it is not `test`, and the regex allowed one dot where
+//     the callee has two. So it was neither a step nor rejected, and it
+//     contributed no title prefix either. MEASURED on the round-4 gate: with
+//     `.only` on the dtmf describe plus one title rewritten as a template that
+//     evaluates to the SAME string, the gate reported `# pass 12 # fail 0`,
+//     exit 0 (14/0 through the npm script), while the PR page slice went from
+//     `Running 8 tests / 8 passed` to `Running 1 test / 1 passed` — 7 of the
+//     slice's 8 steps stopped running with every gate green. The only rule that
+//     noticed anything was the cross-check's STRICT branch, and any dynamic
+//     title anywhere in the six files disables it: its fallback compares
+//     per-file counts, and focus changes no count.
+//   * F21 (medium, a round-4 REGRESSION) — EVERY `test.<word>` that was not
+//     `describe` was pushed as a step declaration. MEASURED on the round-4
+//     gate, each applied alone to an otherwise correct tree: `test.step(`,
+//     `test.use(`, `test.slow(` and `test.setTimeout(` each turned it RED
+//     (blaming, for `test.slow`/`test.setTimeout`, a `<non-literal title>`
+//     invented from their first argument), and a body whose only assertion was
+//     `expect.soft(` failed the floor. Round 3 was GREEN on all of these. The
+//     standard is the comment further down: a gate that fails on correct code is
+//     a gate someone deletes.
+//
+// ONE classifier over the callee's dot-segments closes both. It is read off the
+// TREE, so whitespace and optional chaining cannot smuggle a form past it:
+//
+//   | callee                            | classification      | action |
+//   | `test`                            | step                | declared; body needs >= 1 assertion |
+//   | `test.only/.skip/.fixme/.fail`    | annotated step      | REJECT by name |
+//   | `test.<other>`                    | Playwright API call | IGNORE — not a step, not rejected |
+//   | `test.describe`                   | container           | contributes its title prefix |
+//   | `test.describe.only/.skip/.fixme` | annotated container | REJECT by name, stating which |
+//   | `test.describe.configure`         | container modifier  | IGNORE; contributes NO prefix (it takes an object, not a title) |
+//   | `test.describe.<other>`           | container           | contributes its title prefix; NOT rejected |
+//
+// The last row is deliberate. `test.describe.parallel` and `.serial` are
+// legitimate (deprecated) Playwright forms, and rejecting unrecognised describe
+// forms would rebuild F21's false RED in the very place a "tightening" is
+// easiest to justify. Exactly `only` / `skip` / `fixme` are rejected under
+// `describe` — a finite, well-defined set.
+//
+// **Why IGNORING `test.<other>` is safe, and must not be "tightened" later:**
+// Playwright collects a test ONLY from `test(`, `test.only(`, `test.skip(`,
+// `test.fixme(` or `test.fail(`. The four annotations are rejected by name and
+// plain `test(` is a step, so every COLLECTABLE form is classified. If a
+// `test.<other>` call ever hid a collectable step, the runner would collect it
+// and this parse would not — the declared and collected sets would disagree,
+// which is exactly what the cross-check below exists to make RED.
+//
+// KNOWN RESIDUAL (measured, disclosed, not fixed): this classifier reads the
+// WRITTEN call. A callee reached through an alias (`const d = test.describe;
+// d.only(…)`) or a computed member (`test['describe'].only(…)`) is not rooted at
+// the identifier `test`, so it is ignored here. The way that fails is NARROW and
+// measured: a step declaration hidden that way shows up as declared ⊂ collected
+// (the cross-check's strict branch catches it, and so does the count fallback,
+// since a hidden declaration changes a file's count); but `test.describe.only`
+// spelled that way LOSES ONLY A TITLE PREFIX, and the count fallback cannot see
+// a lost prefix. So a non-canonical describe focus is caught today only when
+// every title in the six files is a string literal. Closing that needs a
+// runner-level `forbidOnly`, which playwright.config.ts does not set — that is
+// recorded as a residual in the round-5 report rather than papered over here.
+function rootedSegments(node, root) {
+  const segs = [];
+  let e = node.expression;
+  for (;;) {
+    if (ts.isPropertyAccessExpression(e)) {
+      segs.unshift(e.name.text);
+      e = e.expression;
+      continue;
+    }
+    // `test!.only(…)` and `(test.describe)(…)` reach the same call.
+    if (ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e)) {
+      e = e.expression;
+      continue;
+    }
+    break;
+  }
+  if (!ts.isIdentifier(e) || e.text !== root) return null;
+  return segs;
+}
+
+// Step-level annotations. Playwright accepts these four on a step. The SUITE set
+// below is the same minus `fail`: there is no `test.describe.fail`, so
+// `test.describe.fail` is left to the container row rather than rejected by a
+// rule that would then be guessing.
+const STEP_ANNOTATIONS = new Set(['only', 'skip', 'fixme', 'fail']);
+const SUITE_ANNOTATIONS = new Set(['only', 'skip', 'fixme']);
+
+// Why each annotated form is rejected, in the failure message itself. Named
+// explicitly so a later reader does not "simplify" one of them away as
+// redundant with the `--list` rule above — each is a form `--list` cannot see:
+//
+//   * `test.only` — `--list` does not apply the focus filter (measured: all nine
+//     still report `expectedStatus: 'passed'`), and `forbidOnly` is NOT set in
+//     playwright.config.ts, so this rule is the only defence.
+//   * `test.skip` / `test.fixme` — collected, and caught by the `--list` rule's
+//     `expectedStatus !== 'passed'` half as well. Named here so the failure
+//     points at the declaration rather than at the runner's report.
+//   * `test.fail` — **NOT redundant with the `--list` rule**: measured, `--list`
+//     reports `expectedStatus: 'passed'` for it (unlike skip/fixme, which report
+//     `'skipped'`), so Rule 3 above is blind to it; and a `test.fail` test whose
+//     assertion IS broken reports `1 passed`, exit 0 (measured with real
+//     Chromium by the round-3 re-review). A step that cannot fail is not a step.
+//
+// The SUITE rows are F20's fix and they are the ones that matter most: a focused
+// describe takes EVERY step inside it out of the run while `--list` still lists
+// them all as `passed`, so nothing downstream of this file can notice.
+const ANNOTATION_REASON = {
+  'test.only': 'a FOCUSED step — the runner then executes one step and reports it green',
+  'test.skip': 'a SKIPPED step — a skipped step is not a passing step',
+  'test.fixme': 'a FIXME step — a fixme step is not a passing step',
+  'test.fail': 'a step declared to FAIL — `--list` reports it as `passed`, so it validates nothing',
+};
+const SUITE_ANNOTATION_REASON = {
+  'test.describe.only':
+    'a FOCUSED suite — every other step stops running and the focused one is reported green, ' +
+    'while `--list` still lists all nine as `passed`',
+  'test.describe.skip': 'a SKIPPED suite — every step inside it stops running',
+  'test.describe.fixme': 'a FIXME suite — every step inside it stops running',
+};
+
+// The classification of a call expression's callee, or `null` when the callee is
+// not rooted at `test` at all (this gate has no opinion about those).
+function classifyCallee(node) {
+  const segs = rootedSegments(node, 'test');
+  if (!segs) return null;
+  if (segs.length === 0) return { kind: 'step', callee: 'test' };
+  if (segs[0] !== 'describe') {
+    const callee = `test.${segs[0]}`;
+    if (segs.length === 1 && STEP_ANNOTATIONS.has(segs[0])) {
+      return { kind: 'stepAnnotation', callee, reason: ANNOTATION_REASON[callee] };
+    }
+    return { kind: 'api', callee };
+  }
+  if (segs.length === 1) return { kind: 'container', callee: 'test.describe' };
+  const callee = `test.describe.${segs[1]}`;
+  if (segs[1] === 'configure') return { kind: 'api', callee };
+  if (SUITE_ANNOTATIONS.has(segs[1])) {
+    return { kind: 'suiteAnnotation', callee, reason: SUITE_ANNOTATION_REASON[callee] };
+  }
+  return { kind: 'container', callee };
+}
+
+// An assertion, for the per-step FLOOR below. `expect`, `expect.soft` and
+// `expect.poll` are all real assertions; matching the callee EXACTLY as
+// `'expect'` was round 4's third exact-string comparison and it turned an
+// `expect.soft(`-only body RED on a correct tree (F21). Widening this matcher
+// cannot create vacuity — it is a floor, so all it can do is stop reddening a
+// body that does assert.
+//
+// KNOWN RESIDUAL (pre-existing, unchanged by this round, disclosed): the floor
+// recognises `expect`-rooted callees only. A body whose only assertion is
+// `test.expect(x).toBe(y)` (Playwright's own re-export) is still RED on a
+// correct tree. It was RED before this round too, and the round-5 report carries
+// it as a residual rather than widening the matcher further on the last round.
+function isAssertion(node) {
+  const segs = rootedSegments(node, 'expect');
+  if (!segs) return false;
+  return segs.length === 0 || (segs.length === 1 && (segs[0] === 'soft' || segs[0] === 'poll'));
+}
+
 // The prefix `stepTitle` stamps on a title it could not read as a string
 // literal. Shared with the cross-check below, which switches to its per-file
 // count fallback when it finds one.
@@ -257,22 +415,29 @@ function stepTitle(arg, sf) {
 // The describe chain enclosing `node`, outermost first. `--list --reporter=json`
 // reports a test's title as that chain joined by ` > `, which is what the
 // cross-check below compares against. `setParentNodes: true` is why `.parent`
-// is available. `test.describe` is a CONTAINER, not a step, and is excluded —
-// measured: the walk visits it like any other call expression.
+// is available. Only CONTAINERS contribute a prefix, and the classifier decides
+// which callees those are — `test.describe` and `test.describe.<other>`
+// (`parallel`, `serial`, …). `test.describe.configure` takes an object rather
+// than a title and contributes nothing, and the annotated describe forms are
+// rejected by name above instead of being silently trusted for a prefix.
 function describeChain(node, sf) {
   const chain = [];
   for (let p = node.parent; p; p = p.parent) {
-    if (ts.isCallExpression(p) && p.expression.getText(sf) === 'test.describe') {
+    if (ts.isCallExpression(p) && classifyCallee(p)?.kind === 'container') {
       chain.unshift(stepTitle(p.arguments[0], sf));
     }
   }
   return chain;
 }
 
-// ONE walk per file yields the ordered STEP declarations. `node.expression
-// .getText(sf)` reads the callee verbatim, so `test`, `test.only`, `test.skip`,
-// `test.fixme` and `test.fail` are each read exactly as written.
-function declaredSteps(file) {
+// ONE walk per file yields the ordered STEP declarations — plain `test(` and the
+// annotated forms the rule below rejects — plus the annotated SUITES, which are
+// the forms that can take steps out of the run wholesale. `test.describe` is a
+// CONTAINER, not a step, and is excluded; `test.<other>` (`test.step`,
+// `test.use`, `test.slow`, `test.setTimeout`, `test.beforeEach`, …) is a
+// Playwright API CALL and is excluded too — see the classifier above for why
+// that is safe and why it must not be tightened.
+function parseSpecFile(file) {
   const sf = ts.createSourceFile(
     file,
     readFileSync(join(__dirname, file), 'utf8'),
@@ -281,27 +446,35 @@ function declaredSteps(file) {
     ts.ScriptKind.TS,
   );
   const steps = [];
+  const suiteAnnotations = [];
   const visit = (node) => {
     if (ts.isCallExpression(node)) {
-      const callee = node.expression.getText(sf);
-      const word = ANNOTATED_TEST.exec(callee)?.[1];
-      if (callee === 'test' || (word && word !== 'describe')) {
+      const c = classifyCallee(node);
+      if (c && (c.kind === 'step' || c.kind === 'stepAnnotation')) {
         // The body is the LAST argument, and only a function argument is a
-        // body: `expect` CallExpressions inside it are counted by walking it,
+        // body: assertion CallExpressions inside it are counted by walking it,
         // which includes assertions in nested helpers the body calls.
         const body = node.arguments[node.arguments.length - 1];
         let expects = 0;
         if (body && (ts.isArrowFunction(body) || ts.isFunctionExpression(body))) {
           const count = (n) => {
-            if (ts.isCallExpression(n) && n.expression.getText(sf) === 'expect') expects += 1;
+            if (ts.isCallExpression(n) && isAssertion(n)) expects += 1;
             ts.forEachChild(n, count);
           };
           count(body.body);
         }
         steps.push({
           file,
-          callee,
+          callee: c.callee,
+          reason: c.reason,
           expects,
+          title: [...describeChain(node, sf), stepTitle(node.arguments[0], sf)].join(' > '),
+        });
+      } else if (c && c.kind === 'suiteAnnotation') {
+        suiteAnnotations.push({
+          file,
+          callee: c.callee,
+          reason: c.reason,
           title: [...describeChain(node, sf), stepTitle(node.arguments[0], sf)].join(' > '),
         });
       }
@@ -309,39 +482,50 @@ function declaredSteps(file) {
     ts.forEachChild(node, visit);
   };
   visit(sf);
-  return steps;
+  return { steps, suiteAnnotations };
 }
 
-// Why each annotated form is rejected, in the failure message itself. Named
-// explicitly so a later reader does not "simplify" one of them away as
-// redundant with the `--list` rule above — each is a form `--list` cannot see:
-//
-//   * `test.only` — `--list` does not apply the focus filter (measured: all nine
-//     still report `expectedStatus: 'passed'`), and `forbidOnly` is NOT set in
-//     playwright.config.ts, so this rule is the only defence.
-//   * `test.skip` / `test.fixme` — collected, and caught by the `--list` rule's
-//     `expectedStatus !== 'passed'` half as well. Named here so the failure
-//     points at the declaration rather than at the runner's report.
-//   * `test.fail` — **NOT redundant with the `--list` rule**: measured, `--list`
-//     reports `expectedStatus: 'passed'` for it (unlike skip/fixme, which report
-//     `'skipped'`), so Rule 3 above is blind to it; and a `test.fail` test whose
-//     assertion IS broken reports `1 passed`, exit 0 (measured with real
-//     Chromium by the round-3 re-review). A step that cannot fail is not a step.
-const ANNOTATION_REASON = {
-  'test.only': 'a FOCUSED step — the runner then executes one step and reports it green',
-  'test.skip': 'a SKIPPED step — a skipped step is not a passing step',
-  'test.fixme': 'a FIXME step — a fixme step is not a passing step',
-  'test.fail': 'a step declared to FAIL — `--list` reports it as `passed`, so it validates nothing',
-};
+function declaredSteps(file) {
+  return parseSpecFile(file).steps;
+}
 
-test('every matrix step is declared with a plain test() call', () => {
+// ── Every declaration is plain, and no suite is focused or skipped ─────
+// The `test.only` measurement below is why a source-level rule exists at all:
+// with `test.only` in dtmf.spec.ts, `--list` still reports all nine specs with
+// `expectedStatus: 'passed'` (list mode does not apply the focus filter), and
+// `forbidOnly` under CI=1 does not change that either — measured, exit 0, full
+// JSON. `forbidOnly` is not set in playwright.config.ts in any case (measured:
+// the config does not mention it), so there is no runner-level backstop either.
+// Without a source-level rule a focused test would shrink the run to one step
+// with every gate green — verbatim the harm this whole manifest rule exists to
+// prevent.
+//
+// The rule is narrowed the same way: it rejects the annotated declarations
+// (step-level and describe-level) and does NOT re-check what `--list` already
+// covers as a set. Both halves matter, and F20 is why: a focused DESCRIBE takes
+// seven of nine steps out of the run without changing any count, so the
+// describe arm is the only rule in this file that can see it.
+//
+// Corrected here: the text rule this replaced claimed "a desync blanks text, so
+// it can only HIDE a `test.only`, never invent one. It cannot turn a correct
+// tree red." The FIRST sentence is true and is the reason a source-level rule is
+// still needed. The SECOND was falsified by measurement — the same one-line
+// desync turned a correct tree red and blamed a step nobody touched — and it is
+// gone with the scanner.
+test('every matrix step is declared with a plain test() call, and no suite is focused or skipped', () => {
   for (const file of SPEC_FILES) {
-    for (const step of declaredSteps(file)) {
+    const { steps, suiteAnnotations } = parseSpecFile(file);
+    for (const suite of suiteAnnotations) {
+      assert.fail(
+        `${file}: ${suite.title} is declared with \`${suite.callee}(\` — ${suite.reason}`,
+      );
+    }
+    for (const step of steps) {
       assert.strictEqual(
         step.callee,
         'test',
         `${file}: "${step.title}" is declared with \`${step.callee}(\` — ` +
-          `${ANNOTATION_REASON[step.callee] ?? 'not a plain test declaration'}`,
+          `${step.reason ?? 'not a plain test declaration'}`,
       );
     }
   }
@@ -371,13 +555,20 @@ test('every matrix step is declared with a plain test() call', () => {
 // page slice is for. Do NOT "fix" this with an exact `expect(` count: that turns
 // every legitimate test edit into a red gate, which is the failure mode this
 // whole file exists to prevent.
+//
+// The matcher is `isAssertion` above — `expect`, `expect.soft` and `expect.poll`
+// all count. Round 4 matched the callee exactly as `'expect'`, so a body whose
+// only assertion was `expect.soft(` was RED on a correct tree (F21). This is a
+// FLOOR, so widening the matcher cannot create vacuity; it can only stop
+// reddening a body that does assert.
 test('every declared test body still contains an assertion', () => {
   for (const file of SPEC_FILES) {
     for (const step of declaredSteps(file)) {
       assert.ok(
         step.expects >= 1,
-        `${file}: "${step.title}" contains no expect( call at all — that ` +
-          `step's body was emptied and it now validates nothing`,
+        `${file}: "${step.title}" contains no assertion call at all ` +
+          `(\`expect\`, \`expect.soft\`, \`expect.poll\`) — that step's body was ` +
+          `emptied and it now validates nothing`,
       );
     }
   }
@@ -409,6 +600,20 @@ test('every declared test body still contains an assertion', () => {
 // just not which step. Measured: every one of the nine committed steps has a
 // literal title, so the strict branch is the one that runs today; the fallback
 // exists so the first dynamic title is a narrower check rather than a false RED.
+//
+// **What the fallback does NOT cover, stated here because F20 was exactly this
+// and the earlier version of this comment was silent on it: it compares COUNTS,
+// so it is blind to FOCUS.** `test.describe.only` on one of the six describes
+// takes every step outside it out of the RUN while changing no count at all —
+// the parse still declares them, the runner still LISTS them (list mode does not
+// apply the focus filter), and the fallback therefore agrees. Before round 5 the
+// strict branch's lost title prefix was the only thing that fired, and one
+// dynamic title anywhere disabled it: measured, the gate sat at 14 pass / 0 fail
+// and exit 0 while seven of the PR slice's eight steps stopped running. Focus is
+// NOT this rule's job — it belongs to the annotated-declaration rule above,
+// which rejects the describe forms by name. What remains here is the count
+// comparison, and it stays: a name-level check that silently did nothing once a
+// title was dynamic would be the vacuity this file exists to refuse.
 //
 // **Do not re-derive round 3's argument against a count floor and delete this
 // check.** Round 3 refused to assert a minimum number of declarations because a
