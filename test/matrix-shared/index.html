@@ -1,10 +1,11 @@
 <!doctype html>
 <!--
-  FreeSWITCH matrix page harness. Loads the BUILT/PACKED bundle (dist/matrix.js)
-  — never packages/**/src — and drives a real BrowserPhone against the per-run
-  FreeSWITCH container booted by the Playwright globalSetup. The per-run FS WSS
-  port arrives in the ?wss= query parameter (helpers.ts appends it), so this
-  page stays FreeSWITCH-agnostic.
+  PBX matrix page harness — one shell shared by every matrix tree. Loads the
+  BUILT/PACKED bundle (dist/matrix.js) — never packages/**/src — and drives a
+  real BrowserPhone against the per-run PBX container booted by the Playwright
+  globalSetup. The per-run WSS port arrives in the ?wss= query parameter
+  (helpers.ts appends it), so this page stays PBX-agnostic; the status line
+  carries the PBX name from the profile.
 
   The Node helper (helpers.ts) only invokes window.__runMatrixStep and asserts
   on the returned plain-data MatrixResult. No credentials or SIP exchanges ever
@@ -18,7 +19,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>sip-worker FreeSWITCH matrix harness</title>
+  <title>sip-worker call matrix</title>
 </head>
 <body>
   <!-- Playwright clicks this first: unlocks audio with a user gesture
@@ -26,6 +27,6 @@
   <button id="unlock" type="button">unlock audio</button>
   <pre id="status" style="font-family: monospace; color: #eee; background: #111; padding: 1rem;">loading matrix bundle…</pre>
   <script src="dist/matrix.js"
-          onerror="document.getElementById('status').textContent = 'HARNESS_FATAL matrix bundle failed to load (HTTP 503?) — run test/freeswitch-matrix/build-matrix.mjs'"></script>
+          onerror="document.getElementById('status').textContent = 'HARNESS_FATAL matrix bundle failed to load (HTTP 503?) — build it with &quot;node ../matrix-shared/build-matrix.mjs&quot; from the matrix tree'"></script>
 </body>
 </html>

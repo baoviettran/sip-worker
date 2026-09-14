@@ -1,18 +1,19 @@
-// Test-only HTTPS server for the FreeSWITCH matrix page harness.
+// Test-only HTTPS server shared by every PBX matrix page harness.
 //
-// Serves the committed index.html plus the BUILT/PACKED dist/matrix.js over
-// HTTPS on 127.0.0.1:4500 with a per-run local CA + leaf certificate (the
+// Serves the committed index.html (this script's own directory — one page
+// shell serves every PBX) plus the called tree's BUILT/PACKED dist/matrix.js,
+// over HTTPS on 127.0.0.1 with a per-run local CA + leaf certificate (the
 // test/freeswitch-pilot/server.mjs openssl pattern; Playwright's
-// ignoreHTTPSErrors covers both the page server and the FreeSWITCH WSS).
+// ignoreHTTPSErrors covers both the page server and the PBX WSS).
 //
 // CONTENT IS BUILT/PACKED ONLY. A request for the built bundle FAILS
 // (HTTP 503) when dist/matrix.js is absent — the browser-media server
 // contract. The server NEVER falls back to source .ts files, so it cannot
 // silently serve stale or unbuilt code.
 //
-// This server is FreeSWITCH-agnostic: the per-run FS WSS port travels to the
-// page through the ?wss= query parameter that helpers.ts appends (the
-// container is owned by the Playwright globalSetup, not this process).
+// This server is PBX-agnostic: the per-run WSS port travels to the page
+// through the ?wss= query parameter that helpers.ts appends (the container is
+// owned by the Playwright globalSetup, not this process).
 
 import https from 'node:https';
 import { execFileSync } from 'node:child_process';
@@ -24,8 +25,12 @@ import { fileURLToPath } from 'node:url';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.MATRIX_HTTP_PORT ?? 4500);
-const matrixDir = fileURLToPath(new URL('.', import.meta.url));
-const BUNDLE = join(matrixDir, 'dist', 'matrix.js');
+// The tree being served is the Playwright webServer's `cwd`; the page shell is
+// this script's own directory (the shared one), so no tree carries a copy.
+const treeDir = process.cwd();
+const sharedDir = fileURLToPath(new URL('.', import.meta.url));
+const PAGE = join(sharedDir, 'index.html');
+const BUNDLE = join(treeDir, 'dist', 'matrix.js');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -74,12 +79,12 @@ async function makeCertBundle() {
 // Static handler: index.html + dist/matrix.js, nothing else
 // ---------------------------------------------------------------------------
 
-function serveOr503(res, path, label) {
+function serveOr503(res, path, label, hint) {
   try {
     statSync(path);
   } catch {
     res.writeHead(503, { 'content-type': 'text/plain' });
-    res.end(`BUILT ARTIFACT MISSING: ${label} at ${path}. Run 'node test/freeswitch-matrix/build-matrix.mjs' first.`);
+    res.end(`BUILT ARTIFACT MISSING: ${label} at ${path}. ${hint}`);
     return;
   }
   const dot = path.lastIndexOf('.');
@@ -105,11 +110,18 @@ function createHandler() {
       return;
     }
     if (pathname === '/' || pathname === '/index.html') {
-      serveOr503(res, join(matrixDir, 'index.html'), 'index.html');
+      // Committed alongside this script, not built — its absence is a broken
+      // harness, never a stale build.
+      serveOr503(res, PAGE, 'index.html', 'The shared page shell lives in test/matrix-shared/.');
       return;
     }
     if (pathname === '/dist/matrix.js') {
-      serveOr503(res, BUNDLE, 'matrix.js');
+      serveOr503(
+        res,
+        BUNDLE,
+        'matrix.js',
+        `The tree being served is ${treeDir}; build it with 'node ../matrix-shared/build-matrix.mjs' from there.`,
+      );
       return;
     }
     res.writeHead(404, { 'content-type': 'text/plain' });
