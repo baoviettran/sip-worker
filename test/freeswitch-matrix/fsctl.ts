@@ -2,12 +2,14 @@
 // matrix harness plus a minimal FreeSWITCH event-socket client (status,
 // originate, uuid_kill). Fail-not-skip: every wait is bounded and
 // startFreeSwitch throws instead of hanging or skipping.
-import { spawn, spawnSync, execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, copyFileSync, rmSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, copyFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
 import { renderConf } from './conf';
+import { mintTls } from '../matrix-shared/mint-tls';
+import { pickFreePort } from '../matrix-shared/ports';
 import { FS_IMAGE } from './materialize.mjs';
 
 export { FS_IMAGE, renderConf };
@@ -26,38 +28,9 @@ export interface FsHandle {
   wssPort: number;
 }
 
-/** Mint a per-run local CA + leaf (SAN IP:127.0.0.1,DNS:localhost, 1-day). */
-export function mintTls(): { certPem: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'fstls-'));
-  const caKey = join(dir, 'ca.key'), caCrt = join(dir, 'ca.crt');
-  const leafKey = join(dir, 'leaf.key'), leafCsr = join(dir, 'leaf.csr'), leafCrt = join(dir, 'leaf.crt');
-  const ext = join(dir, 'ext.cnf');
-  execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-keyout', caKey, '-out', caCrt,
-    '-days', '1', '-nodes', '-subj', '/CN=fs-matrix-ca'], { stdio: 'ignore' });
-  execFileSync('openssl', ['req', '-newkey', 'rsa:2048', '-keyout', leafKey, '-out', leafCsr,
-    '-nodes', '-subj', '/CN=127.0.0.1'], { stdio: 'ignore' });
-  // macOS LibreSSL rejects -addext; use an ext file (see docs/ci-browser-gate-notes.md).
-  writeFileSync(ext, 'subjectAltName=IP:127.0.0.1,DNS:localhost\n');
-  execFileSync('openssl', ['x509', '-req', '-in', leafCsr, '-CA', caCrt, '-CAkey', caKey,
-    '-CAcreateserial', '-out', leafCrt, '-days', '1', '-extfile', ext], { stdio: 'ignore' });
-  return { certPem: readFileSync(leafCrt) + '\n' + readFileSync(leafKey) };
-}
-
-function pickFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.unref();
-    srv.on('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const port = (srv.address() as net.AddressInfo).port;
-      srv.close(() => resolve(port));
-    });
-  });
-}
-
 export async function startFreeSwitch(confDir: string): Promise<FsHandle> {
   const [sipPort, wsPort, wssPort] = await Promise.all([pickFreePort(), pickFreePort(), pickFreePort()]);
-  const runtimeDir = renderConf(confDir, { sipPort, wsPort, wssPort, tls: mintTls() });
+  const runtimeDir = renderConf(confDir, { sipPort, wsPort, wssPort, tls: { certPem: mintTls().bundlePem } });
   const recordDir = mkdtempSync(join(tmpdir(), 'fsrec-'));
   const name = `fsmatrix-${process.pid}-${Date.now()}`;
   spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });

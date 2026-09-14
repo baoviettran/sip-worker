@@ -1,4 +1,4 @@
-// test/freeswitch-matrix/rms.ts — pure PCM16 WAV energy pass. No audio device,
+// test/matrix-shared/rms.ts — pure PCM16 WAV energy pass. No audio device,
 // no docker: a pure function over WAV bytes, unit-tested with synthetic fixtures.
 export function parseRiffWav(bytes: Uint8Array): { sampleRate: number; channels: number; pcm: Float32Array } {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

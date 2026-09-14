@@ -21,7 +21,7 @@ import { join } from 'node:path';
 import { createSocket, type RemoteInfo, type Socket } from 'node:dgram';
 import { bootMatrix, disposeMatrix, runStep } from './helpers';
 import { getRecordings, type FsHandle } from './fsctl';
-import { maxWindowedRms, parseRiffWav, readWavPcm16 } from './rms';
+import { maxWindowedRms, parseRiffWav, readWavPcm16 } from '../matrix-shared/rms';
 
 const CREDENTIALS = { user: '1000', password: 'matrix-pass-2026' };
 
