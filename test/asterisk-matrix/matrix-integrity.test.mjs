@@ -35,6 +35,87 @@ test('manifest maps to exactly six unique spec files', () => {
   assert.strictEqual(unique.length, 6, `expected 6 unique specs, got ${unique.length}: ${unique.join(', ')}`);
 });
 
+// ── Every step is backed by a DECLARED test ────────────────────────────
+// The two rules above tie a step to a FILE, not to a test. Measured by the
+// whole-branch review: emptying out `dtmf.spec.ts` while keeping the file left
+// this gate GREEN (`ok 1` … `ok 9`, `# pass 9 # fail 0`, exit 0), and neither
+// workflow counts tests — so the nightly would report green on 17 of 18 and the
+// PR slice on 7 of 8 while one step silently stopped running. Deleting the file
+// outright IS caught by Assertion 1 above; a step that is deleted or renamed
+// WITHIN a file was not. Criterion 7's "a missing step … fails CI" was false for
+// exactly this case.
+//
+// Tests declared per spec file. NOT derivable from MATRIX_STEPS: controls.spec.ts
+// covers steps 6 and 7 in ONE test (its header explains why they are not split),
+// so six files declare nine tests for ten steps. An exact-count-of-10 rule would
+// therefore be RED on the correct tree — do not "correct" these numbers.
+const SPEC_TESTS = {
+  'register.spec.ts': 3,
+  'audio.spec.ts': 1,
+  'call-inbound.spec.ts': 2,
+  'controls.spec.ts': 1,
+  'dtmf.spec.ts': 1,
+  'recovery.spec.ts': 1,
+};
+
+test('every matrix step is backed by a declared test', () => {
+  for (const [file, expected] of Object.entries(SPEC_TESTS)) {
+    const source = readFileSync(join(__dirname, file), 'utf8');
+    const declared = source.match(/^\s*test\(/gm) ?? [];
+    // The count is EXACT on purpose. Adding a test is a deliberate change to the
+    // manifest and should be acknowledged by editing this table — that is the
+    // intent, not an oversight.
+    assert.strictEqual(
+      declared.length,
+      expected,
+      `${file} declares ${declared.length} tests, expected ${expected} — a step may have been deleted or renamed`,
+    );
+    const skipped = source.match(/^\s*test\.(skip|fixme|only)\(/gm) ?? [];
+    assert.deepStrictEqual(
+      skipped,
+      [],
+      `${file} declares a skipped or focused test — a skipped step is not a passing step`,
+    );
+  }
+  // A file that vanished would be caught above only if it were still listed in
+  // SPEC_TESTS; tie the table itself to the manifest so the two cannot drift.
+  assert.deepStrictEqual(
+    Object.keys(SPEC_TESTS).sort(),
+    [...new Set(Object.values(MATRIX_STEPS))].sort(),
+    'SPEC_TESTS and MATRIX_STEPS disagree about which spec files exist',
+  );
+});
+
+// ── The unit gates cannot silently collect nothing ─────────────────────
+// The unit scripts are Vitest, and `vitest.config.ts` used to set
+// `passWithNoTests: true`: a glob naming a nonexistent file still exited 0, and
+// all-unmatched exited 0 with "No test files found". A whole tree's unit tests
+// could vanish and the gate stayed green — the same shape as the step rule
+// above. The config now sets it false; these names are the second half, so a
+// deleted unit spec is named rather than merely reducing a count.
+//
+// Measured today: matrix-shared 3 (mint-tls, rms, stun), asterisk-matrix 2
+// (ami, conf), freeswitch-matrix 1 (conf) — the FreeSWITCH pair is asserted here
+// because `test:matrix:unit` is the gate that reads it, and this file is the
+// only integrity walk that spans all three trees.
+const UNIT_SPECS = {
+  'matrix-shared': ['mint-tls.unit.test.ts', 'rms.unit.test.ts', 'stun.unit.test.ts'],
+  'asterisk-matrix': ['ami.unit.test.ts', 'conf.unit.test.ts'],
+  'freeswitch-matrix': ['conf.unit.test.ts'],
+};
+
+test('every unit spec file the unit gates name exists', () => {
+  for (const [tree, files] of Object.entries(UNIT_SPECS)) {
+    for (const file of files) {
+      const full = join(__dirname, '..', tree, file);
+      assert.ok(
+        existsSync(full),
+        `test/${tree}/${file} is missing — a unit gate globbing it would collect nothing`,
+      );
+    }
+  }
+});
+
 function walkDir(dir) {
   const out = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -264,10 +345,50 @@ test('ast-conf binds nothing outside loopback', () => {
 });
 
 // ── No committed key material, anywhere in the shared or Asterisk trees ──
-test('no .key or .pem files in the committed Asterisk or shared trees', () => {
-  const offenders = [...walkDir(__dirname), ...walkDir(join(__dirname, '..', 'matrix-shared'))]
-    .filter((f) => f.endsWith('.key') || f.endsWith('.pem'));
-  assert.deepStrictEqual(offenders, [], `found committed key material: ${offenders.join(', ')}`);
+// TWO rules, because neither covers the other. Measured by the whole-branch
+// review against the previous filename-only rule: the gate stayed GREEN with a
+// PEM private key sitting in `ast-conf/key.backup`, with a PEM body inlined into
+// a `.conf`, and with `.crt`/`.p12` files — only a `.key`/`.pem` FILENAME was
+// caught, while the criterion it enforces reads "no secret and no private key in
+// the committed Asterisk config; enforced over the whole matrix tree". The
+// mechanism is fixed here rather than the wording.
+//
+// Every certificate-shaped NAME is wrong here too: TLS is minted per run by
+// mint-tls and NEVER committed, so there is no legitimate committed cert in this
+// tree. The name rule stays as well as the content rule — a DER key carries no
+// PEM armour, so only its name will catch it.
+const CERT_LIKE_EXTENSIONS = ['.key', '.pem', '.p12', '.pfx', '.der', '.crt'];
+
+// The ARMOUR, not the bare phrase. `test/matrix-shared/mint-tls.unit.test.ts`
+// asserts `expect(tls.keyPem).toContain('BEGIN PRIVATE KEY')` — an assertion
+// ABOUT a PEM, never key material itself — so a loose
+// `/BEGIN [A-Z ]*PRIVATE KEY/` would make this gate RED on a correct tree, and a
+// gate that fails on correct code is a gate someone deletes. Requiring BOTH
+// `-----` fences is what separates armour from a mention, and this file has no
+// comment-stripping helper on purpose: strip comments and an inlined key inside
+// a `.conf` comment would go unnoticed.
+//
+// (This pattern does not match its own source text: `[A-Z ]*` in the source is
+// followed by a literal `[`, which the class cannot consume and which is not the
+// `P` the pattern needs next. Verified by running it — see the gate result.)
+const PRIVATE_KEY_ARMOUR = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+
+test('no committed private key material, anywhere in the shared or Asterisk trees', () => {
+  const files = [...walkDir(__dirname), ...walkDir(join(__dirname, '..', 'matrix-shared'))];
+  const byName = files.filter((f) => CERT_LIKE_EXTENSIONS.some((ext) => f.endsWith(ext)));
+  assert.deepStrictEqual(
+    byName,
+    [],
+    `found committed key or certificate material: ${byName.join(', ')}`,
+  );
+  // The real catch: it finds a key whatever it is called, including inlined into
+  // a `.conf` or renamed to `key.backup`.
+  const byContent = files.filter((f) => PRIVATE_KEY_ARMOUR.test(readFileSync(f, 'utf8')));
+  assert.deepStrictEqual(
+    byContent,
+    [],
+    `found PEM private-key armour in: ${byContent.join(', ')}`,
+  );
 });
 
 // ── The image digest cannot drift between conf.ts and CI ───────────────

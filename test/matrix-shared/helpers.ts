@@ -8,10 +8,10 @@
 // port in the ?wss= query and the PBX image under test in ?image= (the page
 // server is PBX-agnostic); runStep invokes the page global __runMatrixStep.
 import type { Page } from '@playwright/test';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 
 export interface MatrixEvent {
   type: string;
@@ -93,6 +93,25 @@ export function createMatrixHelpers<H extends MatrixHandle>(opts: MatrixHarnessO
   async function bootMatrix(page: Page): Promise<MatrixContext<H>> {
     const handle = readHandle();
     const url = `${baseUrl}/index.html?wss=${handle.wssPort}&image=${encodeURIComponent(opts.imageRef)}&run=${++bootSeq}`;
+    // The run record (criterion 8), and ONLY when the runner asks for one
+    // (the Asterisk workflow sets MATRIX_RECORD_FILE under artifacts/ for both
+    // jobs; the FreeSWITCH workflow deliberately does not).
+    //
+    // With it unset this block does nothing whatsoever — no binding installed,
+    // no path resolved, no file touched — so the page side is exactly what it
+    // was before and the frozen tree's runtime is unchanged. Read HERE rather
+    // than in steps.ts because that module is bundled into the browser, where
+    // `process` does not exist; the page only ever calls the binding.
+    //
+    // Registered before the navigation so the binding is present for the boot
+    // line bootMatrixPage logs, which is the provenance the record exists for.
+    const recordFile = process.env.MATRIX_RECORD_FILE;
+    if (recordFile) {
+      mkdirSync(dirname(recordFile), { recursive: true });
+      await page.exposeFunction('__matrixRecordAppend', (line: string) => {
+        appendFileSync(recordFile, `${line}\n`);
+      });
+    }
     await page.goto(url, { waitUntil: 'domcontentloaded' });
     // The packed bundle sets this after wiring __runMatrixStep; a script-tag
     // failure (the server's 503) leaves it false and surfaces in the timeout.

@@ -54,6 +54,8 @@ interface MatrixWindow {
   __matrixRun: { booted: boolean; errors: string[] };
   __runMatrixStep(name: string, args: unknown): Promise<MatrixResult>;
   __matrixDispose(): Promise<void>;
+  /** Installed by the Playwright side ONLY when MATRIX_RECORD_FILE is set. */
+  __matrixRecordAppend?: (line: string) => void;
 }
 
 const bridge: MatrixWindow['__matrixRun'] = {
@@ -62,8 +64,25 @@ const bridge: MatrixWindow['__matrixRun'] = {
 };
 
 const status = document.getElementById('status');
+// The run record (acceptance criterion 8). `#status` lives and dies with the
+// page context, and with `trace: 'retain-on-failure'` a GREEN run retains no
+// trace at all — so the provenance logged in bootMatrixPage below survived only
+// in a FAILED run's snapshot, which is how the reviewer recovered it.
+//
+// The Playwright side installs `__matrixRecordAppend` — a Node function, via
+// page.exposeFunction — only when MATRIX_RECORD_FILE is set, and appends the
+// line to that file. Unset, the binding is absent and this optional call is a
+// no-op, so the DOM path is exactly what it was before.
+//
+// It is deliberately NOT read from `process.env` here. This module is bundled
+// into the BROWSER by build-matrix.mjs, and `process` does not exist in a page:
+// esbuild passes `process.env.MATRIX_RECORD_FILE` through verbatim (measured),
+// so reading it here would be a `ReferenceError: process is not defined` at
+// bundle-evaluation time — taking down every matrix spec in BOTH trees, not
+// just the Asterisk one. The env var is read on the Node side, in helpers.ts.
 const log = (line: string) => {
   if (status) status.textContent += '\n' + line;
+  (window as unknown as MatrixWindow).__matrixRecordAppend?.(line);
 };
 
 window.addEventListener('error', (e) => {

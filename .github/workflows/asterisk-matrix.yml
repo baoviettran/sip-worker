@@ -40,6 +40,17 @@ jobs:
   asterisk-matrix-pr:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # The run record (acceptance criterion 8). The harness page appends each
+    # `log()` line to this path through a Playwright binding (helpers.ts reads
+    # the variable — steps.ts is bundled into the browser, where `process` does
+    # not exist). artifacts/ is uploaded on always() below, so the image digest,
+    # package hash, git commit and browser version survive a GREEN run too — on
+    # a green run `trace: 'retain-on-failure'` retains no trace at all, and the
+    # #status DOM node dies with the context. The FreeSWITCH workflow
+    # deliberately does not set this: its tree is frozen and its behaviour must
+    # stay byte-identical.
+    env:
+      MATRIX_RECORD_FILE: artifacts/matrix-run-record.txt
     # Worst case, re-derivable from test/asterisk-matrix/playwright.config.ts
     # and the step list below:
     #   8 tests       MATRIX_MODE=pr registers the Chromium project alone and
@@ -160,6 +171,10 @@ jobs:
   asterisk-matrix-nightly:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    # Same run record as the PR job, and for the same reason — see there. Both
+    # jobs set it, so the nightly's green run carries the provenance too.
+    env:
+      MATRIX_RECORD_FILE: artifacts/matrix-run-record.txt
     # Worst case, re-derivable from test/asterisk-matrix/playwright.config.ts
     # and the step list below:
     #   18 tests     6 spec files x 2 projects — Chromium + Firefox (nightly

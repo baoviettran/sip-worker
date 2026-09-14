@@ -16,8 +16,12 @@
 // `call.established`); resume() → holdState.local clears + `call.resume` and
 // the Task 6 sampler shows both-direction RTP growth again (≥1 s of echo flow);
 // setMuted(true) → `muted` true; setMuted(false) → RTP resumes. The steps
-// additionally return wire-INVITE counts and under-hold/under-mute growth
-// booleans as observed evidence.
+// additionally return the under-hold/under-mute growth booleans as observed
+// evidence. (They still COMPUTE wire-INVITE/200 counts in steps.ts, but this
+// spec no longer declares or asserts them: a dead field on a result interface
+// is what a later "fix" re-asserts vacuously — see the wire block below, which
+// is positional instead. steps.ts still produces them for the FreeSWITCH
+// spec's own local copy of the interface, and that tree is frozen.)
 //
 // Two differences from test/freeswitch-matrix/controls.spec.ts, and no others:
 //   - no `ensureDtlsPem` seeding. Asterisk's DTLS pair is rendered into the
@@ -61,8 +65,6 @@ interface ControlsStepResult {
   /** observed evidence (not asserted): growth under hold / under mute */
   rtpUnderHold?: { ok: boolean; baseline: RtpCounters; inbound: RtpCounters; outbound: RtpCounters };
   rtpDuringMute?: { ok: boolean; baseline: RtpCounters; inbound: RtpCounters; outbound: RtpCounters };
-  wireInvites?: number;
-  wire200s?: number;
 }
 
 test.describe('asterisk matrix · hold/resume + mute/unmute control plane', () => {
@@ -91,19 +93,63 @@ test.describe('asterisk matrix · hold/resume + mute/unmute control plane', () =
       // wire evidence of the hold signalling: the initial INVITE plus the
       // re-INVITE, both answered 200 by Asterisk.
       //
-      // The 200 count is tied to the INVITE count, not to a literal. `>= 2` is
-      // satisfied by the registration handshake's own 200 plus the initial
-      // INVITE's, so it passes when the re-INVITE goes unanswered — vacuous
-      // against the exact mutation it exists to catch. Same defect class Task
-      // 9's review measured on its own 200 assertion (plan commit e01aad2).
-      // If a stack quirk ever makes this fail with every INVITE genuinely
-      // answered, REPORT it and record what the extra 200 was; do not relax the
-      // line back to a literal.
-      expect(hold.wireInvites, `wire INVITEs: ${hold.wireInvites}`).toBeGreaterThanOrEqual(2);
+      // The 200 is bound POSITIONALLY to the SECOND INVITE. Two weaker forms
+      // were measured here and both are vacuous against the mutation this
+      // evidence exists to catch (the hold re-INVITE going unanswered):
+      //   - a literal `wire200s >= 2`: satisfied by the registration
+      //     handshake's own 200 plus the initial INVITE's.
+      //   - the count-to-count `wire200s >= wireInvites`: BOTH counts survive
+      //     the mutation. Suppress the re-INVITE's 200 and the wire still
+      //     carries 2 INVITEs and 2 200s (the REGISTER 200 and the initial
+      //     INVITE's), so `2 >= 2` passes. Both those survivors are already
+      //     proven by `expect(h.ok, h.detail).toBe(true)` above and by the waits
+      //     inside `runHoldStep`, so the count form cannot fail on any path
+      //     where that already passes. (Same defect class Task 9's review
+      //     measured on its own 200 assertion, plan commit e01aad2.)
+      //
+      // So the index is bound and GUARDED rather than read inline, exactly as
+      // test/asterisk-matrix/call-inbound.spec.ts does one step over: with no
+      // second INVITE, `indexOf` returns -1 and `lastIndexOf('200') > -1` is
+      // true for ANY 200, so the predicate only means "after the re-INVITE"
+      // once the re-INVITE is known to be present. `h.events` is the OUTER step
+      // result's event list (the `MatrixResult.events` sibling of `result`),
+      // not a field of `h.result`.
+      //
+      // ...but the anchor is the LAST INVITE, not the second, and that is a
+      // MEASURED correction. The wire the hold step actually produces is
+      //
+      //   REGISTER REGISTER 200 INVITE ACK INVITE 200 ACK INVITE 200 ACK
+      //                              ^auth retry, dialog established
+      //                                                 ^ the hold re-INVITE
+      //
+      // — pjsip challenges the first INVITE (401, ACKed but unrecorded), so
+      // the SECOND INVITE is the authenticated retry that establishes the
+      // dialog and it carries its own 200. Anchoring there is satisfied by
+      // that establishing 200, which this step never had to prove anything
+      // about: measured, suppressing the hold re-INVITE's 200 left the gate
+      // GREEN. The hold re-INVITE is the last INVITE this step's own `hold()`
+      // puts on the wire (it is the final one before the step returns), so the
+      // 200 must follow THAT one. Both anchors are kept: the second-INVITE
+      // guard still fails when fewer than two INVITEs were seen at all.
+      //
+      // KNOWN LIMIT, measured and left open deliberately: the wire alone cannot
+      // tell "the hold re-INVITE" from "the establishing INVITE" by position, so
+      // a hold that sent NO re-INVITE at all is still silent here — only a count
+      // would catch it, and a count is stack-dependent (it is 3 here solely
+      // because pjsip challenges the first INVITE; pre-emptive auth would make
+      // it 2 and turn a count rule red on a correct tree). If a stack quirk ever
+      // makes this fail with every INVITE genuinely answered, REPORT it and
+      // record what the extra 200 was; do not relax the line to a count or a
+      // literal.
+      const wire = h.events.filter((e) => e.type === 'wire').map((e) => e.detail);
+      const firstInvite = wire.indexOf('INVITE');
+      expect(firstInvite, `no INVITE on the wire — wire: ${wire.join(',')}`).toBeGreaterThanOrEqual(0);
+      const reInvite = wire.indexOf('INVITE', firstInvite + 1);
+      expect(reInvite, `no re-INVITE on the wire — wire: ${wire.join(',')}`).toBeGreaterThan(firstInvite);
       expect(
-        hold.wire200s,
-        `wire 200s: ${hold.wire200s} vs INVITEs: ${hold.wireInvites}`,
-      ).toBeGreaterThanOrEqual(hold.wireInvites);
+        wire.lastIndexOf('200'),
+        `no 200 after the last INVITE — wire: ${wire.join(',')}`,
+      ).toBeGreaterThan(wire.lastIndexOf('INVITE'));
 
       // resume: hold released, `call.resume` after `call.hold`, RTP grows again
       const r = await runStep(page, 'resume', CREDENTIALS);
