@@ -60,4 +60,43 @@ describe('AmiClient', () => {
       ami.close();
     }
   }, 10_000);
+
+  // AMI's OriginateResponse carries BOTH `Event:` and `Response:` headers. The
+  // obvious frame-loop shortcut — "a frame with a Response header is a stray
+  // action reply, skip it" — swallows it, and the symptom is an event that
+  // never arrives rather than a parse error. This is the regression that keeps
+  // onData consulting its waiters before any such skip.
+  it('routes an event that also carries a Response header to its waiter', async () => {
+    const server = createServer((sock) => {
+      sock.write('Asterisk Call Manager/5.0.4\r\n');
+      let buf = Buffer.alloc(0);
+      sock.on('data', (d) => {
+        buf = Buffer.concat([buf, d]);
+        const { frames, rest } = parseAmiFrames(buf);
+        buf = rest;
+        for (const f of frames) {
+          // Echo the request's own ActionID: the client generates them, so a
+          // hardcoded id in the fake would never correlate.
+          sock.write(`Response: Success\r\nActionID: ${f.ActionID}\r\n\r\n`);
+          if (f.Action === 'Originate') {
+            // Both headers, as a real OriginateResponse has.
+            sock.write(
+              `Event: OriginateResponse\r\nResponse: Success\r\nActionID: ${f.ActionID}\r\nUniqueid: 1234.5\r\n\r\n`,
+            );
+          }
+        }
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+    const ami = await AmiClient.connect({ host: '127.0.0.1', port, username: 'matrix', password: 'matrix-pass-2026' });
+    try {
+      const pending = ami.waitForEvent((e) => e.Event === 'OriginateResponse', 3_000, 'OriginateResponse');
+      await ami.action({ Action: 'Originate', Channel: 'PJSIP/1000' });
+      expect((await pending).Uniqueid).toBe('1234.5');
+    } finally {
+      ami.close();
+      server.close();
+    }
+  }, 10_000);
 });

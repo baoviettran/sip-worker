@@ -122,6 +122,88 @@ export async function amiFor(h: AstHandle): Promise<AmiClient> {
 }
 
 /**
+ * Originate a call TO the registered browser endpoint: `Channel: PJSIP/<user>`
+ * dials the endpoint's AOR, i.e. its registered contact, so the browser sees an
+ * inbound INVITE. On answer the SAME channel enters the dialplan at
+ * Context/Exten and runs the echo target. `Async: true` returns immediately and
+ * the correlated OriginateResponse carries the channel's Uniqueid — which is
+ * what the remote-BYE step hands to hangupChannel.
+ */
+export async function originateToBrowser(
+  h: AstHandle,
+  o: { user: string; exten: string; timeoutMs?: number },
+): Promise<{ uniqueid: string }> {
+  const ami = await amiFor(h);
+  try {
+    const actionId = randomUUID();
+    const pending = ami.waitForEvent(
+      (e) => e.Event === 'OriginateResponse' && e.ActionID === actionId,
+      o.timeoutMs ?? 20_000,
+      `OriginateResponse for ${o.user}`,
+    );
+    const res = await ami.action({
+      Action: 'Originate',
+      Channel: `PJSIP/${o.user}`,
+      Context: 'matrix',
+      Exten: o.exten,
+      Priority: '1',
+      CallerID: 'matrix <1001>',
+      Async: 'true',
+      ActionID: actionId,
+    });
+    if (res.Response !== 'Success') throw new Error(`Originate rejected: ${JSON.stringify(res)}`);
+    const ev = await pending;
+    if (ev.Response !== 'Success') throw new Error(`Originate failed: ${JSON.stringify(ev)}`);
+    if (!ev.Uniqueid) throw new Error(`OriginateResponse carried no Uniqueid: ${JSON.stringify(ev)}`);
+    return { uniqueid: ev.Uniqueid };
+  } finally {
+    ami.close();
+  }
+}
+
+/** Hang the originated channel up — this is what puts a BYE on the wire. */
+export async function hangupChannel(h: AstHandle, uniqueid: string): Promise<void> {
+  const ami = await amiFor(h);
+  try {
+    const res = await ami.action({ Action: 'Hangup', Channel: uniqueid });
+    if (res.Response !== 'Success' && !/not found/i.test(res.Message ?? '')) {
+      throw new Error(`Hangup of ${uniqueid} failed: ${JSON.stringify(res)}`);
+    }
+  } finally {
+    ami.close();
+  }
+}
+
+/**
+ * The port Asterisk has registered for a user, or undefined. Parsed from
+ * `pjsip show contacts`, whose rows read (verified against this image's live
+ * output, not assumed):
+ *
+ * `  Contact:  1000/sip:1000@127.0.0.1:43952;transport=ws;x-a e1ea21e4cf NonQual  -nan`
+ *
+ * Two things there differ from the row the plan predicted, neither of which
+ * changes the parse: pjsip appends `;x-ast-orig-host=127.0.0.1:<wssPort>` (the
+ * local transport address) to the URI, and the table TRUNCATES the URI column
+ * at a fixed width — which is why the row above ends in a bare `;x-a`. The
+ * status is `NonQual` rather than `Avail` because the endpoint declares no
+ * `qualify_frequency`, so Asterisk never sends OPTIONS to it. The port this
+ * function exists to return sits well inside the untruncated prefix, so the
+ * regex reads it directly: it anchors on `@127.0.0.1:` and takes the digits
+ * immediately after, before truncation can bite.
+ *
+ * `findContactPort`'s only job is to prove Asterisk holds a contact worth
+ * routing an INVITE to, so a missing contact must not become a skipped check.
+ */
+export function findContactPort(h: AstHandle, user: string): number | undefined {
+  const out = astExec(h, 'pjsip show contacts');
+  for (const line of out.split('\n')) {
+    const m = new RegExp(`\\b${user}\\b[^\\s]*@127\\.0\\.0\\.1:(\\d+)`).exec(line);
+    if (m) return Number(m[1]);
+  }
+  return undefined;
+}
+
+/**
  * Container logs and recordings, copied into artifacts/ before teardown so a CI
  * failure is diagnosable, then both temp dirs removed. Asterisk's console logger
  * is what `docker logs` captures (ast-conf/logger.conf), so this needs no
