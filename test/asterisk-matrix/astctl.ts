@@ -125,9 +125,20 @@ export async function amiFor(h: AstHandle): Promise<AmiClient> {
  * Originate a call TO the registered browser endpoint: `Channel: PJSIP/<user>`
  * dials the endpoint's AOR, i.e. its registered contact, so the browser sees an
  * inbound INVITE. On answer the SAME channel enters the dialplan at
- * Context/Exten and runs the echo target. `Async: true` returns immediately and
- * the correlated OriginateResponse carries the channel's Uniqueid — which is
- * what the remote-BYE step hands to hangupChannel.
+ * Context/Exten and runs the echo target. `Async: true` makes the AMI *action
+ * reply* immediate; the correlated OriginateResponse carries the channel's
+ * Uniqueid — which is what the remote-BYE step hands to hangupChannel.
+ *
+ * ⚠️ DO NOT `await` THIS FUNCTION WHEN A RINGING CHANNEL MUST BE ANSWERED
+ * CONCURRENTLY. It resolves only when `OriginateResponse` arrives, and for a
+ * ringing channel that is the destination answering — so awaiting it before the
+ * page answers deadlocks until the timeout, with an `AMI: timed out after
+ * Nms waiting for OriginateResponse` that looks exactly like a delivery
+ * failure. Start it, run `answer-incoming`, then await. The spec-local
+ * `originateParked` in `call-inbound.spec.ts` is that shape; use it, or copy
+ * its comment. (Measured the expensive way: the plan itself read this helper as
+ * awaitable, and the resulting run failed 4/4 with a symptom indistinguishable
+ * from risk #4 being real.)
  */
 export async function originateToBrowser(
   h: AstHandle,
@@ -161,12 +172,26 @@ export async function originateToBrowser(
   }
 }
 
-/** Hang the originated channel up — this is what puts a BYE on the wire. */
+/**
+ * Hang the originated channel up — this is what puts a BYE on the wire.
+ *
+ * A channel that is already gone is tolerated: the AMI reply for that case on
+ * this image is `{"Response":"Error","Message":"No such channel"}` (measured
+ * live against the pinned digest with `Hangup, Channel: PJSIP/9999-9999`; do not
+ * retype it from memory — re-measure it if the pattern is ever widened). The
+ * original `/not found/i` never matched it, so the tolerance was dead code and
+ * a vanished channel threw instead.
+ *
+ * Tolerating it does NOT make step 9 vacuous: the contract is asserted
+ * downstream by `expect-remote-terminated`, which requires the BYE to have
+ * reached the page and the diag chain to show established → terminated. A
+ * channel that vanished without that BYE still fails there.
+ */
 export async function hangupChannel(h: AstHandle, uniqueid: string): Promise<void> {
   const ami = await amiFor(h);
   try {
     const res = await ami.action({ Action: 'Hangup', Channel: uniqueid });
-    if (res.Response !== 'Success' && !/not found/i.test(res.Message ?? '')) {
+    if (res.Response !== 'Success' && !/no such channel|not found/i.test(res.Message ?? '')) {
       throw new Error(`Hangup of ${uniqueid} failed: ${JSON.stringify(res)}`);
     }
   } finally {
@@ -193,11 +218,20 @@ export async function hangupChannel(h: AstHandle, uniqueid: string): Promise<voi
  *
  * `findContactPort`'s only job is to prove Asterisk holds a contact worth
  * routing an INVITE to, so a missing contact must not become a skipped check.
+ *
+ * `user` is interpolated into the pattern below, so escape it first. Unescaped,
+ * a caller-supplied id containing a metacharacter breaks the matcher in the two
+ * worst ways: `+1000` and `1000)` throw `SyntaxError` out of the test body, and
+ * `1000.` matches some OTHER endpoint's row and returns that port — a wrong
+ * contact reported as a good one. Both symptoms then surface as the caller's
+ * "Asterisk has no registered contact for …", which is a wrong diagnosis. (Same
+ * escape as Task 12's `countContacts`, deliberately: the two must not drift.)
  */
 export function findContactPort(h: AstHandle, user: string): number | undefined {
   const out = astExec(h, 'pjsip show contacts');
+  const escaped = user.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (const line of out.split('\n')) {
-    const m = new RegExp(`\\b${user}\\b[^\\s]*@127\\.0\\.0\\.1:(\\d+)`).exec(line);
+    const m = new RegExp(`\\b${escaped}\\b[^\\s]*@127\\.0\\.0\\.1:(\\d+)`).exec(line);
     if (m) return Number(m[1]);
   }
   return undefined;

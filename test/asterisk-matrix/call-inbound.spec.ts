@@ -84,16 +84,34 @@ test.describe('asterisk matrix · inbound', () => {
       const { uniqueid: parked, originateError } = originateParked(ctx.handle, { user: '1000', exten: '600' });
       const answered = await runStep(page, 'answer-incoming', CREDENTIALS);
       const uniqueid = await parked;
+      // `answered.ok` BEFORE `originateError()`: if the page never answers, the
+      // originate sits until its 20 s wait expires and `originateError()`
+      // reports `AMI: timed out after 20000ms waiting for OriginateResponse` —
+      // the exact string Step 4 says is NOT risk #4. Reporting the answer
+      // failure first names the cause instead of the symptom.
+      expect(answered.ok, answered.detail).toBe(true);
+      expect((answered.result as InboundStepResult).callState).toBe('established');
       expect(originateError(), `originate: ${originateError()}`).toBeUndefined();
       expect(uniqueid).toBeTruthy();
 
-      expect(answered.ok, answered.detail).toBe(true);
-      expect((answered.result as InboundStepResult).callState).toBe('established');
       // Risk #4's whole content: the server→client INVITE reached the browser
-      // and the browser's 200 went back out. A SIP trace shows the attempt;
-      // only these two prove delivery.
-      expect(answered.events).toContainEqual(expect.objectContaining({ type: 'wire', detail: 'INVITE' }));
-      expect(answered.events).toContainEqual(expect.objectContaining({ type: 'wire', detail: '200' }));
+      // and the browser answered it. A SIP trace shows the attempt; only these
+      // prove delivery.
+      const wire = answered.events.filter((e) => e.type === 'wire').map((e) => e.detail);
+      // POSITIONAL, not membership. Registration already puts a 200 on the wire
+      // before the originate (`[REGISTER, REGISTER, 200]`), so
+      // `toContain('200')` is satisfied by registration alone and proves
+      // nothing about this dialog. The INVITE index is bound and guarded rather
+      // than read inline from the same expression: with no INVITE,
+      // `indexOf` returns -1 and `lastIndexOf('200') > -1` is true for ANY 200,
+      // so the predicate only means "after the INVITE" once the INVITE is known
+      // to be present.
+      const inviteIdx = wire.indexOf('INVITE');
+      expect(inviteIdx, `no INVITE on the wire — wire: ${wire.join(',')}`).toBeGreaterThanOrEqual(0);
+      expect(
+        wire.lastIndexOf('200'),
+        `no 200 after the INVITE — wire: ${wire.join(',')}`,
+      ).toBeGreaterThan(inviteIdx);
     } finally {
       await stun.close();
       await disposeMatrix(ctx);
@@ -112,8 +130,9 @@ test.describe('asterisk matrix · inbound', () => {
       const { uniqueid: parked, originateError } = originateParked(ctx.handle, { user: '1000', exten: '600' });
       const answered = await runStep(page, 'answer-incoming', CREDENTIALS);
       const uniqueid = await parked;
-      expect(originateError(), `originate: ${originateError()}`).toBeUndefined();
+      // Same ordering rule as step 5: name the cause, not the 20 s symptom.
       expect(answered.ok, answered.detail).toBe(true);
+      expect(originateError(), `originate: ${originateError()}`).toBeUndefined();
 
       await hangupChannel(ctx.handle, uniqueid);
 
