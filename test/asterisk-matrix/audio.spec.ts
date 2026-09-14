@@ -2,18 +2,23 @@
 // two-way audio proof for Asterisk.
 //
 // Procedure: register → createCall('sip:600@127.0.0.1') → established → send
-// 1 s of digital silence (page gate), read the partial MixMonitor WAV
-// node-side and record its RMS as the per-run silence floor
-// (`floor = max(floorRms, 0.01)`) → open the gate → the page raises the 440 Hz
-// tone, lets ≥2 s of RTP flow, samples AnalyserNode energy on the remote
-// stream, and checks getStats packet growth both ways → finish-call hangs up
-// (flushing MixMonitor) → the node reads the one new WAV (delta after
-// clearing stale recordings) and computes maxWindowedRms.
+// 1 s of digital silence (page gate), ATTEMPT a per-run silence read of the
+// partial MixMonitor WAV node-side and take the floor as
+// `max(floorRms, 0.01)`. On Asterisk that read finds a bare 44-byte RIFF
+// header, so `floorRms` is null and the floor resolves to the documented 0.01
+// baseline rather than a measured per-run value — the calibration is inert
+// here, and the assertions below compare against that constant (the full
+// measurement is in readRecordingFloor's comment). Then → open the gate → the
+// page raises the 440 Hz tone, lets ≥2 s of RTP flow, samples AnalyserNode
+// energy on the remote stream, and checks getStats packet growth both ways →
+// finish-call hangs up (flushing MixMonitor) → the node reads the one new WAV
+// (delta after clearing stale recordings) and computes maxWindowedRms.
 //
 // THE MILESTONE GATE, stated plainly: two-way audio is programmatically
 // verified by THREE independent observations, ALL of which must hold —
 //   1. page-side AnalyserNode energy of the REMOTE stream (the tone Echo()
-//      returned) is above the measured silence floor;
+//      returned) is above the silence floor — the 0.01 baseline described
+//      above and in readRecordingFloor, for the reason given there;
 //   2. `rtpBothWays` is true — both directions' RTP packet counters grew;
 //   3. node-side `maxWindowedRms` of the PBX's own MixMonitor recording of
 //      the leg is above that same floor.
@@ -67,11 +72,11 @@ interface AudioStepResult {
 }
 
 /**
- * Node-side silence floor from the partial recording. The recordingsDir is
- * shared for the whole Playwright invocation (one container per run, every 600
- * dial writes into it), so audio.spec clears stale WAVs before dialing and
- * asserts its own delta — exactly one new WAV. Recording names are
- * UNIQUEID-based and NOT mtime-ordered — never pick "newest".
+ * Node-side silence floor from the partial recording, when it holds one. The
+ * recordingsDir is shared for the whole Playwright invocation (one container
+ * per run, every 600 dial writes into it), so audio.spec clears stale WAVs
+ * before dialing and asserts its own delta — exactly one new WAV. Recording
+ * names are UNIQUEID-based and NOT mtime-ordered — never pick "newest".
  *
  * MEASURED at authoring time: at the gate (≥1 s into an established call) the
  * file is 44 bytes — the RIFF header alone, data length 0 — because

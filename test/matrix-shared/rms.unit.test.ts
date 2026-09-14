@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { maxWindowedRms, parseRiffWav, readWavPcm16 } from './rms';
+import { maxWindowedRms, parseRiffWav, readWavPcm16, wavRmsLenient } from './rms';
 
 const RATE = 8000;
 function tonePcm(amp: number, hz: number, ms: number): Float32Array {
@@ -57,8 +57,6 @@ describe('maxWindowedRms', () => {
     expect(maxWindowedRms(s, 20, RATE)).toBeGreaterThan(0.5);
   });
 });
-
-import { wavRmsLenient } from './rms';
 
 describe('wavRmsLenient', () => {
   /** A PCM16 RIFF WAV whose declared data length is a lie (mid-write). */

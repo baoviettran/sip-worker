@@ -20,7 +20,7 @@ import { copyFileSync, existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { bootMatrix, disposeMatrix, runStep } from './helpers';
 import { getRecordings, type FsHandle } from './fsctl';
-import { maxWindowedRms, parseRiffWav, readWavPcm16, wavRmsLenient } from '../matrix-shared/rms';
+import { maxWindowedRms, parseRiffWav, wavRmsLenient } from '../matrix-shared/rms';
 import { startStunResponder } from '../matrix-shared/stun';
 
 const CREDENTIALS = { user: '1000', password: 'matrix-pass-2026' };
