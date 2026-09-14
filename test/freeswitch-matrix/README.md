@@ -20,6 +20,12 @@ npm run test:matrix:infra       # vitest: fsboot + fsctl infra tests
 npm run test:matrix:page        # playwright: full spec suite
 ```
 
+`MATRIX_MODE` selects the slice both the specs and the browser projects are
+drawn from: `pr` runs Chromium alone with `audio.spec.ts` structurally excluded
+(`testMatch`), while `nightly` (or unset) runs Chromium + Firefox including the
+audio proof. Registering a browser the CI job did not install fails every test
+with "Executable doesn't exist", so the two must stay in step.
+
 Or run a single spec:
 
 ```bash

@@ -1,7 +1,8 @@
 // test/freeswitch-matrix/playwright.config.ts — FreeSWITCH matrix harness.
 //
-// MATRIX_MODE gates the audio steps: 'pr' excludes audio.spec.ts (no audio
-// hardware needed); 'nightly' or unset includes everything. The globalSetup
+// MATRIX_MODE gates the bounded PR slice: 'pr' excludes audio.spec.ts (no audio
+// hardware needed) and registers the Chromium project alone; 'nightly' or unset
+// includes every spec and both browser projects. The globalSetup
 // (helpers.ts default export) boots ONE FreeSWITCH container per run and its
 // returned teardown stops it; the webServer chains the packed-artifact build
 // (build-matrix.mjs) ahead of the HTTPS page server (server.mjs), so the
@@ -17,6 +18,25 @@ const BASE_URL = process.env.MATRIX_BASE_URL ?? `https://${HOST}:${PORT}`;
 
 const mode = process.env.MATRIX_MODE ?? 'nightly';
 const testMatch = mode === 'pr' ? /^((?!audio\.spec).)*\.spec\.ts$/ : /\.spec\.ts$/;
+
+// The firefox project is registered only outside 'pr': the PR job installs the
+// Chromium engine alone (see .github/workflows/freeswitch-matrix.yml), so a
+// registered firefox project would fail every test with "Executable doesn't
+// exist" rather than skipping anything.
+const firefoxProject = {
+  name: 'firefox',
+  use: {
+    ...devices['Desktop Firefox'],
+    contextOptions: {
+      firefoxUserPrefs: {
+        'media.autoplay.default': 0,
+        'media.autoplay.blocking_policy': 0,
+        'media.navigator.streams.fake': false,
+        'media.peerconnection.ice.loopback': true,
+      },
+    },
+  },
+};
 
 export default defineConfig({
   testDir: matrixDir,
@@ -55,19 +75,6 @@ export default defineConfig({
         },
       },
     },
-    {
-      name: 'firefox',
-      use: {
-        ...devices['Desktop Firefox'],
-        contextOptions: {
-          firefoxUserPrefs: {
-            'media.autoplay.default': 0,
-            'media.autoplay.blocking_policy': 0,
-            'media.navigator.streams.fake': false,
-            'media.peerconnection.ice.loopback': true,
-          },
-        },
-      },
-    },
+    ...(mode === 'pr' ? [] : [firefoxProject]),
   ],
 });
