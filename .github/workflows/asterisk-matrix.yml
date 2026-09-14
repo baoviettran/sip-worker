@@ -145,8 +145,10 @@ jobs:
       # 2026-09-14-v0.9-asterisk-matrix-design.md:293-294 and :309), Playwright
       # exposes no config-level trace redaction, and a scrub that removed the
       # credential while still shipping SIP/SDP would convert an open known
-      # condition into a falsely believed-closed one. Treat this artifact as
-      # runner-local; it is not safe to widen access to.
+      # condition into a falsely believed-closed one. Note where this artifact
+      # goes: it is uploaded to the workflow run's artifact store, and it is
+      # readable by anyone who can read this repository's Actions runs. It is
+      # not safe to widen that access.
       - name: Upload Playwright traces
         if: always()
         uses: actions/upload-artifact@v4
@@ -172,11 +174,12 @@ jobs:
     #   + npm ci (allowance)             =   120 s
     #   + both engines (allowance)       =   240 s
     #   + pulseaudio sink                =    30 s
-    #                                    = 7 230 s ≈ 121 min
+    #   + unit + integrity gates         =   120 s
+    #                                    = 7 350 s ≈ 122.5 min
     # The worst case is not hypothetical here: the Firefox legs are expected red
     # against the PBX, and a hung leg burns its full test timeout on each
     # attempt. This was 90 — below the job's own worst case even before the
-    # docker image pull, which is the one unbounded cost. 150 clears 121 with
+    # docker image pull, which is the one unbounded cost. 150 clears 122.5 with
     # room for it.
     timeout-minutes: 150
     steps:
@@ -263,8 +266,10 @@ jobs:
       # introduced here. The spec requires traces as an artifact
       # (docs/superpowers/specs/2026-09-14-v0.9-asterisk-matrix-design.md:293-294
       # and :309) and Playwright has no config-level trace redaction, so
-      # excluding or half-scrubbing them is not an available remedy. Treat this
-      # artifact as runner-local.
+      # excluding or half-scrubbing them is not an available remedy. As on the
+      # PR job's trace upload: this artifact lands in the workflow run's
+      # artifact store, readable by anyone who can read this repository's
+      # Actions runs — do not widen that access.
       - name: Upload Playwright traces
         if: always()
         uses: actions/upload-artifact@v4
