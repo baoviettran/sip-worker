@@ -320,9 +320,11 @@ interface StepArgs {
    */
   stunPort?: number;
   /**
-   * Caller-supplied RFC 4733 digit sequence for the dtmf step (added by a later
-   * task; unused today). readStepArgs must carry it through rather than drop
-   * the keys it does not know.
+   * Caller-supplied RFC 4733 digit sequence for the dtmf step; runDtmfStep
+   * sends it whole (`sendDtmf` takes a string), and the `?? '5'` default is what
+   * keeps a caller that passes nothing — FreeSWITCH's dtmf.spec.ts — on the
+   * single digit it has always sent. readStepArgs must carry it through rather
+   * than drop the keys it does not know.
    */
   digits?: string;
 }
@@ -932,11 +934,13 @@ async function runUnmuteStep(profile: PbxProfile): Promise<MatrixResult> {
 
 // ---------------------------------------------------------------------------
 // DTMF (matrix step 8): `dtmf` registers, dials the profile's echo target,
-// establishes, and sends RFC 4733 digit '5' through the browser's
-// RTCDTMFSender (telephone-event is negotiated in the offer, so Chromium
-// emits telephone-event RTP packets that the PBX's rfc2833 profile parses
-// into DTMF events). The step only reports dtmfSent + the clean diag chain —
-// the digit assertion is NODE-SIDE against the PBX's event-socket stream.
+// establishes, and sends RFC 4733 digits through the browser's RTCDTMFSender
+// (telephone-event is negotiated in the offer, so Chromium emits
+// telephone-event RTP packets that the PBX's rfc2833 profile parses into DTMF
+// events). The digits are `args.digits`; a caller that passes none sends the
+// single '5' this step has always sent. The step only reports dtmfSent + the
+// clean diag chain — the digit assertion is NODE-SIDE against the PBX's
+// control-plane event stream (FreeSWITCH's event socket, Asterisk's AMI).
 // ---------------------------------------------------------------------------
 async function runDtmfStep(args: StepArgs, profile: PbxProfile): Promise<MatrixResult> {
   const events: MatrixEvent[] = [];
@@ -969,10 +973,11 @@ async function runDtmfStep(args: StepArgs, profile: PbxProfile): Promise<MatrixR
       15_000,
       () => `media=${call.mediaState}`,
     );
+    const digits = args.digits ?? '5';
     const sendDeadline = Date.now() + 10_000;
     for (;;) {
       try {
-        await call.sendDtmf('5');
+        await call.sendDtmf(digits);
         break;
       } catch (error) {
         const code = (error as { code?: string }).code;
@@ -1004,7 +1009,7 @@ async function runDtmfStep(args: StepArgs, profile: PbxProfile): Promise<MatrixR
     assertCleanDiagChain(diagCodes.filter((c) => c !== 'call.dtmf_failed'));
     return {
       ok: true,
-      detail: `dtmf: sent '5' on an established echo call, call ${call.state}, diag ${diagCodes.join('→')}`,
+      detail: `dtmf: sent '${digits}' on an established echo call, call ${call.state}, diag ${diagCodes.join('→')}`,
       result: { callState: call.state, dtmfSent: true, diagCodes: [...diagCodes] },
       events,
     };

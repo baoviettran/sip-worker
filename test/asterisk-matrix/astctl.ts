@@ -262,3 +262,35 @@ export async function stopAsterisk(h: AstHandle): Promise<void> {
   rmSync(h.runtimeDir, { recursive: true, force: true });
   rmSync(h.recordingsDir, { recursive: true, force: true });
 }
+
+/**
+ * The next `count` DTMF digits Asterisk observed, in order. Waits on DTMFEnd
+ * with `Direction: Received` — MEASURED on the pinned image, and both halves of
+ * that predicate are load-bearing:
+ *
+ *   - A single RFC 4733 digit raises DTMFBegin AND DTMFEnd, so waiting on Begin
+ *     would double-count and the sequence assertion would be meaningless.
+ *   - Every digit arrives TWICE, once `Direction: Received` and once
+ *     `Direction: Sent`: the matrix's target is `Echo()`, which re-emits the
+ *     digit it just received back down the channel. A bare `Event === 'DTMFEnd'`
+ *     predicate therefore matches both and returns `11223` for a `1234#` send —
+ *     measured, not hypothesised; that is the failure this filter fixes.
+ *
+ * AMI has no per-action event subscription — a logged-in session receives every
+ * event class (ast-conf/manager.conf is `read = all`) — so this needs nothing
+ * from the client beyond the login it already does. Each wait is deadline-bound
+ * and throws on expiry; a sequence that arrives short or out of order rejects
+ * here rather than resolving a shorter string.
+ */
+export async function collectDtmf(ami: AmiClient, count: number, timeoutMs = 30_000): Promise<string> {
+  const digits: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const ev = await ami.waitForEvent(
+      (e) => e.Event === 'DTMFEnd' && e.Direction === 'Received',
+      timeoutMs,
+      `DTMFEnd ${i + 1} of ${count}`,
+    );
+    digits.push(ev.Digit ?? '');
+  }
+  return digits.join('');
+}
