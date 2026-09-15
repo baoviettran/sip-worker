@@ -692,7 +692,11 @@ function walkDir(dir) {
     // Gitignored build output is not part of the tree this gate reads. Without
     // this skip the key-material scan and the file-count floor see a different
     // input set depending on whether a page run happened first in the same
-    // checkout — `no-src-imports.test.mjs` skips the same four names.
+    // checkout. `no-src-imports.test.mjs` skips `dist`, `node_modules` and
+    // `artifacts`; `test-results` is added here because it is Playwright's
+    // `outputDir`. Measured verdict-neutral today: `dist/matrix.js` is the only
+    // file the skip removes (27 scanned without it, 26 with, against a floor of
+    // `>= 15`), and the key scan sees the same set either way.
     if (
       entry.name === 'dist' ||
       entry.name === 'node_modules' ||
