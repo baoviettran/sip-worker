@@ -174,19 +174,29 @@ export class AmiClient {
     const past = this.lastEvents.findIndex(pred);
     if (past !== -1) return Promise.resolve(this.lastEvents.splice(past, 1)[0]);
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const at = this.waiters.findIndex((w) => w.resolve === resolve);
-        if (at !== -1) this.waiters.splice(at, 1);
-        reject(new Error(`AMI: timed out after ${timeoutMs}ms waiting for ${description}`));
-      }, timeoutMs);
-      this.waiters.push({
+      // The waiter object is captured so the timeout removes THIS waiter.
+      // `findIndex((w) => w.resolve === resolve)` could never match: `w.resolve`
+      // is the wrapper below and `resolve` is this executor's own resolve, so
+      // they are different objects, `at` was always -1, and the splice was dead
+      // code — a timed-out waiter stayed in the list forever. That is a live
+      // hazard, not just a leak: `onData` consults `waiters` before
+      // `lastEvents`, so a stale waiter CLAIMS the next frame matching its
+      // predicate and resolves it into an already-rejected promise, and the
+      // frame then reaches neither `lastEvents` nor any live waiter.
+      const waiter = {
         pred,
         description,
-        resolve: (e) => {
+        resolve: (e: AmiMessage): void => {
           clearTimeout(timer);
           resolve(e);
         },
-      });
+      };
+      const timer = setTimeout(() => {
+        const at = this.waiters.indexOf(waiter);
+        if (at !== -1) this.waiters.splice(at, 1);
+        reject(new Error(`AMI: timed out after ${timeoutMs}ms waiting for ${description}`));
+      }, timeoutMs);
+      this.waiters.push(waiter);
     });
   }
 

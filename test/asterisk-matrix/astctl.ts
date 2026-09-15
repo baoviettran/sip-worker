@@ -152,6 +152,10 @@ export async function originateToBrowser(
       o.timeoutMs ?? 20_000,
       `OriginateResponse for ${o.user}`,
     );
+    // Marked handled at creation: if the action below is rejected, `pending` is
+    // never awaited and would reject unhandled 20 s later, reporting a timeout
+    // for the very OriginateResponse whose rejection already named the cause.
+    pending.catch(() => {});
     const res = await ami.action({
       Action: 'Originate',
       Channel: `PJSIP/${o.user}`,

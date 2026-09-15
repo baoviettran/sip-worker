@@ -46,6 +46,13 @@ test.describe('asterisk matrix · DTMF', () => {
     // that whole cap and then fail on the gate, not on the digits).
     const observed = collectDtmf(ami, DIGITS.length);
     const stepPromise = runStep(page, 'dtmf', { ...CREDENTIALS, stunPort: stun.port, digits: DIGITS });
+    // Both are started here and awaited much later, so mark their rejections
+    // handled NOW. Unhandled, the runner reports them the moment they fail —
+    // a generic crash — instead of at the await below with the digit failure
+    // they actually name. This only suppresses the premature report; the awaits
+    // still throw.
+    observed.catch(() => {});
+    stepPromise.catch(() => {});
     try {
       await page.waitForFunction(
         () => (window as unknown as DtmfGateWindow).__matrixAwaitDtmf === true,

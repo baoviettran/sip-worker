@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createServer, type Server } from 'node:net';
+import { createServer, type Server, type Socket } from 'node:net';
 import { parseAmiFrames, AmiClient } from './ami';
 
 describe('parseAmiFrames', () => {
@@ -94,6 +94,48 @@ describe('AmiClient', () => {
       const pending = ami.waitForEvent((e) => e.Event === 'OriginateResponse', 3_000, 'OriginateResponse');
       await ami.action({ Action: 'Originate', Channel: 'PJSIP/1000' });
       expect((await pending).Uniqueid).toBe('1234.5');
+    } finally {
+      ami.close();
+      server.close();
+    }
+  }, 10_000);
+
+  // A timed-out waiter must be REMOVED. `onData` consults `waiters` before
+  // `lastEvents`, so a stale waiter claims the next frame matching its
+  // predicate and resolves it into an already-rejected promise — the frame then
+  // reaches neither `lastEvents` nor any live waiter. The cleanup meant to
+  // remove it compared the pushed wrapper against the executor's own `resolve`,
+  // which never matched, so the splice was dead code and the waiter leaked.
+  // This asserts the consequence (an unclaimed frame is retained), which is the
+  // half that can actually lose evidence.
+  it('removes a timed-out waiter so it cannot swallow a later matching frame', async () => {
+    let conn: Socket | undefined;
+    const server = createServer((sock) => {
+      conn = sock;
+      sock.write('Asterisk Call Manager/5.0.4\r\n');
+      let buf = Buffer.alloc(0);
+      sock.on('data', (d) => {
+        buf = Buffer.concat([buf, d]);
+        const { frames, rest } = parseAmiFrames(buf);
+        buf = rest;
+        for (const f of frames) {
+          if (f.Action === 'Login') sock.write(`Response: Success\r\nActionID: ${f.ActionID}\r\n\r\n`);
+        }
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+    const ami = await AmiClient.connect({ host: '127.0.0.1', port, username: 'matrix', password: 'matrix-pass-2026' });
+    try {
+      // Nothing ever sends this event, so the wait expires.
+      await expect(ami.waitForEvent((e) => e.Event === 'PeerStatus', 100, 'PeerStatus')).rejects.toThrow(
+        /timed out/,
+      );
+      // The waiter is gone, so this frame is UNCLAIMED and retained. With the
+      // cleanup broken it is claimed by the stale waiter and discarded.
+      conn?.write('Event: PeerStatus\r\nPeer: PJSIP/1000\r\n\r\n');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(ami.events).toContainEqual(expect.objectContaining({ Event: 'PeerStatus' }));
     } finally {
       ami.close();
       server.close();

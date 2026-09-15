@@ -689,6 +689,18 @@ test('every unit spec file the unit gates name exists', () => {
 function walkDir(dir) {
   const out = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    // Gitignored build output is not part of the tree this gate reads. Without
+    // this skip the key-material scan and the file-count floor see a different
+    // input set depending on whether a page run happened first in the same
+    // checkout — `no-src-imports.test.mjs` skips the same four names.
+    if (
+      entry.name === 'dist' ||
+      entry.name === 'node_modules' ||
+      entry.name === 'artifacts' ||
+      entry.name === 'test-results'
+    ) {
+      continue;
+    }
     const full = join(dir, entry.name);
     if (entry.isDirectory()) out.push(...walkDir(full));
     else out.push(full);

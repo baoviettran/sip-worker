@@ -131,6 +131,11 @@ test.describe('matrix · outgoing call two-way audio', () => {
       // so the page parks in its gate while we read the partial WAV.
       const args = { ...CREDENTIALS, stunPort: stun.port };
       const stepPromise = runStep(page, 'outgoing-audio', args);
+      // Awaited only after the floor read below, so a step that fails during
+      // that window would reject unhandled and be reported as a generic crash
+      // rather than the step failure it names. Marked handled at creation; the
+      // `await stepPromise` below still throws.
+      stepPromise.catch(() => {});
       await page.waitForFunction(
         () => (window as unknown as FloorGateWindow).__matrixAwaitFloor === true,
         undefined,
