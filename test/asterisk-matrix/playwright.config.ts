@@ -27,7 +27,38 @@ const firefoxProject = {
   name: 'firefox',
   use: {
     ...devices['Desktop Firefox'],
-    contextOptions: {
+    // firefoxUserPrefs is a LAUNCH option — BrowserContextOptions has no such
+    // key — so this block used to sit under `contextOptions` accepted and
+    // silently ignored, and every pref in it was inert. Moving it here is the
+    // whole fix; no pref was added.
+    //
+    // `media.peerconnection.ice.loopback` is the load-bearing one: it is what
+    // lets Firefox use the harness's loopback STUN responder
+    // (test/matrix-shared/stun.ts). That responder is the only source of a
+    // NON-obfuscated candidate Firefox can gather — host candidates are mDNS
+    // `.local` names — so without it Firefox has no address literal to write
+    // into the offer's connection line, offers `c=IN IP4 0.0.0.0`, and
+    // Asterisk reads that as RFC 3264 hold
+    // (res_pjsip_sdp_rtp.c set_session_media_remotely_held ->
+    // ast_sockaddr_is_any) and answers `a=recvonly`, leaving the browser
+    // send-only with no inbound RTP.
+    //
+    // Measured, one pref block moved and nothing else changed:
+    //   inert   — offer `m=audio 9 ... c=IN IP4 0.0.0.0`, no candidates,
+    //             answer `a=recvonly`, audio step exit 1
+    //   applied — offer carries srflx `127.0.0.1`, `c=IN IP4 127.0.0.1`,
+    //             answer `a=sendrecv`, audio step exit 0
+    //
+    // `media.peerconnection.ice.obfuscate_host_addresses: false` was tried too
+    // and is NOT needed: it measures identically (audio green) while also
+    // exposing Firefox's real global IPv6 host candidate, which ICE then
+    // prefers. Deliberately left at its default.
+    //
+    // This closes the outgoing-audio half only. [firefox] controls.spec still
+    // fails on an unrelated, unresolved cause — ICE reports `connected` on an
+    // IPv6 pair while dtlsState never leaves `connecting`, so no SRTP flows in
+    // either direction. See FINAL-REPORT.md §5.1.
+    launchOptions: {
       firefoxUserPrefs: {
         'media.autoplay.default': 0,
         'media.autoplay.blocking_policy': 0,
