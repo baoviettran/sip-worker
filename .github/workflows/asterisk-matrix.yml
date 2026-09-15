@@ -177,12 +177,23 @@ jobs:
       # goes: it is uploaded to the workflow run's artifact store, and it is
       # readable by anyone who can read this repository's Actions runs. It is
       # not safe to widen that access.
+      # `include-hidden-files` is load-bearing, not tidiness. On a GREEN run the
+      # only thing `retain-on-failure` leaves behind is test-results/.last-run.json
+      # — a dotfile — and upload-artifact@v4 skips hidden files by default, so the
+      # implicit glob matches nothing and `if-no-files-found: error` fails the step
+      # on exactly the runs that went well. MEASURED on PR #2's second run: every
+      # step green, including the matrix PR slice, and the job red on this one
+      # step alone ("No files were found with the provided path: test-results/").
+      # Locally the same green run leaves test-results/.last-run.json (measured),
+      # so the guard is kept rather than dropped: with the dotfile included it
+      # still fires when Playwright never ran at all, which is what it is for.
       - name: Upload Playwright traces
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ast-matrix-pr-traces
           path: test-results/
+          include-hidden-files: true
           if-no-files-found: error
 
   asterisk-matrix-nightly:
@@ -310,10 +321,15 @@ jobs:
       # PR job's trace upload: this artifact lands in the workflow run's
       # artifact store, readable by anyone who can read this repository's
       # Actions runs — do not widen that access.
+      # Same hidden-file trap as the PR job's trace upload — see there for the
+      # measurement. It is worse here: this job runs the full nightly, so the
+      # green run is the normal outcome, and the step would be red on every one
+      # of them.
       - name: Upload Playwright traces
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ast-matrix-nightly-traces
           path: test-results/
+          include-hidden-files: true
           if-no-files-found: error
