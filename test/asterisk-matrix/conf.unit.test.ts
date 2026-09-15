@@ -52,6 +52,17 @@ describe('renderAstConf', () => {
     expect(statSync(join(runtime, 'matrix', 'key.pem')).mode & 0o777).toBe(0o644);
   });
 
+  // The regression for the first CI run (PR #2): the infra gate died with
+  // `loader.c: 'modules.conf' invalid or missing.` → `Module initialization
+  // failed. ASTERISK EXITING!` because mkdtempSync's 0700 dir is not traversable
+  // by the container's uid 1000 when the host uid differs — which it does on a
+  // runner and does not on a developer machine (both 1000). Measured directly:
+  // the same bind mount, 0700 owned by a foreign uid, exits exactly that way;
+  // 0755 boots and answers `core show version`.
+  it('the runtime dir is traversable by the container uid, not just by the host uid', () => {
+    expect(statSync(runtime).mode & 0o777).toBe(0o755);
+  });
+
   it('throws on a residual token rather than booting with a literal placeholder', () => {
     const bad = renderAstConfSource('[transport-wss]\ntype=transport\nprotocol=wss\nbind=127.0.0.1:__NOPE__\n');
     expect(() => renderAstConf(bad, { wssPort: 1, amiPort: 2, httpPort: 3, tls: mintTls() }))

@@ -1,7 +1,7 @@
 // test/asterisk-matrix/conf.ts — renders the committed Asterisk config into a
 // per-run runtime dir: ports token-replaced, per-run TLS written into
 // matrix/. Pure filesystem work in temp dirs; unit-tested without docker.
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { MintedTls } from '../matrix-shared/mint-tls';
@@ -37,6 +37,16 @@ export function renderAstConf(confDir: string, opts: RenderAstOptions): string {
   const runtime = mkdtempSync(join(tmpdir(), 'astconf-'));
   cpSync(confDir, runtime, { recursive: true });
   mkdirSync(join(runtime, 'matrix'), { recursive: true });
+  // mkdtempSync creates 0700, and this dir is bind-mounted read-only at
+  // /etc/asterisk. The container's asterisk drops to uid 1000, so it must be able
+  // to TRAVERSE this dir to read anything inside it — and on a GitHub runner the
+  // host uid is not 1000, so 0700 makes every conf inside read as missing and
+  // Asterisk dies at `Module initialization failed. ASTERISK EXITING!` (measured:
+  // same dir, 0700 owned by a foreign uid → that exact exit; 0755 → boots and
+  // answers `core show version`). It cannot reproduce on a developer machine,
+  // whose uid happens to equal the container's — the same class of bug the 0644
+  // key below documents, one level up.
+  chmodSync(runtime, 0o755);
   // Separate files, not a combined bundle: Asterisk's http.conf tlscertfile and
   // tlsprivatekey take one PEM each, unlike FreeSWITCH's single wss.pem.
   //
