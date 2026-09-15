@@ -1,19 +1,21 @@
-// Packed-artifact build for the FreeSWITCH matrix page harness.
+// Packed-artifact build for every PBX matrix page harness.
 //
-// Produces dist/matrix.js under test/freeswitch-matrix/ — a self-contained
-// IIFE bundle of page.ts resolved against a TEMP FIXTURE's node_modules, not
-// the workspace: the fixture installs the PACKED @sip-worker/core + sip-worker
-// tarballs (pack-workspaces.mjs), so the harness page can never silently
-// consume packages/**/src. `index.html` is committed next to this script and
-// served by server.mjs; the built bundle is the only artifact in dist/
-// (gitignored, like every other gate's dist).
+// Produces dist/matrix.js under process.cwd() — the tree being built (the
+// Playwright webServer runs this script with its `cwd` set to that tree). A
+// self-contained IIFE bundle of the tree's page.ts resolved against a TEMP
+// FIXTURE's node_modules, not the workspace: the fixture installs the PACKED
+// @sip-worker/core + sip-worker tarballs (pack-workspaces.mjs), so the harness
+// page can never silently consume packages/**/src. `index.html` is committed
+// next to this script and served by server.mjs; the built bundle is the only
+// artifact in dist/ (gitignored, like every other gate's dist).
 //
 // Build metadata (__MATRIX_BUILD__) is injected at bundle time with the
 // browser package version, git commit, and SHA-256 of the browser tarball —
 // the build-pilot.mjs pattern.
 import { createHash } from 'node:crypto';
-import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { cp, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -27,17 +29,27 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-const matrixDir = fileURLToPath(new URL('.', import.meta.url));
+// The tree to bundle and write into: the Playwright webServer sets `cwd` to it.
+const matrixDir = process.cwd();
 const distDir = join(matrixDir, 'dist');
 
 const log = (line) => console.log(`[build-matrix] ${line}`);
 
 export async function buildMatrix() {
+  // The tree is the cwd, so a wrong cwd would build a wrong/empty bundle and
+  // still report success — the only symptom being a 503 at page load, far from
+  // the cause. page.ts is the entry every matrix tree has.
+  if (!existsSync(join(matrixDir, 'page.ts'))) {
+    throw new Error(
+      `not a matrix tree: no page.ts in ${matrixDir}. Run this with cwd set to the tree being built (e.g. test/freeswitch-matrix).`,
+    );
+  }
+
   const fixture = await makeTempDir('sip-worker-matrix-');
-  const entryDir = join(fixture, 'entry');
+  const entryRoot = join(fixture, 'entry');
   const tarballDir = join(fixture, 'tarballs');
   await mkdir(distDir, { recursive: true });
-  await mkdir(entryDir, { recursive: true });
+  await mkdir(entryRoot, { recursive: true });
   await mkdir(tarballDir, { recursive: true });
 
   try {
@@ -72,12 +84,27 @@ export async function buildMatrix() {
       coreTarball, browserTarball,
     ], { cwd: fixture });
 
-    log('copying page.ts into the fixture');
-    await cp(join(matrixDir, 'page.ts'), join(entryDir, 'page.ts'));
+    // Copy the tree's harness sources AND the shared ones, preserving the
+    // relative layout: the entry imports '../matrix-shared/…', so the fixture
+    // must mirror the test/ tree (only .ts harness sources travel — specs are
+    // never bundled).
+    log('copying the page tree into the fixture');
+    const isHarnessSource = (f) =>
+      f.endsWith('.ts') && !f.endsWith('.spec.ts') && !f.endsWith('.test.ts') && !f.endsWith('.d.ts');
+    for (const [from, to] of [
+      [matrixDir, join(entryRoot, basename(matrixDir))],
+      [join(matrixDir, '..', 'matrix-shared'), join(entryRoot, 'matrix-shared')],
+    ]) {
+      await mkdir(to, { recursive: true });
+      for (const entry of await readdir(from)) {
+        if (entry === 'dist' || entry === 'node_modules') continue;
+        if (isHarnessSource(entry)) await cp(join(from, entry), join(to, entry));
+      }
+    }
 
     log('esbuild-bundling page.ts against the fixture node_modules');
     await build({
-      entryPoints: [join(entryDir, 'page.ts')],
+      entryPoints: [join(entryRoot, basename(matrixDir), 'page.ts')],
       outfile: join(distDir, 'matrix.js'),
       bundle: true,
       platform: 'browser',

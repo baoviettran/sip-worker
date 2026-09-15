@@ -18,10 +18,10 @@
 import { test, expect } from '@playwright/test';
 import { copyFileSync, existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { createSocket, type RemoteInfo, type Socket } from 'node:dgram';
 import { bootMatrix, disposeMatrix, runStep } from './helpers';
 import { getRecordings, type FsHandle } from './fsctl';
-import { maxWindowedRms, parseRiffWav, readWavPcm16 } from './rms';
+import { maxWindowedRms, parseRiffWav, wavRmsLenient } from '../matrix-shared/rms';
+import { startStunResponder } from '../matrix-shared/stun';
 
 const CREDENTIALS = { user: '1000', password: 'matrix-pass-2026' };
 
@@ -42,39 +42,6 @@ interface AudioStepResult {
   rtp: { ok: boolean; baseline: { inbound: RtpCounters; outbound: RtpCounters }; inbound: RtpCounters; outbound: RtpCounters };
   callState: string;
   remoteTracks: number;
-}
-
-/**
- * RMS of a possibly still-open recording. libsndfile may leave the data-chunk
- * header length stale while record_session is mid-call, so the strict parse
- * runs first and a data-through-EOF fallback rescues a zero/short declared
- * length. Null = no usable floor from the WAV yet (the caller then relies on
- * the 0.01 baseline, which a silent final recording still fails).
- */
-function wavRmsLenient(bytes: Uint8Array): number | null {
-  try {
-    const { pcm, sampleRate } = parseRiffWav(bytes);
-    if (pcm.length < sampleRate / 10) return null; // <100 ms: no usable floor yet
-    return maxWindowedRms(pcm, 20, sampleRate);
-  } catch {
-    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const ascii = (o: number, n: number) => String.fromCharCode(...bytes.subarray(o, o + n));
-    if (ascii(0, 4) !== 'RIFF' || ascii(8, 4) !== 'WAVE') return null;
-    let off = 12;
-    let sampleRate = 0;
-    while (off + 8 <= bytes.byteLength) {
-      const id = ascii(off, 4);
-      const size = dv.getUint32(off + 4, true);
-      if (id === 'fmt ') sampleRate = dv.getUint32(off + 12, true);
-      if (id === 'data') {
-        const pcm = readWavPcm16(bytes.subarray(off + 8));
-        if (pcm.length < sampleRate / 10) return null;
-        return maxWindowedRms(pcm, 20, sampleRate || 8000);
-      }
-      off += 8 + size + (size % 2);
-    }
-    return null;
-  }
 }
 
 /**
@@ -123,54 +90,6 @@ function ensureDtlsPem(handle: FsHandle): string {
     copyFileSync(join(tlsDir, 'wss.pem'), dtlsPem);
   }
   return dtlsPem;
-}
-
-/**
- * Minimal RFC 5389 STUN server on loopback: replies to Binding Requests with
- * XOR-MAPPED-ADDRESS = 127.0.0.1:<source port>. Fed to the page as an
- * iceServer, this makes Chromium gather an srflx 127.0.0.1 candidate — srflx
- * candidates are not mDNS-obfuscated and loopback passes the FreeSWITCH
- * wan.auto candidate ACL, unlike the *.local host candidates Chromium offers
- * by default (which caused the 488 "no suitable candidates found").
- */
-function startStunResponder(): Promise<{ port: number; close: () => Promise<void> }> {
-  const socket: Socket = createSocket('udp4');
-  socket.on('message', (msg: Buffer, rinfo: RemoteInfo) => {
-    // Binding Request: type 0x0001, then length, magic cookie, 12-byte txn id.
-    if (msg.length < 20 || msg[0] !== 0x00 || msg[1] !== 0x01) return;
-    const res = Buffer.alloc(32);
-    res[0] = 0x01;
-    res[1] = 0x01; // Binding Response
-    res[2] = 0x00;
-    res[3] = 0x0c; // message length: one 12-byte attribute
-    msg.copy(res, 4, 4, 20); // magic cookie + transaction id, verbatim
-    // XOR-MAPPED-ADDRESS (0x0020), value: reserved, family IPv4, x-port, x-addr.
-    res[20] = 0x00;
-    res[21] = 0x20;
-    res[22] = 0x00;
-    res[23] = 0x08;
-    res[24] = 0x00; // reserved
-    res[25] = 0x01; // IPv4
-    const xport = rinfo.port ^ 0x2112;
-    res[26] = (xport >> 8) & 0xff;
-    res[27] = xport & 0xff;
-    res.writeUInt32BE((0x7f000001 ^ 0x2112a442) >>> 0, 28);
-    socket.send(res, rinfo.port, rinfo.address);
-  });
-  return new Promise((resolve, reject) => {
-    socket.once('error', reject);
-    socket.bind(0, '127.0.0.1', () => {
-      socket.removeListener('error', reject);
-      resolve({
-        port: (socket.address() as { port: number }).port,
-        close: () =>
-          new Promise<void>((res) => {
-            socket.once('close', () => res());
-            socket.close();
-          }),
-      });
-    });
-  });
 }
 
 test.describe('matrix · outgoing call two-way audio', () => {

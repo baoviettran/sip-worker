@@ -54,7 +54,7 @@ export default defineConfig({
     trace: 'retain-on-failure',
   },
   webServer: {
-    command: 'node build-matrix.mjs && node server.mjs',
+    command: 'node ../matrix-shared/build-matrix.mjs && node ../matrix-shared/server.mjs',
     cwd: matrixDir,
     url: `${BASE_URL}/index.html`,
     ignoreHTTPSErrors: true,

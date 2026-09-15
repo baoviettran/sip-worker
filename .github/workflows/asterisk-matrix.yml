@@ -1,0 +1,335 @@
+# Asterisk call-matrix CI gate — the v0.9 release gate.
+#
+# Modelled on .github/workflows/freeswitch-matrix.yml, which already settles the
+# decisions this file must not re-litigate: no step may report success without
+# having done its work, artifacts are uploaded on always(), secrets are redacted
+# before upload, every job is bounded by a timeout, Firefox gets a PulseAudio
+# null sink, and the engines installed match the projects playwright.config.ts
+# actually registers. Where this file diverges from that model it says so and
+# why — see the nightly job's structural gates and both jobs' timeout comments.
+#
+# The PBX under test is pinned by DIGEST, never a floating tag. The reference
+# the harness boots lives in test/asterisk-matrix/conf.ts (AST_IMAGE) and is
+# asserted against the image the container itself reports by
+# test/asterisk-matrix/astboot.infra.test.ts; it is repeated here so the digest a
+# given CI run used is greppable at the CI layer:
+#
+# andrius/asterisk@sha256:5c96c8f7a17688c79452a4a2a56864b4a7570f4c4276fc353db51e38111bb9c3
+#
+# Loopback-only (127.0.0.1) and --network host are the harness's business, not
+# this file's. No GitHub secret is referenced: the credentials the matrix uses
+# are committed constants in the test tree ('matrix-pass-2026' as the SIP
+# endpoint password and the AMI secret in the Asterisk tree), and the container
+# log and AMI transcript are redacted at source — astctl.stopAsterisk replaces
+# the AMI secret before writing, and AmiClient.flushTranscript does the same.
+# That redaction does NOT extend to the Playwright traces; see the trace upload
+# steps, which record a known and unresolved gap.
+
+name: asterisk-matrix
+
+on:
+  schedule:
+    # Nightly call-matrix release gate. Off the :00/:30 marks, and offset from
+    # freeswitch-matrix.yml's 47 5 * * * so the two gates do not contend for the
+    # same runner minutes.
+    - cron: '23 6 * * *'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  asterisk-matrix-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # The run record (acceptance criterion 8). The harness page appends each
+    # `log()` line to this path through a Playwright binding (helpers.ts reads
+    # the variable — steps.ts is bundled into the browser, where `process` does
+    # not exist). DELIBERATELY OUTSIDE artifacts/: the record exists on every
+    # run, green included, so putting it under artifacts/ would make that
+    # directory never empty and disarm the artifacts step's
+    # if-no-files-found guard on every run in every job. It has its own
+    # directory, its own upload step and its own guard — on a green run
+    # `trace: 'retain-on-failure'` retains no trace and the #status DOM node
+    # dies with the context, so this is the only place the image digest, package
+    # hash, git commit and browser version survive.
+    env:
+      MATRIX_RECORD_FILE: matrix-record/matrix-run-record.txt
+    # Worst case, re-derivable from test/asterisk-matrix/playwright.config.ts
+    # and the step list below:
+    #   8 tests       MATRIX_MODE=pr registers the Chromium project alone and
+    #                 excludes audio.spec.ts (measured: `--list` reports 8)
+    #   2 attempts    retries: process.env.CI ? 1 : 0
+    #   serial        workers: 1, fullyParallel: false — per-test costs add
+    #   180 s/test    timeout: 180_000
+    #     8 x 2 x 180                    = 2 880 s
+    #   + webServer allowance (300 s)    =   300 s
+    #   + boot health probe (60 s)       =    60 s
+    #   + npm ci (allowance)             =   120 s
+    #   + Chromium engine (allowance)    =   120 s
+    #   + pulseaudio sink                =    30 s
+    #   + unit + integrity gates         =   120 s
+    #   + infra container boot/pull      =   180 s
+    #                                    = 3 810 s ≈ 64 min
+    # This was 45, which is below the job's own worst case; raised for the same
+    # reason as the nightly's.
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Mirrors the FreeSWITCH PR job. This job is Chromium-only and Chromium
+      # decodes received media with or without a sink, so the null sink is not
+      # load-bearing here — it is kept because the v0.9 spec's CI structure
+      # section provisions it in both jobs, and because a broken PulseAudio
+      # install should surface in the PR gate rather than first appear in the
+      # nightly. The final line is the fail-loud check: `set -euo pipefail`
+      # makes a missing sink fail the step.
+      - name: Provision a virtual audio sink
+        run: |
+          set -euo pipefail
+          if ! command -v pulseaudio >/dev/null 2>&1; then
+            sudo apt-get update >/dev/null && sudo apt-get install -y pulseaudio >/dev/null
+          fi
+          pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+          pactl load-module module-null-sink sink_name=sipw-null >/dev/null 2>&1 || true
+          pactl set-default-sink sipw-null >/dev/null 2>&1 || true
+          pactl info >/dev/null 2>&1 && pactl list short sinks | grep -q sipw-null
+      # Chromium only: playwright.config.ts registers the firefox project solely
+      # outside 'pr' mode, so installing Firefox here would burn minutes on an
+      # engine no project will use.
+      - name: Install browser engines
+        run: npx playwright install --with-deps chromium
+      - name: Unit tests (no docker, no browser, no audio device)
+        run: npm run test:astmatrix:unit
+      # Created by the integrity task that follows this one in the plan. It is
+      # referenced now, deliberately: running the workflow against a tree where
+      # the gate is absent must fail, not quietly drop the check.
+      - name: Integrity + boundary gates
+        run: npm run test:astmatrix:integrity
+      - name: Docker infra gate (Asterisk boot, WSS transport, AMI)
+        run: npm run test:astmatrix:infra
+      - name: Matrix PR slice (Chromium, every step but the audio proof)
+        env:
+          MATRIX_MODE: 'pr'
+        run: npm run test:astmatrix:page
+      # astctl.ts collects under process.cwd() — the repo root for the npm
+      # script — so this tree's artifacts land in the workspace-root artifacts/
+      # directory, unlike the FreeSWITCH harness, whose runDir sits inside its
+      # own test tree. .gitignore anchors the same path the same way.
+      #
+      # The upload is split into one step per path on purpose. `if-no-files-found`
+      # guards the union of a step's paths, and Playwright always writes
+      # test-results/.last-run.json — so a single combined step would report
+      # success on a run where stopAsterisk failed to collect artifacts/, which
+      # it swallows silently (test/asterisk-matrix/astctl.ts:280-282). That is a
+      # guard that cannot fail against the thing it exists to catch. Separate
+      # steps make a missing artifacts/ a red step.
+      #
+      # The run record is the THIRD such path, and it must not live under
+      # artifacts/. It is written by the harness itself on EVERY run, green
+      # included, so putting it in artifacts/ meant artifacts/ was never empty
+      # and this step's guard could not fire on any run in any job — a green-run
+      # record bought by disarming a red-run detector. matrix-record/ therefore
+      # gets its own step and its own guard: a missing record is a red step, and
+      # a missing artifacts/ is still the red step it was.
+      - name: Upload Asterisk artifacts (container log, AMI transcript, recordings)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ast-matrix-pr-artifacts
+          path: artifacts/
+          if-no-files-found: error
+      - name: Upload the matrix run record (image digest, package hash, commit, browser)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ast-matrix-pr-record
+          path: matrix-record/
+          if-no-files-found: error
+      # KNOWN, UNRESOLVED, PRE-EXISTING. This artifact is uploaded unredacted.
+      # A retained Playwright trace records page.evaluate arguments and outgoing
+      # WebSocket frames (measured during review on Playwright 1.62.0, the
+      # version package.json pins). So on a failure this artifact carries both
+      # the SIP credential the harness hands through evaluate
+      # (test/matrix-shared/helpers.ts:117) and the SIP/SDP the page puts on the
+      # wire, which test/matrix-shared/steps.ts:182-188 records from the
+      # outgoing frame before delegating to super.send().
+      #
+      # The page step engine's own contract — steps.ts:12-13, "it never returns
+      # credentials, SIP messages, or SDP" — still holds and is not in tension
+      # with this: it is a promise about the MatrixResult the step resolves, and
+      # the trace captures the wire independently of what the step returns.
+      #
+      # The plan's global constraint (plan:29 — "no credentials, no SIP
+      # messages, no SDP") forbids that in an uploaded artifact, and of the two
+      # paths this workflow ships, this is the exposed one: artifacts/ is
+      # redacted at source, test-results/ is not redacted at all. This is
+      # inherited, not introduced here —
+      # .github/workflows/freeswitch-matrix.yml:51 and :94 upload the same two
+      # paths with the same contents. The obvious remedy is not available: the
+      # spec requires traces as an artifact (docs/superpowers/specs/
+      # 2026-09-14-v0.9-asterisk-matrix-design.md:293-294 and :309), Playwright
+      # exposes no config-level trace redaction, and a scrub that removed the
+      # credential while still shipping SIP/SDP would convert an open known
+      # condition into a falsely believed-closed one. Note where this artifact
+      # goes: it is uploaded to the workflow run's artifact store, and it is
+      # readable by anyone who can read this repository's Actions runs. It is
+      # not safe to widen that access.
+      # `include-hidden-files` is load-bearing, not tidiness. On a GREEN run the
+      # only thing `retain-on-failure` leaves behind is test-results/.last-run.json
+      # — a dotfile — and upload-artifact@v4 skips hidden files by default, so the
+      # implicit glob matches nothing and `if-no-files-found: error` fails the step
+      # on exactly the runs that went well. MEASURED on PR #2's second run: every
+      # step green, including the matrix PR slice, and the job red on this one
+      # step alone ("No files were found with the provided path: test-results/").
+      # Locally the same green run leaves test-results/.last-run.json (measured),
+      # so the guard is kept rather than dropped: with the dotfile included it
+      # still fires when Playwright never ran at all, which is what it is for.
+      - name: Upload Playwright traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ast-matrix-pr-traces
+          path: test-results/
+          include-hidden-files: true
+          if-no-files-found: error
+
+  asterisk-matrix-nightly:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # Same run record as the PR job, and for the same reason — see there. Both
+    # jobs set it, so the nightly's green run carries the provenance too, and
+    # neither job's artifacts/ guard is disarmed by it.
+    env:
+      MATRIX_RECORD_FILE: matrix-record/matrix-run-record.txt
+    # Worst case, re-derivable from test/asterisk-matrix/playwright.config.ts
+    # and the step list below:
+    #   18 tests     6 spec files x 2 projects — Chromium + Firefox (nightly
+    #                 registers firefox; MATRIX_MODE=pr does not; measured:
+    #                 `--list` reports 9 chromium + 9 firefox)
+    #   2 attempts    retries: process.env.CI ? 1 : 0
+    #   serial        workers: 1, fullyParallel: false — per-test costs add
+    #   180 s/test    timeout: 180_000
+    #    18 x 2 x 180                    = 6 480 s
+    #   + webServer allowance (300 s)    =   300 s
+    #   + boot health probe (60 s)       =    60 s
+    #   + npm ci (allowance)             =   120 s
+    #   + both engines (allowance)       =   240 s
+    #   + pulseaudio sink                =    30 s
+    #   + unit + integrity gates         =   120 s
+    #                                    = 7 350 s ≈ 122.5 min
+    # The worst case is not hypothetical here: the Firefox legs are expected red
+    # against the PBX, and a hung leg burns its full test timeout on each
+    # attempt. This was 90 — below the job's own worst case even before the
+    # docker image pull, which is the one unbounded cost. 150 clears 122.5 with
+    # room for it.
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Firefox's prerequisite: the ubuntu runner has no audio device, so
+      # headless Firefox's cubeb finds no output sink and decodes received
+      # WebRTC audio to silence (docs/ci-browser-gate-notes.md §1). The ALSA
+      # null-PCM fallback exists because pulseaudio does not always come up on a
+      # hosted runner; either path is verified before the step can pass.
+      - name: Provision PulseAudio null sink (Firefox receive path)
+        run: |
+          set -euo pipefail
+          if ! command -v pulseaudio >/dev/null 2>&1; then
+            sudo apt-get update >/dev/null && sudo apt-get install -y pulseaudio >/dev/null
+          fi
+          pulseaudio --start --exit-idle-time=-1 >/dev/null 2>&1 || true
+          pactl load-module module-null-sink sink_name=sipw-null >/dev/null 2>&1 || true
+          pactl set-default-sink sipw-null >/dev/null 2>&1 || true
+          if pactl info >/dev/null 2>&1 && pactl list short sinks | grep -q sipw-null; then
+            echo "pulseaudio null sink ready"
+          else
+            pulseaudio --kill >/dev/null 2>&1 || true
+            echo 'pcm.!default { type null }' | sudo tee /etc/asound.conf >/dev/null
+            grep -q 'type null' /etc/asound.conf
+          fi
+      # Both engines, because this job runs every project playwright.config.ts
+      # registers. The Firefox ICE/autoplay prefs this leg needs are set by the
+      # config itself (contextOptions.firefoxUserPrefs in
+      # test/asterisk-matrix/playwright.config.ts) — there is no runner-level
+      # equivalent to set here, and writing a profile by hand would be a no-op,
+      # since Playwright builds its own profile and reads prefs from the config.
+      - name: Install browser engines
+        run: npx playwright install --with-deps chromium firefox
+      # Divergence from the FreeSWITCH model, deliberate: that workflow's
+      # nightly runs the page matrix alone. This job is the milestone's named
+      # release gate, and a gate that enforces less than the PR slice inverts
+      # its purpose — delete audio.spec.ts or drop a fixture and every PR would
+      # go red while this job stayed green having silently run fewer tests. So
+      # the two structural gates run here as well, before the matrix.
+      #
+      # test:astmatrix:infra is deliberately NOT among them: the Playwright run
+      # already boots a docker Asterisk through the globalSetup boot gate (spec
+      # :307-309), so a second container boot would add runtime for coverage
+      # that is already taken. Do not "restore" it here for symmetry with the
+      # PR job.
+      - name: Unit tests (no docker, no browser, no audio device)
+        run: npm run test:astmatrix:unit
+      - name: Integrity + boundary gates
+        run: npm run test:astmatrix:integrity
+      # Chromium + Firefox + the audio proof. Firefox against either PBX is
+      # known-red on a dev box (controls.spec.ts and audio.spec.ts, both trees,
+      # measured during the step-authoring task) while the no-PBX browser spec
+      # passes; that redness is expected local behaviour and may not reproduce
+      # here. It is recorded, never excluded: the job is not marked
+      # non-blocking, no step swallows a failure, and Firefox stays in the
+      # matrix. A red leg is information — the traces and the container log
+      # are in the uploaded artifacts.
+      - name: Full matrix nightly (Chromium + Firefox + audio proof)
+        env:
+          MATRIX_MODE: 'nightly'
+        run: npm run test:astmatrix:page
+      # Split per path, and for the same reason as the PR job's — see there for
+      # why a single combined step's if-no-files-found guard cannot be trusted.
+      - name: Upload Asterisk artifacts (container log, AMI transcript, recordings)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ast-matrix-nightly-artifacts
+          path: artifacts/
+          if-no-files-found: error
+      - name: Upload the matrix run record (image digest, package hash, commit, browser)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ast-matrix-nightly-record
+          path: matrix-record/
+          if-no-files-found: error
+      # KNOWN, UNRESOLVED, PRE-EXISTING — the full note is on the PR job's
+      # trace upload; it applies identically here. This artifact is uploaded
+      # unredacted and carries the SIP credential and the SIP/SDP of any failed
+      # run (a retained trace records page.evaluate arguments and outgoing
+      # WebSocket frames — measured during review on Playwright 1.62.0, the
+      # version package.json pins). Of the two paths this
+      # job ships, artifacts/ is redacted at source and test-results/ is not.
+      # Inherited from .github/workflows/freeswitch-matrix.yml:51 and :94, not
+      # introduced here. The spec requires traces as an artifact
+      # (docs/superpowers/specs/2026-09-14-v0.9-asterisk-matrix-design.md:293-294
+      # and :309) and Playwright has no config-level trace redaction, so
+      # excluding or half-scrubbing them is not an available remedy. As on the
+      # PR job's trace upload: this artifact lands in the workflow run's
+      # artifact store, readable by anyone who can read this repository's
+      # Actions runs — do not widen that access.
+      # Same hidden-file trap as the PR job's trace upload — see there for the
+      # measurement. It is worse here: this job runs the full nightly, so the
+      # green run is the normal outcome, and the step would be red on every one
+      # of them.
+      - name: Upload Playwright traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ast-matrix-nightly-traces
+          path: test-results/
+          include-hidden-files: true
+          if-no-files-found: error

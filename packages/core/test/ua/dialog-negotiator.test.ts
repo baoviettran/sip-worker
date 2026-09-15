@@ -397,6 +397,13 @@ describe('DialogNegotiator', () => {
       expect(cseqNumber).toBe(initialInviteCSeq + 1);
       expect(reinvite.headers.get('Content-Type')).toBe('application/sdp');
       expect(reinvite.headers.get('To')).toContain(`tag=${h.dialog.remoteTag}`);
+      // RFC 3261 12.2.1: a UAC SHOULD include a Contact in a target refresh
+      // request within a dialog. SHOULD, not MUST — but the peer makes it
+      // load-bearing: Asterisk answers a re-INVITE without one
+      // `400 Missing Contact header` and the request never reaches the
+      // dialplan (sofia-sip tolerates the omission, so the FreeSWITCH matrix
+      // passed without this).
+      expect(reinvite.headers.get('Contact')).toBe(CONTACT);
 
       await expectPending(restart);
       // Complete the negotiation so no rejection leaks.
@@ -784,6 +791,10 @@ describe('DialogNegotiator', () => {
       const reinvite = lastOutboundInvite(h);
       expect(reinvite.method).toBe('INVITE');
       expect(bodyText(reinvite)).toContain('a=sendonly');
+      // Same target-refresh requirement as the restartIce re-INVITE above: the
+      // hold re-INVITE is what Asterisk answers `400 Missing Contact header`
+      // without this header, so hold never reaches the echo application.
+      expect(reinvite.headers.get('Contact')).toBe(CONTACT);
       const cseqNumber = Number(reinvite.headers.get('CSeq')?.trim().split(/\s+/)[0]);
       expect(cseqNumber).toBe(initialCSeq + 1);
       expect(h.negotiator.busy).toBe(true);

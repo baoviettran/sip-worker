@@ -13,3 +13,13 @@ playwright-report/
 blob-report/
 # FreeSWITCH matrix runtime artifacts (fs.log + WAVs per run)
 test/freeswitch-matrix/artifacts/
+# Asterisk matrix runtime artifacts (container log + AMI transcripts per run).
+# Anchored to the repo root: astctl.ts writes them under process.cwd(), which is
+# the repo root for the npm script — unlike the FreeSWITCH harness, whose runDir
+# is inside its own test tree.
+/artifacts/
+# The Asterisk matrix RUN RECORD (MATRIX_RECORD_FILE). Deliberately NOT under
+# /artifacts/: the record is written on every run, green included, so putting it
+# there would make artifacts/ never empty and disarm the CI guard that detects a
+# failed artifact collection. Anchored the same way, for the same reason.
+/matrix-record/

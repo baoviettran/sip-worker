@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { maxWindowedRms, parseRiffWav, readWavPcm16 } from './rms';
+import { maxWindowedRms, parseRiffWav, readWavPcm16, wavRmsLenient } from './rms';
 
 const RATE = 8000;
 function tonePcm(amp: number, hz: number, ms: number): Float32Array {
@@ -55,5 +55,54 @@ describe('maxWindowedRms', () => {
     const s = new Float32Array(RATE);
     s.set(tonePcm(1, 440, 200), Math.round(RATE * 0.4));
     expect(maxWindowedRms(s, 20, RATE)).toBeGreaterThan(0.5);
+  });
+});
+
+describe('wavRmsLenient', () => {
+  /** A PCM16 RIFF WAV whose declared data length is a lie (mid-write). */
+  function wavWithStaleDataLength(samples: Int16Array, sampleRate = 8000, declared?: number): Uint8Array {
+    const dataBytes = samples.length * 2;
+    const buf = new ArrayBuffer(44 + dataBytes);
+    const dv = new DataView(buf);
+    const ascii = (o: number, s: string) => {
+      for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i));
+    };
+    ascii(0, 'RIFF');
+    dv.setUint32(4, 36 + dataBytes, true);
+    ascii(8, 'WAVE');
+    ascii(12, 'fmt ');
+    dv.setUint32(16, 16, true);
+    dv.setUint16(20, 1, true);
+    dv.setUint16(22, 1, true);
+    dv.setUint32(24, sampleRate, true);
+    dv.setUint32(28, sampleRate * 2, true);
+    dv.setUint16(32, 2, true);
+    dv.setUint16(34, 16, true);
+    ascii(36, 'data');
+    dv.setUint32(40, declared ?? dataBytes, true);
+    new Int16Array(buf, 44, samples.length).set(samples);
+    return new Uint8Array(buf);
+  }
+
+  it('recovers the RMS when the declared data length is stale', () => {
+    // Amplitude 16000, not 8000: normalized to ±1 this tone's true max
+    // windowed RMS is 0.345, so the 0.2 floor below has real margin. At
+    // amplitude 8000 the true value is 0.1726 and the assertion cannot pass —
+    // the floor is deliberately above what a silent, truncated, or
+    // wrong-offset read can produce, so it must sit well under the fixture's
+    // actual energy. Both numbers are measured, not estimated.
+    const loud = new Int16Array(16_000);
+    for (let i = 0; i < loud.length; i++) loud[i] = Math.round(16000 * Math.sin((2 * Math.PI * 440 * i) / 8000));
+    const rms = wavRmsLenient(wavWithStaleDataLength(loud, 8000, 0));
+    expect(rms).not.toBeNull();
+    expect(rms as number).toBeGreaterThan(0.2);
+  });
+
+  it('returns null when there is less than 100 ms of audio', () => {
+    expect(wavRmsLenient(wavWithStaleDataLength(new Int16Array(400), 8000))).toBeNull();
+  });
+
+  it('returns null for a non-RIFF buffer rather than throwing', () => {
+    expect(wavRmsLenient(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]))).toBeNull();
   });
 });
