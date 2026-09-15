@@ -44,6 +44,36 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: process.env.CI ? 1 : 0,
+  // A runner-level backstop for the ENTIRE focus class, and the only defence
+  // against the aliased form — `const d = test.describe; d.only(…)` — which no
+  // source-reading rule can follow. MEASURED at the commit that armed it, one
+  // temporary mutation in dtmf.spec.ts at a time, reverted after each: `test.only`,
+  // `test.describe.only`, `test.describe.serial.only`,
+  // `test.describe.parallel.only` and the aliased suite form each exit 1 in list
+  // mode (the integrity gate's own invocation, `--list --reporter=json`, under
+  // MATRIX_MODE=nightly) and 1 in a real run (MATRIX_MODE=pr), the runner naming
+  // the focused title and printing the source line; a correct tree exits 0 in
+  // both. The option is unconditional, so CI=1 cannot change any of that — which
+  // is also why the claim this comment used to carry, that CI=1 left list mode
+  // green, was wrong: CI turns the option on by Playwright's own default.
+  //
+  // It does NOT abort before globalSetup. Measured: the real run boots Asterisk
+  // first, then fails 13 s in on the focus check — the teardown removes the
+  // container, so nothing leaks, but a focused tree pays the boot. (An earlier
+  // draft of this comment claimed it aborted before boot; that was not measured
+  // and is not true.)
+  //
+  // Deliberately `true` rather than `!!process.env.CI`: this tree's whole
+  // discipline is that a focused step must never be silent, and local runs
+  // should fail the same way CI does. The cost is that a developer cannot leave
+  // a stray `.only` in place while debugging — which is the point.
+  //
+  // NOT redundant with the integrity gate's classifier: the gate names the exact
+  // declaration so the failure points at the edit, while this catches what no
+  // source rule can reach. The gate asserts this line is still armed (its
+  // `forbidOnly` rule), so removing the backstop fails CI instead of silently
+  // disarming it.
+  forbidOnly: true,
   timeout: 180_000,
   expect: { timeout: 30_000 },
   reporter: [['list']],

@@ -179,13 +179,15 @@ test('the runner collects exactly the tests MATRIX_MANIFEST names', () => {
     'a matrix test is skipped or marked fixme — a skipped step is not a passing step',
   );
 
-  // `test.only` is the ONE focused-test form the runner cannot see, and THAT
-  // measurement is why a source-level rule exists at all: `--list` does not
-  // apply the focus filter and `forbidOnly` is not set in playwright.config.ts
-  // (measured: the config does not mention it), so there is no runner-level
-  // backstop. The rule itself now lives in the AST walk below, and F20 widened it
-  // to the describe-level form as well; the measurements behind both are
-  // recorded with the classifier, not here.
+  // `test.only` is a focused-test form the `--list` cross-check below cannot see:
+  // `--list` does not apply the focus filter, so list mode reports a focused run as
+  // a complete one. THAT measurement is why a source-level rule exists at all, and
+  // it survives the runner-level backstop — measured at the commit that armed
+  // `forbidOnly: true`, both paths fire, and they say different things: the runner
+  // prints the focused title, this gate names the written declaration and the
+  // reason. The rule itself now lives in the AST walk below, and F20 widened it to
+  // the describe-level form as well; the measurements behind both are recorded
+  // with the classifier, not here.
   //
   // Corrected here: the text rule this replaced claimed "a desync blanks text,
   // so it can only HIDE a `test.only`, never invent one. It cannot turn a
@@ -268,15 +270,22 @@ const SPEC_FILES = [...new Set(Object.values(MATRIX_MANIFEST).map((e) => e.file)
 //   | `test.only/.skip/.fixme/.fail`    | annotated step      | REJECT by name |
 //   | `test.<other>`                    | Playwright API call | IGNORE — not a step, not rejected |
 //   | `test.describe`                   | container           | contributes its title prefix |
-//   | `test.describe.only/.skip/.fixme` | annotated container | REJECT by name, stating which |
+//   | `test.describe` + a focus/skip word anywhere after it | annotated container | REJECT by name, stating which |
 //   | `test.describe.configure`         | container modifier  | IGNORE; contributes NO prefix (it takes an object, not a title) |
-//   | `test.describe.<other>`           | container           | contributes its title prefix; NOT rejected |
+//   | `test.describe.<other>`           | container           | contributes its title prefix |
 //
-// The last row is deliberate. `test.describe.parallel` and `.serial` are
-// legitimate (deprecated) Playwright forms, and rejecting unrecognised describe
-// forms would rebuild F21's false RED in the very place a "tightening" is
-// easiest to justify. Exactly `only` / `skip` / `fixme` are rejected under
-// `describe` — a finite, well-defined set.
+// The annotation test SEARCHES every segment after `describe`; it does not match
+// `segs[1]`. Round 5 matched `segs[1]` alone and whitelisted everything else as a
+// container, to avoid rebuilding F21's false RED on `test.describe.parallel` and
+// `.serial` — legitimate (deprecated) forms that must stay GREEN. That trade was
+// never two-way, and the whitelist was the hole: `test.describe.serial.only(` has
+// THREE segments with the annotation at `segs[2]`, so it landed in the `<other>`
+// bucket, was never rejected, and was silent-green — the focused suite took its
+// steps out of the run while every rule in this gate passed, exit 0, and `--list`
+// listed every test. That was R5-1. Searching the whole chain keeps
+// `parallel`/`serial` GREEN (they carry no annotation) while catching every
+// three-segment focus form; exactly `only` / `skip` / `fixme` are rejected, a
+// finite and well-defined set.
 //
 // **Why IGNORING `test.<other>` is safe, and must not be "tightened" later:**
 // Playwright collects a test ONLY from `test(`, `test.only(`, `test.skip(`,
@@ -295,9 +304,15 @@ const SPEC_FILES = [...new Set(Object.values(MATRIX_MANIFEST).map((e) => e.file)
 // since a hidden declaration changes a file's count); but `test.describe.only`
 // spelled that way LOSES ONLY A TITLE PREFIX, and the count fallback cannot see
 // a lost prefix. So a non-canonical describe focus is caught today only when
-// every title in the six files is a string literal. Closing that needs a
-// runner-level `forbidOnly`, which playwright.config.ts does not set — that is
-// recorded as a residual in the round-5 report rather than papered over here.
+// every title in the six files is a string literal. Closing it needs a
+// runner-level `forbidOnly`, which playwright.config.ts now sets, and the
+// `forbidOnly` rule below keeps it set. Measured (round-5 re-review, temporary
+// edit reverted): it catches the aliased form above. The computed-member
+// spelling is the same runtime shape — anything that reaches the real
+// `test.describe` object raises a focused suite the runner sees — so the same
+// backstop covers it; that spelling was NOT separately measured. The residual
+// therefore degrades from "silent-green" to "caught by the runner, though not
+// named by this classifier", which is recorded in the round-5 report.
 function rootedSegments(node, root) {
   const segs = [];
   let e = node.expression;
@@ -330,8 +345,8 @@ const SUITE_ANNOTATIONS = new Set(['only', 'skip', 'fixme']);
 // redundant with the `--list` rule above — each is a form `--list` cannot see:
 //
 //   * `test.only` — `--list` does not apply the focus filter (measured: all nine
-//     still report `expectedStatus: 'passed'`), and `forbidOnly` is NOT set in
-//     playwright.config.ts, so this rule is the only defence.
+//     still report `expectedStatus: 'passed'`), and `forbidOnly` aborts the run
+//     without saying WHICH declaration to delete. This rule names it.
 //   * `test.skip` / `test.fixme` — collected, and caught by the `--list` rule's
 //     `expectedStatus !== 'passed'` half as well. Named here so the failure
 //     points at the declaration rather than at the runner's report.
@@ -374,8 +389,25 @@ function classifyCallee(node) {
   if (segs.length === 1) return { kind: 'container', callee: 'test.describe' };
   const callee = `test.describe.${segs[1]}`;
   if (segs[1] === 'configure') return { kind: 'api', callee };
-  if (SUITE_ANNOTATIONS.has(segs[1])) {
-    return { kind: 'suiteAnnotation', callee, reason: SUITE_ANNOTATION_REASON[callee] };
+  // A focus/skip word ANYWHERE after `describe`, not only at `segs[1]`. Round 5
+  // read `segs[1]` alone, so `test.describe.serial.only(` — three segments, with
+  // the annotation at `segs[2]` — fell into the `<other>` container bucket, was
+  // never rejected, and was silent-green: the focused suite took its steps out of
+  // the run while every rule in this gate passed and `--list` listed every test.
+  // That was R5-1. `parallel` and `serial` standing alone carry no
+  // annotation, so they remain legitimate containers — which is what round 5's
+  // whitelist was protecting, and it is preserved here without the hole.
+  const annotation = segs.slice(1).find((s) => SUITE_ANNOTATIONS.has(s));
+  if (annotation !== undefined) {
+    return {
+      kind: 'suiteAnnotation',
+      // The WRITTEN path, not `segs[1]`: `test.describe.serial` is not a call
+      // anyone can find in the file, and the whole point of this rule is that the
+      // failure names the declaration to delete. A two-segment focus is
+      // unaffected (`test.describe.only` reads the same either way).
+      callee: `test.describe.${segs.slice(1).join('.')}`,
+      reason: SUITE_ANNOTATION_REASON[`test.describe.${annotation}`],
+    };
   }
   return { kind: 'container', callee };
 }
@@ -490,21 +522,37 @@ function declaredSteps(file) {
 }
 
 // ── Every declaration is plain, and no suite is focused or skipped ─────
-// The `test.only` measurement below is why a source-level rule exists at all:
-// with `test.only` in dtmf.spec.ts, `--list` still reports all nine specs with
-// `expectedStatus: 'passed'` (list mode does not apply the focus filter), and
-// `forbidOnly` under CI=1 does not change that either — measured, exit 0, full
-// JSON. `forbidOnly` is not set in playwright.config.ts in any case (measured:
-// the config does not mention it), so there is no runner-level backstop either.
-// Without a source-level rule a focused test would shrink the run to one step
-// with every gate green — verbatim the harm this whole manifest rule exists to
-// prevent.
+// The `test.only` measurement behind this rule is why a source-level rule exists
+// at all: with `test.only` in dtmf.spec.ts, `--list` still reports every spec with
+// `expectedStatus: 'passed'` (list mode does not apply the focus filter), so the
+// cross-check below reads a focused run as a complete one. That half is still
+// true with the runner-level backstop armed, and the two are not substitutes:
+// `forbidOnly` fails the run and prints the offending title, while this rule
+// fails it in the gate's own words, with the reason. Without either, a focused
+// test would shrink the run to one step with every gate green — verbatim the harm
+// this whole manifest rule exists to prevent.
+//
+// CORRECTED, and the correction is its own finding: this paragraph used to end
+// "`forbidOnly` under CI=1 does not change that either — measured, exit 0, full
+// JSON ... the config does not mention it, so there is no runner-level backstop
+// either." Re-measured at the commit that armed `forbidOnly: true`
+// (matrices run through the gate's own list invocation, `--list --reporter=json`,
+// MATRIX_MODE=nightly): a focused step, a focused `describe`, a
+// `describe.serial.only` and the ALIASED suite form all exit 1 in list mode and
+// 1 in a real run, with the runner naming the declaration. The old sentence's
+// second half was true when written (the config did not set the option) and its
+// first half was not — CI=1 turns the option on by Playwright's own default, so
+// that measurement cannot have been taken under the condition it claims. Both
+// halves are gone rather than re-worded. What the old text was protecting — the
+// claim that a source rule is needed — survives on the `--list` blindness above,
+// which is the half that was measured correctly.
 //
 // The rule is narrowed the same way: it rejects the annotated declarations
 // (step-level and describe-level) and does NOT re-check what `--list` already
 // covers as a set. Both halves matter, and F20 is why: a focused DESCRIBE takes
-// seven of nine steps out of the run without changing any count, so the
-// describe arm is the only rule in this file that can see it.
+// five of the eight steps out of the run while `--list` lists all eight and every
+// count in this file stays green, so the describe arm is the only rule here that
+// can see it by name.
 //
 // Corrected here: the text rule this replaced claimed "a desync blanks text, so
 // it can only HIDE a `test.only`, never invent one. It cannot turn a correct
@@ -529,6 +577,43 @@ test('every matrix step is declared with a plain test() call, and no suite is fo
       );
     }
   }
+});
+
+// ── The runner-level backstop must still be armed ──────────────────────
+// `forbidOnly` is the ONLY defence against the aliased focus form
+// (`const d = test.describe; d.only(…)`): the classifier above reads callees
+// from the tree, and an alias is a different callee that no static rule can
+// follow to its target. A backstop a future edit can delete with nothing going
+// red is the same defect class as the six this file exists to catch, so its
+// presence is asserted here — and asserted STRUCTURALLY, by parsing the config
+// rather than matching its text, so commenting the line out cannot satisfy this
+// rule. That matters: a text match is exactly the kind of check that silently
+// stops checking, which is the subject of this whole file.
+test('playwright.config.ts still arms forbidOnly — the backstop for aliased focus', () => {
+  const path = join(__dirname, 'playwright.config.ts');
+  const sf = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true);
+  const values = [];
+  const visit = (node) => {
+    if (
+      ts.isPropertyAssignment(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === 'forbidOnly'
+    ) {
+      values.push(node.initializer.kind === ts.SyntaxKind.TrueKeyword);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  assert.ok(
+    values.length > 0,
+    'forbidOnly is not set in playwright.config.ts. It is the only defence against ' +
+      '`const d = test.describe; d.only(…)`, which the AST classifier cannot see: without it a ' +
+      'focused suite is silent-green while every other rule in this file passes.',
+  );
+  assert.ok(
+    values.every(Boolean),
+    'forbidOnly is present but not `true` — a falsey value disarms the backstop entirely.',
+  );
 });
 
 // ── The floor: every step body still asserts something ─────────────────
