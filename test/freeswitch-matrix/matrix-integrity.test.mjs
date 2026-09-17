@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { launchOnlyKeysUnderContextOptions } from '../matrix-shared/playwright-config-guard.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -123,4 +124,23 @@ test('no .pem files anywhere in the committed matrix tree', () => {
 
 test('matrix tree is fully enumerated (floor check)', () => {
   assert.ok(allMatrixFiles.length >= 50, `matrix dir has ${allMatrixFiles.length} files, expected >= 50 — scan may be incomplete`);
+});
+
+// ── 4. Playwright launch-only options stay out of contextOptions ────────
+// `firefoxUserPrefs` under `contextOptions` is accepted and silently ignored,
+// making every pref inert and every Firefox leg of the matrix fail while every
+// Chromium leg passes. It shipped in this config once already (279c90e) and the
+// PR job registers Chromium only, so nothing else here catches it. Runs in the
+// PR job via `npm run test:matrix:integrity`.
+
+test('playwright.config.ts keeps launch-only options out of contextOptions', () => {
+  const configPath = join(__dirname, 'playwright.config.ts');
+  const found = launchOnlyKeysUnderContextOptions(readFileSync(configPath, 'utf8'));
+  assert.deepStrictEqual(
+    found,
+    [],
+    `launch-only option(s) under contextOptions in playwright.config.ts — inert there: ${found
+      .map((f) => `${f.key} (line ${f.line})`)
+      .join(', ')}`,
+  );
 });
