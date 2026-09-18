@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 // devDependencies in both CI jobs. `acorn` is deliberately NOT used: it is only
 // transitive, so a lockfile change could remove it.
 import ts from 'typescript';
+import { launchOnlyKeysUnderContextOptions } from '../matrix-shared/playwright-config-guard.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -1082,4 +1083,21 @@ test('the pinned digest in conf.ts matches the one in the CI workflow', () => {
 test('matrix tree is fully enumerated (floor check)', () => {
   const files = walkDir(__dirname);
   assert.ok(files.length >= 15, `asterisk-matrix has ${files.length} files, expected >= 15 — scan may be incomplete`);
+});
+
+// `firefoxUserPrefs` under `contextOptions` is accepted and silently ignored,
+// making every pref inert and every Firefox leg of the matrix fail while every
+// Chromium leg passes. This harness shipped that defect (fixed a420a46) and the
+// PR job installs Chromium only, so nothing else here catches it.
+
+test('playwright.config.ts keeps launch-only options out of contextOptions', () => {
+  const configPath = join(__dirname, 'playwright.config.ts');
+  const found = launchOnlyKeysUnderContextOptions(readFileSync(configPath, 'utf8'));
+  assert.deepStrictEqual(
+    found,
+    [],
+    `launch-only option(s) under contextOptions in playwright.config.ts — inert there: ${found
+      .map((f) => `${f.key} (line ${f.line})`)
+      .join(', ')}`,
+  );
 });

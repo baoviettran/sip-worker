@@ -256,10 +256,11 @@ jobs:
           fi
       # Both engines, because this job runs every project playwright.config.ts
       # registers. The Firefox ICE/autoplay prefs this leg needs are set by the
-      # config itself (contextOptions.firefoxUserPrefs in
-      # test/asterisk-matrix/playwright.config.ts) — there is no runner-level
-      # equivalent to set here, and writing a profile by hand would be a no-op,
-      # since Playwright builds its own profile and reads prefs from the config.
+      # config itself (launchOptions.firefoxUserPrefs in
+      # test/asterisk-matrix/playwright.config.ts — a LAUNCH option, NOT a
+      # contextOptions one, see a420a46) — there is no runner-level equivalent
+      # to set here, and writing a profile by hand would be a no-op, since
+      # Playwright builds its own profile and reads prefs from the config.
       - name: Install browser engines
         run: npx playwright install --with-deps chromium firefox
       # Divergence from the FreeSWITCH model, deliberate: that workflow's
