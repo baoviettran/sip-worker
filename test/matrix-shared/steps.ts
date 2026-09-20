@@ -325,7 +325,7 @@ interface StepArgs {
    *
    * WHY a step needs it is per stack, and no single account covers both:
    *   - FreeSWITCH rejects the offer's mDNS-obfuscated *.local host candidates
-   *     outright — sofia's apply-candidate-acl (wan.auto), 488. Account in
+   *     outright — sofia's candidate ACL, 488. Account in
    *     `test/matrix-shared/stun.ts`.
    *   - Asterisk accepts the offer and the dialog reaches `established`, then NO
    *     media ever flows, because pjsip does not resolve those `.local`
@@ -334,8 +334,11 @@ interface StepArgs {
    *     causal account is hypothesis rather than observation, in
    *     `test/asterisk-matrix/audio.spec.ts`'s header.
    *
-   * In both cases the STUN-learned srflx 127.0.0.1 candidate is NOT obfuscated
-   * and is one the PBX can reach. Neither account is restated here.
+   * In both cases the STUN-learned srflx candidate is NOT obfuscated and is one
+   * the PBX can reach. Its address is whatever the responder observed — a
+   * loopback one for Chromium, the LAN address for Firefox — which is why the
+   * responder reports the observed source rather than a fixed 127.0.0.1.
+   * Neither account is restated here.
    */
   stunPort?: number;
   /**
@@ -388,10 +391,12 @@ function buildPhone(
   const wssPort = readWssPort();
   const domain = '127.0.0.1';
   // When a node-side STUN responder is provided, the ICE agent gathers an
-  // srflx 127.0.0.1 candidate (see StepArgs.stunPort) alongside the mDNS host
-  // candidates. What that fixes is per stack — sofia's candidate ACL on
-  // FreeSWITCH, pjsip not resolving `.local` on Asterisk — and each stack's
-  // account is recorded where it was measured, not here (StepArgs.stunPort).
+  // srflx candidate (see StepArgs.stunPort) alongside the mDNS host candidates.
+  // Its address is the one the responder observed, so it is the browser's own
+  // interface — loopback for Chromium, the LAN address for Firefox. What that
+  // fixes is per stack — sofia's candidate ACL on FreeSWITCH, pjsip not
+  // resolving `.local` on Asterisk — and each stack's account is recorded where
+  // it was measured, not here (StepArgs.stunPort).
   // iceServers is a media-level option (BrowserMediaOptions).
   const diagEvents = opts?.diagnosticsEvents;
   const media: BrowserPhoneOptions['media'] | undefined =
