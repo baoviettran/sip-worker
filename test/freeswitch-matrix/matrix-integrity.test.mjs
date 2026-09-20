@@ -144,3 +144,32 @@ test('playwright.config.ts keeps launch-only options out of contextOptions', () 
       .join(', ')}`,
   );
 });
+
+// ── 5. fs-conf.overlay is the source of truth for every path it carries ──
+// materialize.mjs rebuilds fs-conf/ from the pinned image and then copies the
+// overlay over it (step 6), so any edit made ONLY to fs-conf/ is silently
+// reverted by the documented image-bump procedure (README, "FS-image bump"):
+// the PR job registers Chromium only, so a Chromium-passing regression would
+// resurface in the nightly weeks later inside a commit that reads as an
+// unrelated image bump. An overlay file that is absent from fs-conf/ is a
+// different failure — the overlay's own paths must exist in the output too.
+// This is the parity rule the port-token check above cannot see, because a
+// stale fs-conf/ copy has no tokens to flag.
+test('every fs-conf.overlay path is byte-identical in fs-conf', () => {
+  for (const relPath of overlayRelPaths) {
+    const generated = join(fsConfDir, relPath);
+    if (!existsSync(generated)) {
+      assert.fail(
+        `fs-conf.overlay${relPath} has no counterpart in fs-conf — run ` +
+          '`node test/freeswitch-matrix/materialize.mjs`',
+      );
+    }
+    assert.strictEqual(
+      readFileSync(generated, 'utf8'),
+      readFileSync(join(overlayDir, relPath), 'utf8'),
+      `fs-conf${relPath} differs from its fs-conf.overlay source. Edits must be ` +
+        'made in fs-conf.overlay/ (or mirrored there), or materialize.mjs will ' +
+        'revert them on the next image bump.',
+    );
+  }
+});

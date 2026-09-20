@@ -1,6 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { createSocket } from 'node:dgram';
+import { networkInterfaces } from 'node:os';
 import { startStunResponder } from './stun';
+
+/** IPv4 address text -> the 32-bit value XOR-MAPPED-ADDRESS carries. */
+function ipv4ToInt(address: string): number {
+  const parts = address.split('.').map(Number);
+  return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+}
+
+/** A non-loopback IPv4 to source a request from, or undefined if there is none. */
+const nonLoopbackAddress = Object.values(networkInterfaces())
+  .flat()
+  .find((a) => a?.family === 'IPv4' && !a.internal);
 
 describe('startStunResponder', () => {
   it('answers a Binding Request with the source port in XOR-MAPPED-ADDRESS', async () => {
@@ -36,12 +48,59 @@ describe('startStunResponder', () => {
       const xport = res.readUInt16BE(26);
       const port = xport ^ 0x2112;
       expect(port).toBe(sock.address().port);
-      expect(res.readUInt32BE(28) ^ 0x2112a442).toBe(0x7f000001); // 127.0.0.1
+      // The mapped address is the one the request was OBSERVED from, as RFC 5389
+      // requires — not a hardcoded 127.0.0.1. A fabricated loopback address here
+      // makes a browser whose ICE socket is on another interface (Firefox)
+      // advertise a loopback port nothing is listening on, and the PBX's
+      // connectivity checks to it are dropped.
+      //
+      // Asserted against the LITERAL 0x7f000001, not via ipv4ToInt: this socket
+      // sends to 127.0.0.1 without binding, so the kernel routes the request out
+      // `lo` and the observed address is 127.0.0.1. Using the helper here would
+      // make the assertion move with the implementation — a byte-order bug in
+      // ipv4ToInt would keep it green. The literal pins the wire format.
+      expect(res.readUInt32BE(28) ^ 0x2112a442).toBe(0x7f000001);
     } finally {
       sock.close();
       await stun.close();
     }
   }, 10_000);
+
+  it.skipIf(!nonLoopbackAddress)(
+    'reports the observed source address, not a hardcoded loopback',
+    async () => {
+      const stun = await startStunResponder();
+      // Send from a non-loopback source so a hardcoded 127.0.0.1 reply is
+      // distinguishable from the observed address. `skipIf` rather than an
+      // early return: a hermetic CI container may have no non-loopback IPv4,
+      // and a silent return would be reported as a pass — hiding that this
+      // test did not run exactly where the behaviour matters.
+      const source = nonLoopbackAddress!;
+      const sock = createSocket('udp4');
+      try {
+        const res = await new Promise<Buffer>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('no STUN response within 2s')), 2_000);
+          sock.once('message', (m) => {
+            clearTimeout(timer);
+            resolve(m);
+          });
+          sock.bind(0, source.address, () => {
+            const req = Buffer.alloc(20);
+            req[0] = 0x00;
+            req[1] = 0x01;
+            req.writeUInt32BE(0x2112a442, 4);
+            sock.send(req, stun.port, '127.0.0.1');
+          });
+        });
+        expect(res.readUInt32BE(28) ^ 0x2112a442).toBe(ipv4ToInt(source.address) | 0);
+        expect((res.readUInt16BE(26) ^ 0x2112) >>> 0).toBe(sock.address().port);
+      } finally {
+        sock.close();
+        await stun.close();
+      }
+    },
+    10_000,
+  );
 
   it('frees its port on close', async () => {
     const stun = await startStunResponder();

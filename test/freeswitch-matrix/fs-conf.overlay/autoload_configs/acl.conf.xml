@@ -1,0 +1,28 @@
+<configuration name="acl.conf" description="Network Lists">
+  <!--
+    The candidate ACL the ws-test profile uses to decide which of a peer's ICE
+    candidates it will send connectivity checks to.
+
+    Without this file FreeSWITCH falls back to its auto-generated `wan.auto`
+    list, which denies every private range (10/8, 172.16/12, 192.168/16, …) and
+    allows only public addresses. A browser running on this host therefore has
+    exactly one acceptable candidate: a loopback one. Chromium supplies one,
+    because its ICE host socket is bound to 127.0.0.1, so it works by accident.
+    Firefox binds its ICE host socket to the LAN interface instead, so the only
+    address it can advertise as loopback comes from the harness STUN responder —
+    and a loopback address at a port nothing is listening on is dropped by the
+    kernel before it can ever answer a check.
+
+    This list accepts the loopback and private ranges the matrix actually runs
+    on, so FreeSWITCH checks whichever address the browser truthfully advertises
+    (see test/matrix-shared/stun.ts, which reports the observed source address).
+  -->
+  <network-lists>
+    <list name="matrix.auto" default="deny">
+      <node type="allow" cidr="127.0.0.0/8"/>
+      <node type="allow" cidr="10.0.0.0/8"/>
+      <node type="allow" cidr="172.16.0.0/12"/>
+      <node type="allow" cidr="192.168.0.0/16"/>
+    </list>
+  </network-lists>
+</configuration>

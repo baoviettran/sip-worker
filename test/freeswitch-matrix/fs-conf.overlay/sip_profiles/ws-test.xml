@@ -7,6 +7,12 @@
   <param name="rtp-end-port" value="20100"/>
   <param name="ext-sip-ip" value="127.0.0.1"/>
   <param name="ext-rtp-ip" value="127.0.0.1"/>
+  <!-- Which of the peer's ICE candidates FreeSWITCH will check. Left unset it
+       defaults to the auto-generated `wan.auto`, which denies every private
+       range and so admits only a loopback candidate; Chromium's ICE socket is
+       on loopback and works, Firefox's is on the LAN interface and does not.
+       See autoload_configs/acl.conf.xml. -->
+  <param name="apply-candidate-acl" value="matrix.auto"/>
   <param name="dialplan" value="XML"/>
   <param name="context" value="default"/>
   <param name="auth-calls" value="true"/>
