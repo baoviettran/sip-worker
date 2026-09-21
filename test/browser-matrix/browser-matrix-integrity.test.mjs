@@ -207,7 +207,7 @@ test('the workflow runs the matrix as rows, with a nightly schedule and a publis
   );
   assert.match(yaml, /--expected '\$\{\{ needs\.rows\.outputs\.ids \}\}'/, 'the publisher must be told which rows this event expects');
   assert.match(yaml, /name: Matrix rows for this event/, 'the rows job must be identifiable in the checks list');
-  // The event -> row-set arms. Rule 8 proves `rowMatrixForEvent('pr')` downloads
+  // The event -> row-set arms. Rule 10 proves `rowMatrixForEvent('pr')` downloads
   // nothing; this is the other half, that the workflow ever ASKS for 'pr'.
   // Measured: `pull_request) event=nightly` left every gate green while every PR
   // ran all eight rows and both published sentences ("Pull requests run the
@@ -227,7 +227,7 @@ test('the workflow runs the offline gates in the rows job, before it schedules e
   // The load-bearing part is their POSITION, not their existence: measured,
   // before this wave no workflow ran either gate, so a Playwright bump or a
   // row-table edit shipped green. `rows` is the only host that both gates every
-  // downstream job and runs the gate once — in `engine` it would run nine times
+  // downstream job and runs the gate once — in `engine` it would run eight times
   // for no added coverage, and after the fan-out it would catch a bad row table
   // only once eight jobs were already scheduled.
   const yaml = read('.github/workflows/browser-media.yml');

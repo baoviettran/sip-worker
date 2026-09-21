@@ -193,7 +193,7 @@
         // iceTransportPolicy:'relay') so BOTH endpoints may only select relay
         // candidates. No credentials or SDP are ever placed in the returned
         // plain-data result, which does carry raw candidate lines (addresses,
-        // ports, ufrag) and the responder's observed addresses and ports — see
+        // ports, ufrag) and the responder's observed ports — see
         // gatheredCandidates and stunObservedPorts below.
         const iceServers = scenario === 'stun'
           ? [{ urls: 'stun:127.0.0.1:4101' }]
