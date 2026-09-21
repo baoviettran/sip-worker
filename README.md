@@ -339,7 +339,7 @@ or published; the three workspaces are the release artifacts.
 - `npm run test:package` – packs each workspace tarball into fresh ESM, CommonJS,
   and TypeScript consumers and exercises every advertised subpath
 
-The verified browser matrix — every engine row, how each build is provisioned,
+The browser matrix — every engine row, how each build is provisioned,
 and the version each row must report — is published at
 [`docs/supported-browser-matrix.md`](./docs/supported-browser-matrix.md).
 

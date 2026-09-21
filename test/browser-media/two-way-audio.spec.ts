@@ -72,11 +72,13 @@ test.describe('two-way audio (real RTP, built browser code)', () => {
           `${scenario}: STUN server served ≥1 binding request (got ${result.stunBindingsServed})`,
         ).toEqual(true);
 
-        // …and the reflexive candidate the library gathered must be a mapping
-        // the STUN server OBSERVED. A fabricated mapping — the defect class that
-        // cost the FreeSWITCH Firefox investigation — cannot satisfy this: the
-        // port in the srflx candidate is the client socket's own port, so it
-        // must appear in the observation set the responder recorded.
+        // …and the reflexive candidate the library gathered must carry a port
+        // the STUN server OBSERVED: the port in the srflx candidate is the
+        // client socket's own port, so it must appear in the observation set the
+        // responder recorded, coupling the candidate to a binding our responder
+        // really served. The ADDRESS is not checked here, so this does NOT cover
+        // the FreeSWITCH defect class of a fabricated address — that
+        // address-level guarantee lives in test/matrix-shared/stun.ts.
         //
         // DELIBERATELY NOT ASSERTED: the selected pair type. Two same-realm
         // peers always select host/host whatever STUN did (server.mjs documents

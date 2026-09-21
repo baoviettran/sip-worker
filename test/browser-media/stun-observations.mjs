@@ -3,9 +3,13 @@
 // The scenario's old assertion proved only that the harness's responder was
 // PINGED: the gathered candidate types were console.logged and never asserted,
 // so a call that gathered a server-reflexive candidate and then selected a host
-// pair passed. This module turns the gathered candidates into a claim that a
-// fabricated mapping cannot satisfy: a srflx candidate whose PORT is one the
-// responder actually observed for a binding request.
+// pair passed. This module turns the gathered candidates into a claim about the
+// srflx candidate's PORT alone: it must be one the responder actually observed
+// for a binding request, which couples it to a binding our responder really
+// served. The ADDRESS is not checked here — the harness itself fabricates it
+// (server.mjs maps the XOR-MAPPED-ADDRESS onto 127.0.0.2, preserving the source
+// port) — so this leg does NOT cover the FreeSWITCH defect class of a fabricated
+// address; that address-level guarantee lives in test/matrix-shared/stun.ts.
 //
 // What is deliberately NOT asserted: the selected pair type. Two same-realm
 // peers always choose host/host, whatever STUN did — the same reason

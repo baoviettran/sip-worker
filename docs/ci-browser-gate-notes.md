@@ -18,10 +18,7 @@ required-check change is still outstanding:
   (previous stable)`, …), plus `Browser matrix report (completeness gate)`. **Until
   the required list in repo settings is updated, the matrix is not in it: the row
   checks and the completeness gate are not required, so a red matrix does not block
-  a merge.** (What GitHub does with the stale required check meanwhile is a
-  repository-settings fact this page cannot verify; if it leaves pull requests
-  waiting on a check that never reports, the change is overdue for that reason
-  too.) This is a repository-settings change, not a commit — a human makes it, in
+  a merge.** This is a repository-settings change, not a commit — a human makes it, in
   the same change that edits a row.
 
   **Require only the checks that a pull request actually produces.** The vendor

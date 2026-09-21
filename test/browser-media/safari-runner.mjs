@@ -561,7 +561,9 @@ async function main() {
     stopDriver();
     teardownKeychainTrust();
     // The Safari row's report, in the same shape the Linux rows write, so the
-    // release publication takes one artifact shape from two workflows. `suites`
+    // release publication can take one artifact shape from two workflows — that
+    // publication is NOT yet wired: nothing downloads the `safari-media-<run_id>`
+    // artifact, and the publisher's expected set excludes this row. `suites`
     // is deliberately one entry: this runner's granularity is its own acceptance
     // gates, and it exits on the first failure — pretending to per-file
     // precision the runner does not have would be a worse lie than coarse truth.
@@ -576,7 +578,8 @@ async function main() {
         logProgress(`safari: recorded row safari-current observed ${safariVersion}`);
       } catch (error) {
         // A report failure must not mask the gate's own result, but it must be
-        // visible: the publication step reads this file.
+        // visible here, because the release publication that will consume this
+        // file is not yet wired.
         logProgress(`safari: could not write the matrix report: ${error.message}`);
       }
     }

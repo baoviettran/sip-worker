@@ -2,7 +2,7 @@
 //
 // The single source of truth, read by the provisioner (provision.mjs), the
 // row-driven Playwright config, the CI `rows` job (this file's CLI), and the
-// integrity gate. Plain ESM with no imports, for the same reason
+// integrity gate. Plain ESM, for the same reason
 // test/matrix-shared/playwright-config-guard.mjs is .mjs: `node --test` and a
 // GitHub Actions step both read it with no build step, and the root package is
 // already `"type": "module"`.

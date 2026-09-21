@@ -165,9 +165,12 @@ let stunBindingsServed = 0;
 // The address and port of every request this responder VALIDATED, in the order
 // it served them: index i of `stunObserved` is binding i. Appended on the same
 // line as the counter so a page can slice both by one baseline (see
-// index.html). The client's srflx candidate must carry one of these ports —
-// a fabricated mapping cannot. Bounded so a marathon run cannot grow it
-// without limit; the media suite serves tens of bindings, not thousands.
+// index.html). The client's srflx candidate must carry one of these ports — a
+// fabricated PORT cannot. The address is not checked by that assertion (this
+// server fabricates the mapped address below, keeping the source port), so it
+// is the port-level coupling that is tested here. Bounded so a marathon run
+// cannot grow it without limit; the media suite serves tens of bindings, not
+// thousands.
 const stunObserved = [];
 const STUN_OBSERVED_CAP = 1000;
 // Any UDP datagram that arrived on the STUN port from the page's browsers, served

@@ -291,7 +291,7 @@ test('the Safari gate runs, always, and cannot be neutralised', () => {
   assert.ok(
     gateNameAt !== -1 && gateEnvAt !== -1 && gateRunAt !== -1
       && gateNameAt < gateEnvAt && gateEnvAt < gateRunAt,
-    'the Safari gate must hand its own run the report directory, since the publication reads the file it writes',
+    'the Safari gate must hand its own run the report directory, since the report it writes is uploaded for a release publication that is not yet wired',
   );
 
   // No step may swallow a failure. This is the whole fail-never-skip constraint

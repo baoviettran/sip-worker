@@ -49,8 +49,10 @@ this page is rendered from that table by
   this table can move it.
 - **The `edge-deb` rows unpack a `.deb`** with `dpkg-deb -x` rather than installing it, so
   no vendored package touches the runner's own browser installation. The extraction does
-  not carry the setuid bit Edge's `chrome-sandbox` expects, which is why those rows may
-  launch with `--no-sandbox`.
+  not carry the setuid bit Edge's `chrome-sandbox` expects, so those rows are expected to
+  require `--no-sandbox`. No row passes that flag today: `launchOptionsFor('chromium')`
+  carries only the autoplay and fake-device flags, and `launchTarget` returns the
+  executable path alone.
 
 ## Runs
 

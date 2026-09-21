@@ -191,8 +191,10 @@
         // server started by the gate's own webServer on loopback. Forced relay
         // hands each peer a relay-only RTCPeerConnection config (iceServers +
         // iceTransportPolicy:'relay') so BOTH endpoints may only select relay
-        // candidates. No credentials, SDP, or candidate data are ever placed in
-        // the returned plain-data result.
+        // candidates. No credentials or SDP are ever placed in the returned
+        // plain-data result, which does carry raw candidate lines (addresses,
+        // ports, ufrag) and the responder's observed addresses and ports — see
+        // gatheredCandidates and stunObservedPorts below.
         const iceServers = scenario === 'stun'
           ? [{ urls: 'stun:127.0.0.1:4101' }]
           : scenario === 'relay'
@@ -281,7 +283,7 @@
           peer: [...ctx.gatheredRaw.peer],
         };
         // The ports the responder observed for THIS cycle's bindings, sliced by
-        // the SAME baseline (`stunBaseline`, taken from /stun-count at :194) as
+        // the SAME baseline (`stunBaseline`, taken from `/stun-count`) as
         // the count below: the responder appends to the counter and to the
         // observation array on the same line, so index alignment is the
         // invariant, not a coincidence. If the responder's 1000-entry cap were
