@@ -92,6 +92,11 @@ async function handler(req, res) {
     serveText(res, String(stunBindingsServed), 'text/plain');
     return;
   }
+  if (pathname === '/stun-observed') {
+    // Same-origin readback of the UDP responder, exactly like /stun-count.
+    serveText(res, JSON.stringify({ bindings: stunBindingsServed, observed: stunObserved }), 'application/json');
+    return;
+  }
   if (pathname === '/stun-seen') {
     serveText(res, String(stunPacketsSeen), 'text/plain');
     return;
@@ -157,6 +162,14 @@ const STUN_PORT = Number(process.env.BROWSER_MEDIA_STUN_PORT ?? 4101);
 // binding-request count is identical across engines: 0 when the server was never
 // reached (collapse-to-direct), N>0 when the disabled STUN genuinely served.
 let stunBindingsServed = 0;
+// The address and port of every request this responder VALIDATED, in the order
+// it served them: index i of `stunObserved` is binding i. Appended on the same
+// line as the counter so a page can slice both by one baseline (see
+// index.html). The client's srflx candidate must carry one of these ports —
+// a fabricated mapping cannot. Bounded so a marathon run cannot grow it
+// without limit; the media suite serves tens of bindings, not thousands.
+const stunObserved = [];
+const STUN_OBSERVED_CAP = 1000;
 // Any UDP datagram that arrived on the STUN port from the page's browsers, served
 // or not. Distinguishes "Firefox sent no STUN traffic at all" (raw 0) from
 // "Firefox sent STUN our validator rejected" (raw > 0, bindings 0).
@@ -183,6 +196,7 @@ function startStunServer(host) {
       }
       const txid = msg.subarray(8, 20);
       stunBindingsServed += 1; // a valid RFC-5389 Binding Request was served
+      if (stunObserved.length < STUN_OBSERVED_CAP) stunObserved.push({ address: rinfo.address, port: rinfo.port });
       // XOR-MAPPED-ADDRESS (0x0020) per RFC-5389. A real binding server echoes
       // the address the request appeared to come from. We map onto 127.0.0.2 —
       // a reachable loopback alias DISTINCT from the client's 127.0.0.1 host

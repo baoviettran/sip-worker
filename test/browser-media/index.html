@@ -79,10 +79,18 @@
       // so a post-call getStats local-candidate read misses it. The raw capture
       // records srflx exactly when the STUN binding exchange produced it.
       const gathered = { library: new Set(), peer: new Set() };
+      // The raw candidate lines, per side, in arrival order. The type set above
+      // answers "did this engine gather srflx"; these lines answer the harder
+      // question — did it gather a reflexive mapping the STUN server actually
+      // OBSERVED — which is what the stun scenario now asserts.
+      const gatheredRaw = { library: [], peer: [] };
       const captureCandidates = (pc, side) => {
         try {
           pc.addEventListener('icecandidate', (e) => {
-            const m = e.candidate && e.candidate.candidate && e.candidate.candidate.match(/typ ([a-z]+)/);
+            const line = e.candidate && e.candidate.candidate;
+            if (!line) return;
+            gatheredRaw[side].push(line);
+            const m = line.match(/typ ([a-z]+)/);
             if (m && m[1]) gathered[side].add(m[1]);
           });
         } catch {}
@@ -153,7 +161,9 @@
 
       return {
         controller, manager, ports, pcs, env, emitter, clock,
-        gathered, captureCandidates,
+        gathered,
+        gatheredRaw,
+        captureCandidates,
         liveTimers: () => liveTimers,
         deviceListeners: () => deviceListeners,
         globals: () => ({ gTimers: bridge.gTimers, gListeners: bridge.gListeners }),
@@ -266,6 +276,21 @@
           library: [...ctx.gathered.library].sort(),
           peer: [...ctx.gathered.peer].sort(),
         };
+        result.gatheredCandidates = {
+          library: [...ctx.gatheredRaw.library],
+          peer: [...ctx.gatheredRaw.peer],
+        };
+        // The ports the responder observed for THIS cycle's bindings, sliced by
+        // the SAME baseline (`stunBaseline`, taken from /stun-count at :194) as
+        // the count below: the responder appends to the counter and to the
+        // observation array on the same line, so index alignment is the
+        // invariant, not a coincidence. If the responder's 1000-entry cap were
+        // ever reached in one test run the slice would misalign and the new
+        // assertion would FAIL — a false negative, never a false positive.
+        try {
+          const observed = await (await fetch('/stun-observed')).json();
+          result.stunObservedPorts = observed.observed.slice(stunBaseline).map((o) => o.port);
+        } catch { result.stunObservedPorts = []; }
         // Engine-agnostic STUN proof: the number of RFC-5389 Binding Requests OUR STUN
         // server served WHILE THIS CALL was setting up (current counter minus the
         // per-cycle baseline read before the PC was built; same-origin readbacks
