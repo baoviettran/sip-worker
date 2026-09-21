@@ -19,13 +19,22 @@ this page is rendered from that table by
 
 ## What each column means
 
-- **Expected version** is asserted at provision time and again in-suite by
-  `test/browser-matrix/version.spec.ts`: the row fails unless the launched
-  engine reports exactly this version. A vendor bump is a deliberate commit
-  that changes the row table and this assertion together.
-- **Observed version** is filled in from the `browser-matrix` report artifact of a
-  run (`observedVersion` in each row's JSON). Rows rendered from the table alone
-  show `—`: no version is claimed that a run did not report.
+- **Expected version** is asserted in-suite for every row a job launches:
+  `test/browser-matrix/version.spec.ts` fails the row unless the launched
+  engine reports exactly this version. The vendor rows are asserted a second
+  time at provision time, where `provision.mjs` probes the downloaded binary
+  before the suite starts. The three bundled rows are the exception — the
+  provisioner does not probe a Playwright build, so what pins them is the
+  offline cross-check against `node_modules/playwright-core/browsers.json` in
+  the integrity gate, where a Playwright bump fails. A vendor bump is a
+  deliberate commit that changes the row table and these assertions together.
+- **Observed version** is filled in from the run's `browser-matrix-<row>`
+  artifacts, which the publisher downloads by the `browser-matrix-*` pattern
+  (`observedVersion` in each row's JSON). Rows rendered from the table alone
+  show `—`: no version is claimed that a run did not report. The
+  `safari-current` row has no report in that set: the macOS workflow uploads
+  its report inside `safari-media-<run_id>` under `test-results/browser-matrix/`,
+  and nothing downloads that artifact, so CI never fills this column for it.
 - **Playwright WebKit** is the automated engine on Linux, used as the Safari-family
   proxy. It is not real Safari. The `safari-current` row is the real browser, run by
   the macOS workflow, and its version is **recorded** rather than asserted, because

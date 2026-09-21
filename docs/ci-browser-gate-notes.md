@@ -1,20 +1,34 @@
 # CI browser-gate environment notes
 
 Lessons from making the v0.7 release-gate CI workflows green (commit `057683c`,
-2026-08-16). Both gated workflows had **never been green** in CI history:
+2026-08-16). Both gated workflows had **never been green** in CI history, and one
+required-check change is still outstanding:
 
 - `.github/workflows/browser-media.yml` — a `rows` job that computes the matrix
   from `test/browser-matrix/rows.mjs`, one `engine` job per row (each named by its
   row `label`, 40-minute timeout), a `publisher` job that fails the run when any
   expected row's report is missing or its observed version is wrong, and the
-  forced-TURN `relay` job (ubuntu runner). The PR slice runs the three bundled
-  rows; the nightly `schedule` (`43 3 * * *`) adds the vendor rows.
-- **Branch protection.** The required check named `Chromium / Firefox / WebKit real
-  audio` was replaced by one check per row, each named by the row's `label`
-  (`Chromium (Playwright bundled, current)`, `Chrome (previous stable)`, …) plus
-  `Browser matrix report (completeness gate)`. Update the required list in repo
-  settings in the same change that lands a row edit — a required check whose name
-  no job produces silently stops matching anything.
+  `forced-turn-relay` job (ubuntu runner). Pull requests run the three bundled
+  rows only; a push to `main` and the nightly `schedule` (`43 3 * * *`) both run
+  the full matrix.
+- **Branch protection — still to do, and nothing is enforced until it is done.**
+  The `three-engine` job is gone, so the required check named `Chromium / Firefox /
+  WebKit real audio` no longer exists. Its replacement is one check per row, each
+  named by the row's `label` (`Chromium (Playwright bundled, current)`, `Chrome
+  (previous stable)`, …), plus `Browser matrix report (completeness gate)`. **Until
+  the required list in repo settings is updated, the matrix is not in it: the row
+  checks and the completeness gate are not required, so a red matrix does not block
+  a merge.** (What GitHub does with the stale required check meanwhile is a
+  repository-settings fact this page cannot verify; if it leaves pull requests
+  waiting on a check that never reports, the change is overdue for that reason
+  too.) This is a repository-settings change, not a commit — a human makes it, in
+  the same change that edits a row.
+
+  **Require only the checks that a pull request actually produces.** The vendor
+  rows run on `main` and nightly, never on a pull request, so adding their checks
+  to the required list would leave every PR waiting on a job that never starts.
+  Require the three bundled rows' checks and `Browser matrix report (completeness
+  gate)`; the vendor rows stay covered by the nightly run.
 - `.github/workflows/safari-media.yml` — shipping-Safari media + phone
   acceptance (macOS runner).
 
@@ -154,12 +168,15 @@ These apply to any gate that drives a real browser on a hosted runner:
 ## Verify at first nightly run
 
 The Safari row's report path is verified statically and against the publisher
-offline, but two facts need a macOS runner to confirm, and both are silent when
-they break:
+offline, but two facts need a macOS runner to confirm. One fails loudly; the
+other cannot fail loudly, because nothing reads it:
 
 - that the runner's `safaridriver` populates `capabilities.browserVersion` —
   the runner throws when it does not, so a failure here is loud;
 - that `test-results/browser-matrix/safari-current.json` appears inside the
-  uploaded `safari-media-<run_id>` artifact. If it does not, the publication
-  step reads the Safari row as missing, which is the correct failure but a
-  confusing one to diagnose from the release job alone.
+  uploaded `safari-media-<run_id>` artifact. This one is silent: the upload sets
+  `if-no-files-found: ignore`, so a missing file is a successful upload of
+  nothing. Nothing downloads that artifact either — the publisher's expected set
+  comes from the row matrix, which excludes the runner-provisioned row, so no
+  gate reads a Safari report at all. A missing file leaves no trace beyond this
+  note.

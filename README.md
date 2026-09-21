@@ -345,8 +345,8 @@ and the version each row must report — is published at
 
 - `npm run test:browsermatrix -- <row-id>` — run one matrix row locally
   (`npm run test:browsermatrix -- chrome-previous`).
-- `npm run test:browsermatrix:unit` — the row table, provisioner, reporter, and
-  publisher unit tests.
+- `npm run test:browsermatrix:unit` — the unit tests over the row table, the
+  provisioner, the shared launch options, the reporter, and the publisher.
 - `npm run test:browsermatrix:integrity` — the offline integrity gate for the row
   table, both Playwright configs, the pins, and the CI workflow shape.
 - `npm run test:browsermatrix:docs` — regenerate the published matrix page from the
