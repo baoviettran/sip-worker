@@ -163,3 +163,31 @@ test('matrix tree is fully enumerated (floor check)', () => {
   assert.ok(files.length >= 8, `browser-matrix has ${files.length} files, expected >= 8 — scan may be incomplete`);
   assert.ok(relative(repoRoot, __dirname).startsWith('test/'), 'sanity: this gate lives under test/');
 });
+
+test('the workflow runs the matrix as rows, with a nightly schedule and a publisher', () => {
+  const yaml = read('.github/workflows/browser-media.yml');
+  assert.match(yaml, /schedule:/, 'browser-media.yml needs a nightly schedule (it had none: push and PR only)');
+  assert.match(yaml, /cron: '\d+ \d+ \* \* \*'/, 'the schedule must be a cron expression');
+  for (const job of ['rows:', 'engine:', 'publisher:', 'forced-turn-relay:']) {
+    assert.ok(yaml.includes(`\n  ${job}`), `browser-media.yml has no ${job} job`);
+  }
+  assert.match(yaml, /fromJSON\(needs\.rows\.outputs\.matrix\)/, 'the engine job matrix must come from the row table');
+  assert.match(yaml, /node test\/browser-matrix\/run-row\.mjs/, 'the engine job must run a row through the shared entry point');
+  assert.match(yaml, /--expected '\$\{\{ needs\.rows\.outputs\.ids \}\}'/, 'the publisher must be told which rows this event expects');
+  assert.match(yaml, /name: Matrix rows for this event/, 'the rows job must be identifiable in the checks list');
+});
+
+test('the workflow still installs Playwright engines exactly twice', () => {
+  // test/package/documentation-contract.test.mjs:226 asserts this count. Only
+  // the two jobs that LAUNCH Playwright engines may carry the install step: the
+  // forced-TURN relay job and the row engine job.
+  const yaml = read('.github/workflows/browser-media.yml');
+  assert.equal((yaml.match(/npm run test:browser-media:install/g) ?? []).length, 2, 'exactly two jobs install engines');
+});
+
+test('the old single three-engine job is gone, and its exclusion lives on', () => {
+  const yaml = read('.github/workflows/browser-media.yml');
+  assert.doesNotMatch(yaml, /^  three-engine:/m, 'the three-engine job is replaced by the row matrix');
+  assert.doesNotMatch(yaml, /--project=chromium --project=firefox --project=webkit/, 'the sequential three-project invocation is replaced by per-row jobs');
+  assert.match(yaml, /run-row\.mjs/, 'the relay exclusion is owned by run-row.mjs and asserted by its own rule');
+});
