@@ -224,24 +224,42 @@ test('the Safari gate runs, always, and cannot be neutralised', () => {
   // equivalent *today* — the only step before the gate cannot fail (`|| true`)
   // — and is caught anyway, so that adding a step which can fail doesn't
   // silently take the gate's diagnostic with it.
-  const gateStep = [
-    '      - name: Run the Safari acceptance gates (media + phone controls/recovery)',
-    '        if: always()',
-  ].join('\n');
+  // Every needle below is terminated with its own newline. A needle that stops
+  // mid-line is satisfied by any suffix, so an unterminated `if: always()` would
+  // still pass on `if: always() && github.ref == 'refs/heads/main'` — a gate
+  // that skips on every pull request while the job reports green.
+  const line = (text) => `${text}\n`;
+
+  // The step that runs the media suite must still run it, unconditionally.
+  // Pinned as the name-plus-`if:` pair because the file has three `if: always()`
+  // lines (`:42` here, `:57` on the CA-trust removal, `:74` on the upload), so
+  // the bare `if:` identifies nothing.
+  //
+  // The load-bearing edit this catches today is `if: false`, which turns the
+  // gate into a green job with no media coverage. `if: success()` would be
+  // equivalent *today* — the only step before the gate cannot fail (`|| true`)
+  // — and is caught anyway, so that adding a step which can fail doesn't
+  // silently take the gate's diagnostic with it.
   assert.ok(
-    safari.includes(gateStep),
+    safari.includes(
+      line('      - name: Run the Safari acceptance gates (media + phone controls/recovery)')
+      + line('        if: always()'),
+    ),
     'safari-media.yml must still run its acceptance gate, unconditionally — a skipped gate is a green job with no media coverage',
   );
 
-  // The report directory must reach the runner's own invocation. Asserted as the
-  // two adjacent lines, so the variable cannot be moved into an inert `env:` on
-  // some other step and still satisfy this.
-  const reportEnv = [
-    '          MATRIX_REPORT_DIR: test-results/browser-matrix',
-    '        run: node test/browser-media/safari-runner.mjs',
-  ].join('\n');
+  // The report directory must reach the runner's own invocation, and must sit on
+  // the gate step rather than some other step's inert `env:`. Asserted by
+  // position — the variable between the gate step's name and its `run:` line —
+  // rather than as an adjacent pair, which would also pin it as the step's last
+  // env key and red on a correct workflow that adds a variable or a comment
+  // after it. Terminating the `run:` needle is what catches `…mjs || true`.
+  const gateNameAt = safari.indexOf(line('      - name: Run the Safari acceptance gates (media + phone controls/recovery)'));
+  const gateEnvAt = safari.indexOf(line('          MATRIX_REPORT_DIR: test-results/browser-matrix'));
+  const gateRunAt = safari.indexOf(line('        run: node test/browser-media/safari-runner.mjs'));
   assert.ok(
-    safari.includes(reportEnv),
+    gateNameAt !== -1 && gateEnvAt !== -1 && gateRunAt !== -1
+      && gateNameAt < gateEnvAt && gateEnvAt < gateRunAt,
     'the Safari gate must hand its own run the report directory, since the publication reads the file it writes',
   );
 
@@ -253,26 +271,37 @@ test('the Safari gate runs, always, and cannot be neutralised', () => {
   // substring test fails on the correct file. Anchoring on the key also means a
   // commented-out `# continue-on-error: true` stays inert, which is right — it
   // does nothing.
+  //
+  // The value is read too, and only `false` is accepted. `continue-on-error:
+  // false` is inert, and spelling it out is how an editor documents the
+  // constraint — reding on it would punish the right instinct. Any other value
+  // (including bare `no`/`off`, which Actions need not read as boolean) reds:
+  // fail-closed is the correct direction for this rule.
   assert.ok(
-    !/^\s*continue-on-error\s*:/m.test(safari),
+    !/^\s*continue-on-error\s*:(?!\s*false\b)/m.test(safari),
     'no step in the Safari workflow may swallow a failure',
   );
 
   // The report must ship inside the artifact the publication downloads, under
-  // the name it downloads. The whole `path:` block is asserted, so losing any
-  // entry is loud rather than silent.
-  const upload = [
-    '          name: safari-media-${{ github.run_id }}',
-    '          path: |',
+  // the name it downloads. Each required path is asserted present, so losing one
+  // is loud; adding one is not, because widening an artifact's contents is
+  // ordinary maintenance rather than a weakening.
+  assert.ok(
+    safari.includes(line('          name: safari-media-${{ github.run_id }}')),
+    'the Safari report must ship inside the artifact the publication downloads',
+  );
+  const requiredPaths = [
     '            test-results/',
     '            safari-runner.log',
     '            safari-boot-failure-*.png',
     '            safari-ca.crt',
     '            safari-leaf.crt',
     '            test-results/browser-matrix/',
-  ].join('\n');
-  assert.ok(
-    safari.includes(upload),
-    'the Safari report must ship inside the artifact the publication downloads',
+  ];
+  const missing = requiredPaths.filter((path) => !safari.includes(line(path)));
+  assert.deepEqual(
+    missing,
+    [],
+    `the Safari artifact must still ship: ${missing.join(', ')}`,
   );
 });
