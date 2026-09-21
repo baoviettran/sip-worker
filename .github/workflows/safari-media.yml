@@ -51,6 +51,7 @@ jobs:
           PHONE_HARNESS_PORT: "8444"
           SIP_WSS_PORT: "4200"
           KEYCHAIN_DIR: "${{ runner.temp }}"
+          MATRIX_REPORT_DIR: test-results/browser-matrix
         run: node test/browser-media/safari-runner.mjs
       - name: Remove ephemeral Safari CA trust
         if: always()
@@ -80,5 +81,6 @@ jobs:
             safari-boot-failure-*.png
             safari-ca.crt
             safari-leaf.crt
+            test-results/browser-matrix/
           if-no-files-found: ignore
           retention-days: 7

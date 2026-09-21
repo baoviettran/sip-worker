@@ -48,6 +48,8 @@ import { join } from 'node:path';
 
 import { createFakeServer, createPhoneHandler, startSipWss, makeCertBundle } from '../browser-phone/server.mjs';
 import { handler as mediaHandler } from './server.mjs';
+import { buildReport, writeReport } from '../browser-matrix/report.mjs';
+import { ROWS } from '../browser-matrix/rows.mjs';
 
 const DRIVER_URL = process.env.SAFARIDRIVER_URL || 'http://localhost:4444';
 const DRIVER_BIN = process.env.SAFARIDRIVER_BIN || 'safaridriver';
@@ -89,6 +91,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const errors = [];
 
 let sessionId = null;
+// The Safari the driver actually gave us. Recorded, never asserted: Safari
+// cannot be pinned on a hosted runner, so the matrix publishes what ran instead
+// of claiming a version it did not choose.
+let safariVersion = null;
 let driver = null;
 let httpsServers = [];
 let sipWss = null;
@@ -340,6 +346,7 @@ async function createSafariSession() {
   const platformName = caps.platformName || 'unknown';
   logProgress(`Safari session: browser=${browserVersion} os=${platformVersion} platform=${platformName}`);
   if (browserVersion === 'unknown') throw new Error('Safaridriver returned no browserVersion; cannot attest which Safari ran');
+  safariVersion = browserVersion;
 }
 
 async function navigateTo(url, bootScript, bootFailMsg) {
@@ -553,6 +560,26 @@ async function main() {
     if (sessionId) await wdDelete(`${DRIVER_URL}/session/${sessionId}`);
     stopDriver();
     teardownKeychainTrust();
+    // The Safari row's report, in the same shape the Linux rows write, so the
+    // release publication takes one artifact shape from two workflows. `suites`
+    // is deliberately one entry: this runner's granularity is its own acceptance
+    // gates, and it exits on the first failure — pretending to per-file
+    // precision the runner does not have would be a worse lie than coarse truth.
+    if (safariVersion) {
+      try {
+        writeReport(buildReport({
+          row: ROWS.find((r) => r.id === 'safari-current'),
+          observedVersion: safariVersion,
+          suites: { 'safari-acceptance': errors.length ? 'failed' : 'passed' },
+          env: { runnerOs: process.env.RUNNER_OS ?? process.platform, runId: process.env.GITHUB_RUN_ID ?? 'local' },
+        }));
+        logProgress(`safari: recorded row safari-current observed ${safariVersion}`);
+      } catch (error) {
+        // A report failure must not mask the gate's own result, but it must be
+        // visible: the publication step reads this file.
+        logProgress(`safari: could not write the matrix report: ${error.message}`);
+      }
+    }
     if (sipWss) await closeWithTimeout(() => sipWss.close());
     for (const s of httpsServers) {
       if (s) await closeWithTimeout(() => new Promise((r) => s.close(r)));
