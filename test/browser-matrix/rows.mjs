@@ -38,6 +38,7 @@
 // The bundled rows' pins are cross-checked OFFLINE against
 // node_modules/playwright-core/browsers.json by the integrity gate, so a
 // Playwright bump fails there instead of silently re-labelling the matrix.
+import { fileURLToPath } from 'node:url';
 
 export const ENGINES = ['chromium', 'firefox', 'webkit'];
 export const EVENTS = ['pr', 'main', 'nightly'];
@@ -233,7 +234,7 @@ export function githubOutputs(event) {
 // CLI: `node test/browser-matrix/rows.mjs --event pr` prints the two
 // $GITHUB_OUTPUT lines and nothing else, so a step can append stdout to
 // $GITHUB_OUTPUT verbatim.
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   const eventIndex = process.argv.indexOf('--event');
   const event = eventIndex === -1 ? 'nightly' : process.argv[eventIndex + 1];
   try {

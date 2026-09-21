@@ -16,10 +16,11 @@
 // version against node_modules/playwright-core/browsers.json offline, and
 // version.spec.ts asserts the version the launched build reports in-suite.
 import { execFile } from 'node:child_process';
-import { createWriteStream, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { createWriteStream, mkdirSync, rmSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import https from 'node:https';
 import { ROWS } from './rows.mjs';
 
@@ -134,7 +135,7 @@ export function defaultDeps() {
 }
 
 // CLI. Kept out of the exports above so the unit tests never touch the network.
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   const rowId = process.argv[2];
   const row = ROWS.find((r) => r.id === rowId);
   if (!row) {
