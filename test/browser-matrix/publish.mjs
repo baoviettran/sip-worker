@@ -32,8 +32,28 @@ export function validateReports({ expected, reports }) {
   for (const id of expected) {
     const report = byRow.get(id);
     if (!report) continue;
-    if (report.observedVersion !== report.expectedVersion) {
-      mismatched.push(`${id}: observed ${report.observedVersion ?? 'null'}, expected ${report.expectedVersion}`);
+    // The pin compared against is the TABLE's, never the artifact's own claim:
+    // `report.observedVersion !== report.expectedVersion` only proves the report
+    // agrees with itself, and a stale artifact — one written against a bumped
+    // table — would validate while its engine is a version nobody pinned
+    // (measured: validateReports never read ROWS at all).
+    const row = ROWS.find((r) => r.id === id);
+    if (!row) {
+      mismatched.push(`${id}: not a row in the table`);
+      continue;
+    }
+    // A null observation is the marker report.mjs writes when the version spec
+    // never ran, so it fails even for the row that pins no version: the spec's
+    // third fail-not-skip level rejects "absent or null/mismatched" alike.
+    if (typeof report.observedVersion !== 'string') {
+      mismatched.push(`${id}: no observation recorded${report.reason ? ` (${report.reason})` : ''}`);
+      continue;
+    }
+    // safari-current pins expectedVersion null because the macOS runner provides
+    // it: the row asserts nothing, so any version it RECORDED is acceptable —
+    // only the recording is required.
+    if (row.expectedVersion !== null && report.observedVersion !== row.expectedVersion) {
+      mismatched.push(`${id}: observed ${report.observedVersion}, expected ${row.expectedVersion}`);
     }
   }
   return { ok: missing.length === 0 && mismatched.length === 0, missing, mismatched, extra };
@@ -136,7 +156,16 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
       process.stdout.write(`publish: wrote ${args.out}${args.in ? ` (observed versions from ${args.in})` : ' (from the row table)'}\n`);
       process.exit(0);
     }
-    const expected = (args.expected ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    // T9 hands this the `ids` job output, which rows.mjs emits as a JSON array
+    // (`ids=["chromium-current",…]` — pinned by rows.unit.test.ts and asserted
+    // verbatim in the workflow gate, so neither side can move to CSV alone).
+    // Splitting that on commas leaves every id quoted and bracketed, matching no
+    // report, which reads as missing rows and blames the matrix (measured).
+    // CSV is still accepted so a hand-run and the CI path use one parser.
+    const rawExpected = (args.expected ?? '').trim();
+    const expected = (rawExpected.startsWith('[') ? JSON.parse(rawExpected) : rawExpected.split(','))
+      .map((s) => String(s).trim())
+      .filter(Boolean);
     if (expected.length === 0) throw new Error('--expected is required (the row ids this event must produce)');
     const reports = readReports(args.in);
     const result = validateReports({ expected, reports });
