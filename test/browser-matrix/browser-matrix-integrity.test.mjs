@@ -12,6 +12,7 @@ import {
   EXTRACTED_PATHS, URL_TEMPLATES,
 } from './provision.mjs';
 import { ROWS, rowMatrixForEvent, rowsForEvent, selectRows } from './rows.mjs';
+import { renderMatrixDocs } from './publish.mjs';
 import { launchOnlyKeysUnderContextOptions } from '../matrix-shared/playwright-config-guard.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -75,6 +76,18 @@ test('every row id is referenced by the docs page once it exists', (t) => {
   }
   const text = readFileSync(page, 'utf8');
   for (const row of ROWS) assert.match(text, new RegExp(`\`${row.id}\``), `docs page must name the row ${row.id}`);
+  // The page is generated, so this comparison is the only thing tying it to its
+  // generator: the loop above checks id presence only (`page ⊇ ROWS`), which a
+  // stale page still satisfies. Measured before this assertion existed: a
+  // realistic vendor bump (a row's pin, expectedVersion and label) with no
+  // regeneration left this gate, that loop and `test:docs` all green while the
+  // committed page still published the old pin AND the old label — and the label
+  // is the branch-protection display name.
+  assert.equal(
+    text,
+    `${renderMatrixDocs(ROWS)}\n`,
+    'docs/supported-browser-matrix.md must be exactly what npm run test:browsermatrix:docs renders — regenerate it',
+  );
 });
 
 test('playwright.config.ts keeps launch-only options out of contextOptions', () => {
