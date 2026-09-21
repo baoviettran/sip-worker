@@ -3,8 +3,18 @@
 Lessons from making the v0.7 release-gate CI workflows green (commit `057683c`,
 2026-08-16). Both gated workflows had **never been green** in CI history:
 
-- `.github/workflows/browser-media.yml` — three-engine real-audio + forced-TURN
-  relay (ubuntu runner).
+- `.github/workflows/browser-media.yml` — a `rows` job that computes the matrix
+  from `test/browser-matrix/rows.mjs`, one `engine` job per row (each named by its
+  row `label`, 40-minute timeout), a `publisher` job that fails the run when any
+  expected row's report is missing or its observed version is wrong, and the
+  forced-TURN `relay` job (ubuntu runner). The PR slice runs the three bundled
+  rows; the nightly `schedule` (`43 3 * * *`) adds the vendor rows.
+- **Branch protection.** The required check named `Chromium / Firefox / WebKit real
+  audio` was replaced by one check per row, each named by the row's `label`
+  (`Chromium (Playwright bundled, current)`, `Chrome (previous stable)`, …) plus
+  `Browser matrix report (completeness gate)`. Update the required list in repo
+  settings in the same change that lands a row edit — a required check whose name
+  no job produces silently stops matching anything.
 - `.github/workflows/safari-media.yml` — shipping-Safari media + phone
   acceptance (macOS runner).
 
@@ -26,7 +36,8 @@ cubeb finds no output sink and decodes received WebRTC audio to silence;
 Chromium/WebKit decode regardless. Locally the dev machine has a real ALSA
 card, so the same tests pass 9/9.
 
-**Fix (`.github/workflows/browser-media.yml`, both jobs):** provision a
+**Fix (`.github/workflows/browser-media.yml`, the `engine` and
+`forced-turn-relay` jobs):** provision a
 PulseAudio null sink (with an ALSA null-PCM fallback) before the Playwright
 run, and verify a sink actually exists (fail loudly if neither works).
 
@@ -139,3 +150,16 @@ These apply to any gate that drives a real browser on a hosted runner:
    a stage marker), push it, read the result, then fix the root cause. With
    bounded calls and retained logs each cycle is minutes, not a silent hour.
 3. Prove the library is untouched with `git diff <start>..HEAD -- packages/`.
+
+## Verify at first nightly run
+
+The Safari row's report path is verified statically and against the publisher
+offline, but two facts need a macOS runner to confirm, and both are silent when
+they break:
+
+- that the runner's `safaridriver` populates `capabilities.browserVersion` —
+  the runner throws when it does not, so a failure here is loud;
+- that `test-results/browser-matrix/safari-current.json` appears inside the
+  uploaded `safari-media-<run_id>` artifact. If it does not, the publication
+  step reads the Safari row as missing, which is the correct failure but a
+  confusing one to diagnose from the release job alone.
