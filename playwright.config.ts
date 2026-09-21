@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
+import { launchOptionsFor } from './test/browser-matrix/launch';
 
 /**
  * Real three-engine WebRTC verification (v0.5 media + v0.7 controls/recovery)
@@ -46,15 +47,7 @@ export default defineConfig({
       use: {
         ...devices['Desktop Chrome'],
         ignoreHTTPSErrors: true,
-        launchOptions: {
-          args: [
-            '--autoplay-policy=no-user-gesture-required',
-            // Deterministic injected media-device adapter is used for the
-            // library's getUserMedia; this flag is a belt-and-braces fallback.
-            '--use-fake-device-for-media-stream',
-            '--use-fake-ui-for-media-stream',
-          ],
-        },
+        launchOptions: launchOptionsFor('chromium'),
       },
     },
     {
@@ -62,17 +55,7 @@ export default defineConfig({
       use: {
         ...devices['Desktop Firefox'],
         ignoreHTTPSErrors: true,
-        launchOptions: {
-          firefoxUserPrefs: {
-            // Headless Firefox suspends audio without a gesture; allow it.
-            'media.autoplay.default': 0,
-            'media.autoplay.blocking_policy': 0,
-            'media.navigator.streams.fake': false,
-            // The acceptance infrastructure is intentionally loopback-local. Firefox
-            // otherwise filters loopback STUN/TURN candidates before SDP emission.
-            'media.peerconnection.ice.loopback': true,
-          },
-        },
+        launchOptions: launchOptionsFor('firefox'),
       },
     },
     {
@@ -80,10 +63,7 @@ export default defineConfig({
       use: {
         ...devices['Desktop Safari'],
         ignoreHTTPSErrors: true,
-        // WebKit's launch args have NO --autoplay-policy (that flag is
-        // Chromium-only and webkit rejects it -> instant exit). Audio/gain is
-        // muted by default policy in WebKit; the page side handles autoplay
-        // via the injected media adapter, not a browser launch flag.
+        launchOptions: launchOptionsFor('webkit'),
       },
     },
   ],
