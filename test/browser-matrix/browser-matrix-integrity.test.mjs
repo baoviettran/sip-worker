@@ -210,3 +210,69 @@ test('the old single three-engine job is gone, and its exclusion lives on', () =
   assert.doesNotMatch(yaml, /--project=chromium --project=firefox --project=webkit/, 'the sequential three-project invocation is replaced by per-row jobs');
   assert.match(yaml, /run-row\.mjs/, 'the relay exclusion is owned by run-row.mjs and asserted by its own rule');
 });
+
+test('the Safari gate runs, always, and cannot be neutralised', () => {
+  const safari = read('.github/workflows/safari-media.yml');
+
+  // The step that runs the media suite must still run it, unconditionally.
+  // Pinned as the name-plus-`if:` pair because the file has three `if: always()`
+  // lines (`:42` here, `:57` on the CA-trust removal, `:74` on the upload), so
+  // the bare `if:` identifies nothing.
+  //
+  // The load-bearing edit this catches today is `if: false`, which turns the
+  // gate into a green job with no media coverage. `if: success()` would be
+  // equivalent *today* — the only step before the gate cannot fail (`|| true`)
+  // — and is caught anyway, so that adding a step which can fail doesn't
+  // silently take the gate's diagnostic with it.
+  const gateStep = [
+    '      - name: Run the Safari acceptance gates (media + phone controls/recovery)',
+    '        if: always()',
+  ].join('\n');
+  assert.ok(
+    safari.includes(gateStep),
+    'safari-media.yml must still run its acceptance gate, unconditionally — a skipped gate is a green job with no media coverage',
+  );
+
+  // The report directory must reach the runner's own invocation. Asserted as the
+  // two adjacent lines, so the variable cannot be moved into an inert `env:` on
+  // some other step and still satisfy this.
+  const reportEnv = [
+    '          MATRIX_REPORT_DIR: test-results/browser-matrix',
+    '        run: node test/browser-media/safari-runner.mjs',
+  ].join('\n');
+  assert.ok(
+    safari.includes(reportEnv),
+    'the Safari gate must hand its own run the report directory, since the publication reads the file it writes',
+  );
+
+  // No step may swallow a failure. This is the whole fail-never-skip constraint
+  // for this workflow: without it, a red gate exits 0 and the job goes green.
+  //
+  // Matched as a YAML key at line start, not as a substring: the file's own
+  // header comment reads "there is NO `continue-on-error` and NO ...", so a
+  // substring test fails on the correct file. Anchoring on the key also means a
+  // commented-out `# continue-on-error: true` stays inert, which is right — it
+  // does nothing.
+  assert.ok(
+    !/^\s*continue-on-error\s*:/m.test(safari),
+    'no step in the Safari workflow may swallow a failure',
+  );
+
+  // The report must ship inside the artifact the publication downloads, under
+  // the name it downloads. The whole `path:` block is asserted, so losing any
+  // entry is loud rather than silent.
+  const upload = [
+    '          name: safari-media-${{ github.run_id }}',
+    '          path: |',
+    '            test-results/',
+    '            safari-runner.log',
+    '            safari-boot-failure-*.png',
+    '            safari-ca.crt',
+    '            safari-leaf.crt',
+    '            test-results/browser-matrix/',
+  ].join('\n');
+  assert.ok(
+    safari.includes(upload),
+    'the Safari report must ship inside the artifact the publication downloads',
+  );
+});
