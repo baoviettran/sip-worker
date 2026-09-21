@@ -152,7 +152,7 @@ test('the PR slice stays vendor-free and the Safari row stays out of the Linux m
 
 test('the npm scripts and the vitest include entry exist', () => {
   const pkg = JSON.parse(read('package.json'));
-  for (const script of ['test:browsermatrix', 'test:browsermatrix:unit', 'test:browsermatrix:integrity']) {
+  for (const script of ['test:browsermatrix', 'test:browsermatrix:unit', 'test:browsermatrix:integrity', 'test:browsermatrix:docs']) {
     assert.equal(typeof pkg.scripts[script], 'string', `package.json has no ${script} script`);
   }
   assert.match(read('vitest.config.ts'), /test\/browser-matrix\/\*\*\/\*\.unit\.test\.ts/, 'vitest.config.ts must include the browser-matrix unit tests');
@@ -194,6 +194,47 @@ test('the workflow runs the matrix as rows, with a nightly schedule and a publis
   );
   assert.match(yaml, /--expected '\$\{\{ needs\.rows\.outputs\.ids \}\}'/, 'the publisher must be told which rows this event expects');
   assert.match(yaml, /name: Matrix rows for this event/, 'the rows job must be identifiable in the checks list');
+  // The event -> row-set arms. Rule 8 proves `rowMatrixForEvent('pr')` downloads
+  // nothing; this is the other half, that the workflow ever ASKS for 'pr'.
+  // Measured: `pull_request) event=nightly` left every gate green while every PR
+  // ran all eight rows and both published sentences ("Pull requests run the
+  // bundled rows only") became false. The padding between the arm and the value
+  // is not pinned beyond one-or-more spaces: the arms are column-aligned, and
+  // re-aligning them is an ordinary edit that must not red.
+  for (const [trigger, event] of [['pull_request', 'pr'], ['push', 'main'], ['schedule', 'nightly']]) {
+    assert.match(
+      yaml,
+      new RegExp(`^\\s*${trigger}\\)\\s+event=${event}\\s*;;`, 'm'),
+      `browser-media.yml must map the ${trigger} event to event=${event}, the row set the matrix is computed from`,
+    );
+  }
+});
+
+test('the workflow runs the offline gates in the rows job, before it schedules eight row jobs', () => {
+  // The load-bearing part is their POSITION, not their existence: measured,
+  // before this wave no workflow ran either gate, so a Playwright bump or a
+  // row-table edit shipped green. `rows` is the only host that both gates every
+  // downstream job and runs the gate once — in `engine` it would run nine times
+  // for no added coverage, and after the fan-out it would catch a bad row table
+  // only once eight jobs were already scheduled.
+  const yaml = read('.github/workflows/browser-media.yml');
+  const rowsAt = yaml.indexOf('\n  rows:\n');
+  const engineAt = yaml.indexOf('\n  engine:\n');
+  assert.ok(rowsAt !== -1 && engineAt > rowsAt, 'browser-media.yml must still declare rows before engine');
+  const rowsJob = yaml.slice(rowsAt, engineAt);
+  // Each needle is the whole step — its name line plus its `run:` line, both
+  // newline terminated — so a renamed step or a dropped invocation reds here
+  // rather than reporting a green run with a latent gate.
+  const steps = [
+    '      - name: Unit tests (no docker, no browser, no audio device)\n        run: npm run test:browsermatrix:unit\n',
+    '      - name: Integrity + boundary gates\n        run: npm run test:browsermatrix:integrity\n',
+  ];
+  const missing = steps.filter((step) => !rowsJob.includes(step));
+  assert.deepEqual(
+    missing,
+    [],
+    `the rows job must run the offline gates: missing ${missing.map((step) => step.trim().split('\n')[0]).join(', ')}`,
+  );
 });
 
 test('the workflow still installs Playwright engines exactly twice', () => {
@@ -254,9 +295,10 @@ test('the Safari gate runs, always, and cannot be neutralised', () => {
   );
 
   // No step may swallow a failure. This is the whole fail-never-skip constraint
-  // for this workflow: without it, a red gate exits 0 and the job goes green.
+  // for BOTH gated workflows: without it, a red gate exits 0 and the job goes
+  // green.
   //
-  // Matched as a YAML key at line start, not as a substring: the file's own
+  // Matched as a YAML key at line start, not as a substring: safari-media.yml's
   // header comment reads "there is NO `continue-on-error` and NO ...", so a
   // substring test fails on the correct file. Anchoring on the key also means a
   // commented-out `# continue-on-error: true` stays inert, which is right — it
@@ -266,11 +308,17 @@ test('the Safari gate runs, always, and cannot be neutralised', () => {
   // false` is inert, and spelling it out is how an editor documents the
   // constraint — reding on it would punish the right instinct. Any other value
   // (including bare `no`/`off`, which Actions need not read as boolean) reds:
-  // fail-closed is the correct direction for this rule.
-  assert.ok(
-    !/^\s*continue-on-error\s*:(?!\s*false\b)/m.test(safari),
-    'no step in the Safari workflow may swallow a failure',
-  );
+  // fail-closed is the correct direction for this rule. The message names the
+  // workflow, because the two differ in what they run, not in this rule.
+  for (const [workflow, text] of [
+    ['safari-media.yml', safari],
+    ['browser-media.yml', read('.github/workflows/browser-media.yml')],
+  ]) {
+    assert.ok(
+      !/^\s*continue-on-error\s*:(?!\s*false\b)/m.test(text),
+      `no step in ${workflow} may swallow a failure`,
+    );
+  }
 
   // The report must ship inside the artifact the publication downloads, under
   // the name it downloads. Each required path is asserted present, so losing one

@@ -40,6 +40,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Unit tests (no docker, no browser, no audio device)
+        run: npm run test:browsermatrix:unit
+      - name: Integrity + boundary gates
+        run: npm run test:browsermatrix:integrity
       - name: Compute the row matrix for this event
         id: rows
         run: |
