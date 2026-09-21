@@ -214,16 +214,6 @@ test('the old single three-engine job is gone, and its exclusion lives on', () =
 test('the Safari gate runs, always, and cannot be neutralised', () => {
   const safari = read('.github/workflows/safari-media.yml');
 
-  // The step that runs the media suite must still run it, unconditionally.
-  // Pinned as the name-plus-`if:` pair because the file has three `if: always()`
-  // lines (`:42` here, `:57` on the CA-trust removal, `:74` on the upload), so
-  // the bare `if:` identifies nothing.
-  //
-  // The load-bearing edit this catches today is `if: false`, which turns the
-  // gate into a green job with no media coverage. `if: success()` would be
-  // equivalent *today* — the only step before the gate cannot fail (`|| true`)
-  // — and is caught anyway, so that adding a step which can fail doesn't
-  // silently take the gate's diagnostic with it.
   // Every needle below is terminated with its own newline. A needle that stops
   // mid-line is satisfied by any suffix, so an unterminated `if: always()` would
   // still pass on `if: always() && github.ref == 'refs/heads/main'` — a gate
