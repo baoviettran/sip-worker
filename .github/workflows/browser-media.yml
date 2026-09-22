@@ -1,25 +1,75 @@
-name: Browser Media (three-engine) + forced TURN relay
+name: Browser Media (row matrix) + forced TURN relay
 
 on:
   push:
     branches: [main]
   pull_request:
+  # The full matrix — vendor rows included — runs nightly. The PR slice runs the
+  # bundled rows only and downloads nothing from a vendor.
+  schedule:
+    - cron: '43 3 * * *'
 
 # Mandatory real-browser + forced-TURN evidence for the v0.5 media and v0.7
-# controls/recovery release gates. Both jobs FAIL on absent infrastructure
-# (missing TURN vars, an engine that cannot meet the contract, or a relay that
-# does not relay). There is NO continue-on-error and NO successful skip path —
-# required capabilities cannot be skipped. A failing gate blocks the release
+# controls/recovery release gates. All three job kinds FAIL on absent
+# infrastructure: the row engine job (an engine that cannot meet the contract),
+# the publisher (a row whose report is missing, or whose observed version is not
+# the pinned one), and the relay job (missing TURN vars, or a relay that does not
+# relay). There is NO continue-on-error and NO successful skip path — required
+# capabilities cannot be skipped. A failing gate blocks the release
 # prerequisite.
 concurrency:
   group: browser-media-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  three-engine:
-    name: Chromium / Firefox / WebKit real audio
+  # The row table decides who runs. One job computing the matrix keeps the table
+  # as the single source of truth: a row added to rows.mjs appears here with no
+  # YAML edit, and the `ids` output is what the publisher checks completeness
+  # against.
+  rows:
+    name: Matrix rows for this event
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    outputs:
+      ids: ${{ steps.rows.outputs.ids }}
+      matrix: ${{ steps.rows.outputs.matrix }}
+      event: ${{ steps.rows.outputs.event }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Unit tests (no docker, no browser, no audio device)
+        run: npm run test:browsermatrix:unit
+      - name: Integrity + boundary gates
+        run: npm run test:browsermatrix:integrity
+      - name: Compute the row matrix for this event
+        id: rows
+        run: |
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            pull_request) event=pr ;;
+            push)         event=main ;;
+            schedule)     event=nightly ;;
+            *)            event=nightly ;;
+          esac
+          echo "event=$event" >> "$GITHUB_OUTPUT"
+          node test/browser-matrix/rows.mjs --event "$event" >> "$GITHUB_OUTPUT"
+          echo "rows for $event:" && sed -n 's/^ids=//p' "$GITHUB_OUTPUT" || true
+
+  # One job per row. Rows are parallel JOBS rather than projects in one job
+  # because the suite serialises at workers: 1 (every engine needs a private,
+  # autoplay-enabled context and a full 10-cycle lifecycle), so a single job
+  # would blow its timeout as rows are added.
+  engine:
+    name: ${{ matrix.label }}
+    needs: rows
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.rows.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -59,19 +109,54 @@ jobs:
             echo 'pcm.!default { type null }' | sudo tee /etc/asound.conf >/dev/null
             grep -q 'type null' /etc/asound.conf
           fi
-      - name: Three-engine real RTP audio suite (media + controls/recovery)
-        # run the full three-engine suite, EXCLUDING every forced-TURN spec
-        # (browser-media turn-relay + browser-phone call-controls TURN tests require
-        # provisioned coturn and run in the forced-turn-relay job below).
-        run: npx playwright test --project=chromium --project=firefox --project=webkit --grep-invert "forced TURN relay"
-      - name: Upload Playwright traces on failure
-        if: failure()
+      - name: Run row ${{ matrix.id }}
+        env:
+          # The event travels as a flag, not as MATRIX_EVENT: run-row.mjs owns
+          # that variable and derives the config's view of it, so there is one
+          # source of truth for which rows a run may launch.
+          MATRIX_REPORT_DIR: test-results/browser-matrix
+        run: node test/browser-matrix/run-row.mjs ${{ matrix.id }} --event '${{ needs.rows.outputs.event }}'
+      - name: Upload the row report
+        # NOT failure-only: the publisher needs every row's report to check
+        # completeness, and a failed row's report is the diagnostic.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-traces-${{ github.run_id }}
-          path: test-results/
-          if-no-files-found: ignore
+          name: browser-matrix-${{ matrix.id }}
+          path: test-results/browser-matrix/
+          if-no-files-found: warn
           retention-days: 7
+
+  # The completeness gate. `if: always()` is deliberate: when a row job fails,
+  # this job must still run and report WHICH rows are missing, rather than
+  # skipping the check exactly when it matters.
+  publisher:
+    name: Browser matrix report (completeness gate)
+    needs: [rows, engine]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: browser-matrix-*
+          path: reports
+          merge-multiple: true
+      - name: Merge the row reports and fail if any expected row is absent
+        run: node test/browser-matrix/publish.mjs --in reports --out browser-matrix-report.json --expected '${{ needs.rows.outputs.ids }}'
+      - name: Render the published matrix from this run
+        run: node test/browser-matrix/publish.mjs --docs --in reports --out browser-matrix-report.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: browser-matrix-report
+          path: |
+            browser-matrix-report.json
+            browser-matrix-report.md
+          retention-days: 30
 
   forced-turn-relay:
     name: Forced TURN relay audio

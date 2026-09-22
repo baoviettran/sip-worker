@@ -2,7 +2,7 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
-    include: ['packages/*/test/**/*.test.ts', 'test/compatibility/**/*.test.ts', 'test/matrix-shared/**/*.unit.test.ts', 'test/freeswitch-matrix/**/*.unit.test.ts', 'test/asterisk-matrix/**/*.unit.test.ts', 'test/freeswitch-pilot/**/*.test.ts', 'test/soak/**/*.test.ts', 'test/sipp/**/*.test.ts'],
+    include: ['packages/*/test/**/*.test.ts', 'test/compatibility/**/*.test.ts', 'test/matrix-shared/**/*.unit.test.ts', 'test/freeswitch-matrix/**/*.unit.test.ts', 'test/asterisk-matrix/**/*.unit.test.ts', 'test/freeswitch-pilot/**/*.test.ts', 'test/soak/**/*.test.ts', 'test/sipp/**/*.test.ts', 'test/browser-matrix/**/*.unit.test.ts', 'test/browser-media/**/*.unit.test.ts'],
     // FLOOR, not a convenience. `true` here meant a glob naming a nonexistent
     // file still exited 0, and so did all-unmatched ("No test files found") —
     // a whole tree's unit tests could vanish and the gate stayed green, the

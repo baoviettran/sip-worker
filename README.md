@@ -339,6 +339,19 @@ or published; the three workspaces are the release artifacts.
 - `npm run test:package` – packs each workspace tarball into fresh ESM, CommonJS,
   and TypeScript consumers and exercises every advertised subpath
 
+The browser matrix — every engine row, how each build is provisioned,
+and the version each row must report — is published at
+[`docs/supported-browser-matrix.md`](./docs/supported-browser-matrix.md).
+
+- `npm run test:browsermatrix -- <row-id>` — run one matrix row locally
+  (`npm run test:browsermatrix -- chrome-previous`).
+- `npm run test:browsermatrix:unit` — the unit tests over the row table, the
+  provisioner, the shared launch options, the reporter, and the publisher.
+- `npm run test:browsermatrix:integrity` — the offline integrity gate for the row
+  table, both Playwright configs, the pins, and the CI workflow shape.
+- `npm run test:browsermatrix:docs` — regenerate the published matrix page from the
+  row table.
+
 ## Security status
 
 0.7.0 is an **internal-beta browser phone**, not a completed v1 product and not

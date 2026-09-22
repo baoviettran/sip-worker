@@ -54,7 +54,11 @@
     "test:astmatrix:integrity": "node --test test/asterisk-matrix/*.test.mjs test/matrix-shared/*.test.mjs",
     "test:astmatrix:infra": "npx vitest run --config test/asterisk-matrix/vitest.config.ts test/asterisk-matrix/*.infra.test.ts",
     "test:astmatrix:page": "npx playwright test --config=test/asterisk-matrix/playwright.config.ts",
-    "test:astmatrix": "npm run test:astmatrix:unit && npm run test:astmatrix:integrity && npm run test:astmatrix:infra && npm run test:astmatrix:page"
+    "test:astmatrix": "npm run test:astmatrix:unit && npm run test:astmatrix:integrity && npm run test:astmatrix:infra && npm run test:astmatrix:page",
+    "test:browsermatrix": "node test/browser-matrix/run-row.mjs",
+    "test:browsermatrix:unit": "vitest run test/browser-matrix/*.unit.test.ts",
+    "test:browsermatrix:integrity": "node --test test/browser-matrix/*.test.mjs",
+    "test:browsermatrix:docs": "node test/browser-matrix/publish.mjs --docs --out docs/supported-browser-matrix.md"
   },
   "devDependencies": {
     "@microsoft/api-extractor": "7.58.12",

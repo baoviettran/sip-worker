@@ -11,6 +11,9 @@ packages/*/temp/
 test-results/
 playwright-report/
 blob-report/
+# Browser-matrix vendor artifacts (test/browser-matrix/provision.mjs): unpacked
+# Chrome/Edge/Firefox builds, ~700 MB. Per-run scratch, never a build input.
+.matrix-cache/
 # FreeSWITCH matrix runtime artifacts (fs.log + WAVs per run)
 test/freeswitch-matrix/artifacts/
 # Asterisk matrix runtime artifacts (container log + AMI transcripts per run).

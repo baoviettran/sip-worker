@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { ensureBooted, waitZeroResources } from './harness';
 import type { CallCycleResult, Energy } from './harness';
+import { matchReflexiveToObservation } from './stun-observations.mjs';
 
 /**
  * Two-way real audio across Chromium, Firefox, and WebKit. Each engine:
@@ -70,9 +71,40 @@ test.describe('two-way audio (real RTP, built browser code)', () => {
           (result.stunBindingsServed ?? 0) > 0,
           `${scenario}: STUN server served ≥1 binding request (got ${result.stunBindingsServed})`,
         ).toEqual(true);
-        const libGathered = result.gatheredCandidateTypes?.library ?? [];
-        const peerGathered = result.gatheredCandidateTypes?.peer ?? [];
-        console.log(`[${scenario}] lib gathered=${JSON.stringify(libGathered)} peer gathered=${JSON.stringify(peerGathered)}`);
+
+        // …and the reflexive candidate the library gathered must carry a port
+        // the STUN server OBSERVED: the port in the srflx candidate is the
+        // client socket's own port, so it must appear in the observation set the
+        // responder recorded, coupling the candidate to a binding our responder
+        // really served. The ADDRESS is not checked here, so this does NOT cover
+        // the FreeSWITCH defect class of a fabricated address — that
+        // address-level guarantee lives in test/matrix-shared/stun.ts.
+        //
+        // DELIBERATELY NOT ASSERTED: the selected pair type. Two same-realm
+        // peers always select host/host whatever STUN did (server.mjs documents
+        // the same reason for mapping onto 127.0.0.2), so asserting it would
+        // test the harness rather than the engine.
+        // Both halves come off the plain-data result the page already returns,
+        // read exactly like stunBindingsServed above — no bridge accessor, no
+        // second round trip into the page.
+        const observedPorts = result.stunObservedPorts ?? [];
+        const matched = matchReflexiveToObservation({
+          candidateLines: result.gatheredCandidates?.library ?? [],
+          observedPorts,
+        });
+        // Log on success too, not only in the failure message: the first PR run
+        // is where the per-engine evidence is read, and a green run with no
+        // output would delete it.
+        console.log(
+          `[${scenario}] srflx ports ${JSON.stringify(matched.reflexivePorts)} observed ${JSON.stringify(observedPorts)} ` +
+            `gathered types ${JSON.stringify(result.gatheredCandidateTypes ?? {})}`,
+        );
+        expect(
+          matched.ok,
+          `${scenario}: library gathered a reflexive candidate on a port the STUN server observed ` +
+            `(reason=${matched.reason} reflexive=${JSON.stringify(matched.reflexivePorts)} observed=${JSON.stringify(observedPorts)} ` +
+            `gathered=${JSON.stringify(result.gatheredCandidateTypes?.library ?? [])})`,
+        ).toEqual(true);
       }
 
       // After the clean close the page returns to zero live resources.
