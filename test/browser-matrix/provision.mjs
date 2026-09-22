@@ -18,10 +18,10 @@
 import { execFile } from 'node:child_process';
 import { createWriteStream, mkdirSync, rmSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
+import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import https from 'node:https';
 import { ROWS } from './rows.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -59,17 +59,21 @@ export function extractedExecutablePath(row, cacheDir) {
 }
 
 /**
- * The version a vendor binary prints. Every one of them prints it as the last
- * token of its first non-empty line ("Google Chrome 152.0.7977.82",
- * "Microsoft Edge 153.0.4234.48", "Mozilla Firefox 151.0"). Anything else is a
- * parse failure, never a guess: a silent 'unknown' would turn a broken probe
- * into an indistinguishable-from-success state.
+ * The version a vendor binary prints, as the FIRST token of its first non-empty
+ * line that looks like a version ("Google Chrome 152.0.7977.82",
+ * "Microsoft Edge 153.0.4234.48", "Mozilla Firefox 151.0").
+ *
+ * First matching token, not last: the Linux Edge binary prints a build token
+ * AFTER the version ("Microsoft Edge 152.0.4191.66 unknown"), and taking the
+ * last token read that trailing word. Anything else is a parse failure, never a
+ * guess: a silent 'unknown' would turn a broken probe into an
+ * indistinguishable-from-success state.
  */
 export function parseVersion(stdout) {
   const line = String(stdout).split('\n').map((l) => l.trim()).find(Boolean) ?? '';
   const tokens = line.split(/\s+/);
-  const candidate = tokens[tokens.length - 1] ?? '';
-  if (!/^\d+\.\d+(\.\d+){0,3}$/.test(candidate)) {
+  const candidate = tokens.find((t) => /^\d+\.\d+(\.\d+){0,3}$/.test(t)) ?? '';
+  if (!candidate) {
     throw new Error(`cannot parse a version from ${JSON.stringify(line)}`);
   }
   return candidate;
@@ -104,19 +108,15 @@ export async function provisionRow(row, deps) {
 export function defaultDeps() {
   return {
     cacheDir: resolve(process.env.MATRIX_CACHE_DIR ?? '.matrix-cache'),
-    fetchToFile: (url, dest) =>
-      new Promise((res, rej) => {
-        https
-          .get(url, (response) => {
-            if (response.statusCode !== 200) {
-              response.resume();
-              rej(new Error(`GET ${url} -> HTTP ${response.statusCode}`));
-              return;
-            }
-            pipeline(response, createWriteStream(dest)).then(res, rej);
-          })
-          .on('error', (error) => rej(new Error(`GET ${url} -> ${error.message}`)));
-      }),
+    fetchToFile: async (url, dest) => {
+      // fetch, not https.get: cdn.playwright.dev answers 307 for the
+      // pw-firefox artifact on every pin, and https.get never follows a
+      // redirect — it rejected on statusCode !== 200 and reported the 307 as
+      // if the artifact were unreachable.
+      const response = await fetch(url, { redirect: 'follow' });
+      if (!response.ok) throw new Error(`GET ${url} -> HTTP ${response.status}`);
+      await pipeline(Readable.fromWeb(response.body), createWriteStream(dest));
+    },
     extract: async (archive, destDir) => {
       rmSync(destDir, { recursive: true, force: true });
       mkdirSync(destDir, { recursive: true });

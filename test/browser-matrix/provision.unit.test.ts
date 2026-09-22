@@ -1,7 +1,12 @@
 // test/browser-matrix/provision.unit.test.ts
 import { describe, it, expect, vi } from 'vitest';
+import { createServer } from 'node:http';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { AddressInfo } from 'node:net';
 import { ROWS } from './rows.mjs';
-import { artifactUrl, extractedExecutablePath, parseVersion, provisionRow } from './provision.mjs';
+import { artifactUrl, defaultDeps, extractedExecutablePath, parseVersion, provisionRow } from './provision.mjs';
 
 const row = (id: string) => {
   const found = ROWS.find((r: { id: string }) => r.id === id);
@@ -54,9 +59,72 @@ describe('parseVersion', () => {
     expect(parseVersion('Mozilla Firefox 151.0\n')).toEqual('151.0');
   });
 
+  it('reads the version when the vendor appends a build token after it', () => {
+    // The real Linux Edge binary prints a fourth token, and run 35684742068
+    // failed both edge rows on it: the last token is "unknown", not the version.
+    expect(parseVersion('Microsoft Edge 153.0.4234.48 unknown\n')).toEqual('153.0.4234.48');
+    expect(parseVersion('Microsoft Edge 152.0.4191.66 unknown\n')).toEqual('152.0.4191.66');
+  });
+
   it('throws instead of returning a guess', () => {
     expect(() => parseVersion('')).toThrowError(/cannot parse a version/);
     expect(() => parseVersion('Google Chrome\nsome banner\n')).toThrowError(/cannot parse a version/);
+    expect(() => parseVersion('Microsoft Edge unknown\n')).toThrowError(/cannot parse a version/);
+  });
+});
+
+describe('defaultDeps().fetchToFile', () => {
+  /** A server that 307s /build to /real-artifact and serves it there. */
+  async function redirectingServer() {
+    const hits: string[] = [];
+    const payload = 'zip-bytes';
+    const server = createServer((req, res) => {
+      hits.push(req.url ?? '');
+      if (req.url === '/build') {
+        res.writeHead(307, { location: '/real-artifact' });
+        res.end();
+        return;
+      }
+      if (req.url === '/real-artifact') {
+        res.writeHead(200, { 'content-type': 'application/zip' });
+        res.end(payload);
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    return {
+      hits,
+      payload,
+      base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      close: () => new Promise<void>((done) => server.close(() => done())),
+    };
+  }
+
+  it('follows the redirect the Playwright CDN sends for every firefox build', async () => {
+    // cdn.playwright.dev answers 307 for the pw-firefox artifact on every pin
+    // (verified for 1532 and 1538 on 2026-09-22); run 35684742068 failed
+    // firefox-previous on it, because https.get never follows a redirect.
+    const s = await redirectingServer();
+    const dest = join(mkdtempSync(join(tmpdir(), 'sipw-fetch-')), 'artifact.zip');
+    try {
+      await defaultDeps().fetchToFile(`${s.base}/build`, dest);
+      expect(readFileSync(dest, 'utf8')).toEqual(s.payload);
+      expect(s.hits).toEqual(['/build', '/real-artifact']);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('still fails loudly on a non-ok response', async () => {
+    const s = await redirectingServer();
+    const dest = join(mkdtempSync(join(tmpdir(), 'sipw-fetch-')), 'artifact.zip');
+    try {
+      await expect(defaultDeps().fetchToFile(`${s.base}/missing`, dest)).rejects.toThrowError(/HTTP 404/);
+    } finally {
+      await s.close();
+    }
   });
 });
 
